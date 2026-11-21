@@ -1601,7 +1601,8 @@ class TestHaproxyCfg(base.TestCase):
                     amp, [listener], None, haproxy_versions=['3', '0', '19'],
                     amp_details=None)
                 self.assertIn('acl read method GET\n', rendered)
-                self.assertIn('acl catalog path -m str -- /catalog\n', rendered)
+                self.assertIn('acl catalog path -m str -- /catalog\n',
+                              rendered)
                 self.assertIn('if catalog read\n', rendered)
 
     def test_full_header_rule_and_legacy_header_acl(self):
