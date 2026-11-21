@@ -550,6 +550,8 @@ class JinjaTemplater:
         hostname = getattr(pool, 'backend_tls_hostname', None)
         if hostname is not None:
             ret_value['backend_tls_hostname'] = hostname
+            if not pool.enabled:
+                ret_value['closed'] = True
         members_gen = (mem for mem in pool.members if
                        mem.provisioning_status != constants.PENDING_DELETE)
         members = [self._transform_member(x, feature_compatibility)
