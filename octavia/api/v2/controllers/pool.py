@@ -42,6 +42,18 @@ CONF = cfg.CONF
 LOG = logging.getLogger(__name__)
 
 
+def _validate_backend_h2c(driver, protocol, tls_enabled, *, enrolling):
+    if protocol != constants.PROTOCOL_HTTP or tls_enabled is not False:
+        raise exceptions.ValidationException(detail=_(
+            'backend_h2c requires an HTTP pool with tls_enabled false.'))
+    if (enrolling and constants.GATEWAY_CAPABILITY_BACKEND_H2C not in
+            driver_utils.gateway_capabilities(driver)):
+        raise exceptions.ProviderUnsupportedOptionError(
+            prov=driver.name, user_msg=_(
+                'Cleartext HTTP/2 pool connections are unavailable '
+                'for this provider.'))
+
+
 class PoolsController(base.BaseController):
     RBAC_TYPE = constants.RBAC_POOL
 
@@ -115,12 +127,25 @@ class PoolsController(base.BaseController):
             raise exceptions.ImmutableObject(resource=_('Load Balancer'),
                                              id=lb_id)
 
-    def _validate_create_pool(self, lock_session, pool_dict, listener_id=None):
+    def _validate_create_pool(self, lock_session, pool_dict, listener_id=None,
+                              driver=None):
         """Validate creating pool on load balancer.
 
         Update database for load balancer and (optional) listener based on
         provisioning status.
         """
+        if pool_dict.get('backend_h2c', False) is None:
+            raise exceptions.ValidationException(
+                detail=_('backend_h2c must be true or false.'))
+        if pool_dict.get('backend_h2c'):
+            if driver is None:
+                # Fully populated load balancer creation uses this path too.
+                provider = self._get_db_lb(
+                    lock_session, pool_dict['load_balancer_id']).provider
+                driver = driver_factory.get_driver(provider)
+            _validate_backend_h2c(driver, pool_dict['protocol'],
+                                  pool_dict['tls_enabled'], enrolling=True)
+
         # Make sure we have a client CA if they specify a CRL
         if (pool_dict.get('crl_container_id') and
                 not pool_dict.get('ca_tls_certificate_id')):
@@ -305,7 +330,7 @@ class PoolsController(base.BaseController):
                 listener.provisioning_status = constants.PENDING_UPDATE
 
             db_pool = self._validate_create_pool(
-                context.session, pool_dict, listener_id)
+                context.session, pool_dict, listener_id, driver)
 
             # Prepare the data for the driver data model
             provider_pool = (
@@ -384,6 +409,26 @@ class PoolsController(base.BaseController):
                     session, m))
         db_pool.members = new_members
         return db_pool
+
+    def _validate_h2c_update(self, session, pool_id, pool, driver):
+        if pool.backend_h2c is None:
+            raise exceptions.ValidationException(
+                detail=_('backend_h2c must be true or false.'))
+        if (pool.backend_h2c is wtypes.Unset and
+                pool.tls_enabled is wtypes.Unset and
+                pool.admin_state_up is not True):
+            return
+        current = self.repositories.pool.get_transport_for_update(
+            session, pool_id)
+        enabled = (current.backend_h2c if pool.backend_h2c is wtypes.Unset
+                   else pool.backend_h2c)
+        if enabled:
+            tls = (current.tls_enabled if pool.tls_enabled is wtypes.Unset
+                   else pool.tls_enabled)
+            enrolling = (pool.backend_h2c is True or
+                         (pool.admin_state_up is True and not current.enabled))
+            _validate_backend_h2c(driver, current.protocol, tls,
+                                  enrolling=enrolling)
 
     def _validate_pool_PUT(self, pool, db_pool):
 
@@ -494,6 +539,8 @@ class PoolsController(base.BaseController):
             self._test_lb_and_listener_statuses(
                 context.session, lb_id=db_pool.load_balancer_id,
                 listener_ids=self._get_affected_listener_ids(db_pool))
+
+            self._validate_h2c_update(context.session, id, pool, driver)
 
             # Prepare the data for the driver data model
             pool_dict = pool.to_dict(render_unsets=False)

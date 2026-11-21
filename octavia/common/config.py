@@ -99,6 +99,9 @@ api_opts = [
                        'header operations. Enable only after the Octavia '
                        'services, driver and Amphora images support these '
                        'operations.')),
+    cfg.ListOpt('enabled_backend_h2c_providers', default=[],
+                help=_('Provider driver names whose regional fleets support '
+                       'HTTP/2 prior knowledge on cleartext HTTP pools.')),
     cfg.IntOpt('udp_connect_min_interval_health_monitor',
                default=3,
                help=_("The minimum health monitor delay interval for the "

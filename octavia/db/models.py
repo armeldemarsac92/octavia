@@ -373,6 +373,8 @@ class Pool(base_models.BASE, base_models.IdMixin, base_models.ProjectMixin,
     ca_tls_certificate_id = sa.Column(sa.String(255), nullable=True)
     crl_container_id = sa.Column(sa.String(255), nullable=True)
     tls_enabled = sa.Column(sa.Boolean, default=False, nullable=False)
+    backend_h2c = sa.Column(sa.Boolean, nullable=False, default=False,
+                            server_default=sa.false())
     tls_ciphers = sa.Column(sa.String(2048), nullable=True)
     tls_versions = sa.Column(ScalarListType(), nullable=True)
     alpn_protocols = sa.Column(ScalarListType(), nullable=True)

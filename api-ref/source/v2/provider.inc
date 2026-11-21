@@ -202,6 +202,15 @@ and filtering. Stored values remain readable. Clear a listener
 default with ``default_http_response: null``. Convert a policy to a stock
 action or delete it to remove its stored action data.
 
+``backend_h2c_v1`` enables HTTP/2 prior knowledge from Amphora to members of
+an HTTP pool. Upgrade the regional API services, database schema, workers
+and Amphora fleet before adding the provider name to
+``[api_settings] enabled_backend_h2c_providers``. The pool selects this
+transport with ``backend_h2c: true`` and ``tls_enabled: false``. Removing
+the provider name stops advertisement and admission of new h2c settings.
+Existing pools keep their stored setting. Set it to false or drain those
+pools before rolling back the fleet.
+
 .. rest_status_code:: success ../http-status.yaml
 
    - 200
