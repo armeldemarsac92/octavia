@@ -100,6 +100,16 @@ request must match all the policy's rules to match the policy.
 If you need to express a logical OR operation between rules, then do this by
 creating multiple policies with the same action.
 
+With ``tls_sni_passthrough_v1`` enabled, a TCP listener can route by the
+TLS ClientHello server name. Use ``TLS_SNI`` with ``EQUAL_TO`` and supply an
+exact DNS hostname without a key or inversion. The policy must redirect
+to a TCP pool with ``tls_enabled`` set to ``false``.
+
+.. code-block:: json
+
+   {"rule": {"type": "TLS_SNI", "compare_type": "EQUAL_TO",
+             "value": "a.example.test"}}
+
 .. rest_status_code:: success ../http-status.yaml
 
    - 201

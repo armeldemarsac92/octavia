@@ -105,3 +105,35 @@ responses and weighted targets.
 Removing a provider from the request header option prevents new operations
 and reactivation of stored operations. Patched workers keep rendering
 live configurations while operators clear or retire those policies.
+
+
+TLS passthrough by SNI
+----------------------
+
+The Amphora provider can route a TLS connection on a TCP listener using the
+server name in the ClientHello. TLS terminates at the backend. Use a
+``REDIRECT_TO_POOL`` policy and a rule of type ``TLS_SNI`` with comparison
+``EQUAL_TO``. The target pool must use TCP with ``tls_enabled`` set to
+``false``. A rule takes an exact DNS hostname, compared case-insensitively,
+and accepts neither a key nor inversion. A connection without a matching
+name uses the listener's default pool when one exists and is closed
+otherwise.
+
+The regional opt-in defaults to empty. Apply the Octavia database migration
+``c7e2860f4b41`` and upgrade the API and workers before enabling any provider.
+Verify that existing, new and replacement Amphorae for those providers accept
+the generated HAProxy configuration. Local testing used HAProxy 3.0.19.
+
+Set the exact names as registered in ``enabled_provider_drivers`` on every
+Octavia API replica in the region and reload the configuration.
+
+.. code-block:: ini
+
+   [api_settings]
+   enabled_tls_sni_providers = amphora
+
+An authenticated ``GET /v2/lbaas/providers/amphora/gateway_capabilities`` then
+includes ``tls_sni_passthrough_v1``. Removing the provider name disables new
+SNI policy and rule admission. Updated workers can still render existing
+routes and handle their removal. Remove the SNI policies before downgrading
+the workers.

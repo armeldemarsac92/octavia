@@ -1,0 +1,10 @@
+---
+features:
+  - |
+    Amphora TCP listeners can route TLS connections by exact SNI using
+    TLS_SNI rules and REDIRECT_TO_POOL policies. The backend terminates TLS.
+upgrade:
+  - |
+    Upgrade the Octavia database to revision c7e2860f4b41, then upgrade the
+    API and workers and qualify the Amphora fleet before enrolling providers
+    with [api_settings] enabled_tls_sni_providers. The list defaults to empty.
