@@ -198,17 +198,34 @@ class TestHaproxyAmphoraLoadBalancerDriverTest(base.TestCase):
             amphora.api_version = API_VERSION
         pool = data_models.Pool(id='pool-one', enabled=True,
                                 backend_tls_hostname='backend.example.test')
-        listener = mock.Mock(enabled=True, pools=[pool])
-        loadbalancer = mock.Mock(enabled=True, listeners=[listener],
+        listener = mock.Mock(enabled=True, pools=[pool],
+                             protocol=constants.PROTOCOL_HTTP)
+        loadbalancer = mock.Mock(id='lb', enabled=True, listeners=[listener],
                                  amphorae=amphorae)
         details = self.driver.clients[API_VERSION].get_details
         details.side_effect = [{capability: True}, {}]
-        with mock.patch.object(self.driver, 'update_amphora_listeners') as arm:
-            self.assertRaises(driver_except.AmpVersionUnsupported,
-                              self.driver.update, loadbalancer)
-            arm.assert_not_called()
-        self.assertEqual([mock.call(amp) for amp in amphorae],
-                         details.call_args_list)
+        with (
+            mock.patch.object(self.driver, '_update_amphora_listeners') as arm,
+            mock.patch('octavia.db.api.session') as session,
+            mock.patch('octavia.db.repositories.PoolRepository.'
+                       'set_backend_tls_pool_statuses') as status,
+        ):
+            def assert_preflight(*args, **kwargs):
+                self.assertEqual(2, details.call_count)
+
+            arm.side_effect = assert_preflight
+            self.driver.update(loadbalancer)
+        self.assertEqual(
+            [mock.call(loadbalancer, amp, timeout_dict=None,
+                       amp_details=amp_details,
+                       backend_tls_certs={pool.id: {'closed': True}})
+             for amp, amp_details in zip(amphorae, [{capability: True}, {}])],
+            arm.call_args_list)
+        status.assert_called_once_with(session().begin().__enter__(),
+                                       closed={pool.id}, recovered=set())
+        self.assertEqual(
+            [mock.call(amp, timeout_dict=None) for amp in amphorae],
+            details.call_args_list)
 
     @mock.patch('octavia.amphorae.drivers.haproxy.rest_api_driver.'
                 'HaproxyAmphoraLoadBalancerDriver._process_secret')
@@ -430,7 +447,7 @@ class TestHaproxyAmphoraLoadBalancerDriverTest(base.TestCase):
         listener = self.sl._replace(pools=[pool])
 
         self.assertEqual(
-            {pool.id: {}}, self.driver._process_listener_pool_certs(
+            {}, self.driver._process_listener_pool_certs(
                 listener, self.amp, self.lb.id))
         self.assertEqual([], self.driver.cert_manager.mock_calls)
 

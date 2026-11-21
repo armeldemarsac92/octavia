@@ -1094,9 +1094,11 @@ class MarkLBActiveInDB(BaseDatabaseTask):
             provisioning_status=status)
 
     def _mark_pool_status(self, session, pool, status):
-        self.pool_repo.update(
-            session, pool.id,
-            provisioning_status=status)
+        if status == constants.ACTIVE:
+            self.pool_repo.mark_active(session, pool.id)
+        else:
+            self.pool_repo.update(session, pool.id,
+                                  provisioning_status=status)
         if pool.health_monitor:
             LOG.debug("Marking health monitor of pool %s %s", pool.id, status)
             self._mark_hm_status(session, pool.health_monitor, status)
@@ -2432,9 +2434,7 @@ class MarkPoolActiveInDB(BaseDatabaseTask):
         LOG.debug("Mark ACTIVE in DB for pool id: %s",
                   pool_id)
         with db_apis.session().begin() as session:
-            self.pool_repo.update(session,
-                                  pool_id,
-                                  provisioning_status=constants.ACTIVE)
+            self.pool_repo.mark_active(session, pool_id)
 
     def revert(self, pool_id, *args, **kwargs):
         """Mark the pool as broken
