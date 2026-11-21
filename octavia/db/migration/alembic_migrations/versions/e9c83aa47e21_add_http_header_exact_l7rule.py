@@ -10,7 +10,7 @@
 #    See the License for the specific language governing permissions and
 #    limitations under the License.
 
-"""Register the HTTP_HEADER_EXACT rule and widen its key and value.
+"""Register the HTTP_HEADER_EXACT rule and widen its value.
 
 Revision ID: e9c83aa47e21
 Revises: c7e2860f4b41
@@ -32,8 +32,6 @@ def upgrade():
     value_type = sa.String(4096).with_variant(
         mysql.VARCHAR(4096, charset='utf8mb4'), 'mysql', 'mariadb')
     with op.batch_alter_table('l7rule') as batch_op:
-        batch_op.alter_column('key', existing_type=sa.String(255),
-                              existing_nullable=True, type_=sa.String(256))
         batch_op.alter_column('value', existing_type=sa.String(255),
                               existing_nullable=False, type_=value_type)
     op.bulk_insert(rule_types, [{'name': 'HTTP_HEADER_EXACT'}])

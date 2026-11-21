@@ -112,7 +112,7 @@ Full-value exact request header matching
 
 An L7 rule of type ``HTTP_HEADER_EXACT`` uses comparison ``EQUAL_TO`` on an
 HTTP or terminated HTTPS listener. Its ``key`` is a case-insensitive HTTP
-field name of up to 256 characters. Its ``value`` is a case-sensitive
+field name of up to 255 ASCII characters. Its ``value`` is a case-sensitive
 literal of up to 4096 characters. Internal spaces, tabs and commas are
 part of the value. Surrounding HTTP whitespace is excluded from the field
 content. When a request carries repeated fields with the same name, an
@@ -141,7 +141,8 @@ the workers.
 
 Amphora compares the UTF-8 bytes of the configured value with the request
 field content. A MySQL-compatible database connection must support
-``utf8mb4`` for four-byte characters. The API character limits apply
+``utf8mb4`` for four-byte characters. HAProxy rejects field names over
+255 bytes before evaluating rules. The API value character limit applies
 independently of the byte limits imposed by the HTTP transport, HAProxy
 request buffers and the total size of the request headers.
 
