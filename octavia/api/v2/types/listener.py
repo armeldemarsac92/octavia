@@ -46,6 +46,7 @@ class ListenerResponse(BaseListenerType):
     sni_container_refs = [wtypes.StringType()]
     project_id = wtypes.wsattr(wtypes.StringType())
     default_pool_id = wtypes.wsattr(wtypes.UuidType())
+    default_http_response = wtypes.wsattr(types.FixedHTTPResponse)
     l7policies = wtypes.wsattr([types.IdOnlyType])
     insert_headers = wtypes.wsattr(wtypes.DictType(str, str))
     created_at = wtypes.wsattr(wtypes.datetime.datetime)
@@ -70,6 +71,11 @@ class ListenerResponse(BaseListenerType):
     @classmethod
     def from_db_obj(cls, db_obj):
         result = super().from_db_obj(db_obj)
+        if db_obj.default_http_response is not None:
+            result.default_http_response = types.FixedHTTPResponse(
+                **db_obj.default_http_response)
+        else:
+            result.default_http_response = wtypes.Unset
 
         result.sni_container_refs = [
             sni_container.tls_container_id
@@ -136,6 +142,7 @@ class ListenerPOST(BaseListenerType):
     # TODO(johnsom) Remove after deprecation (R series)
     project_id = wtypes.wsattr(wtypes.StringType(max_length=36))
     default_pool_id = wtypes.wsattr(wtypes.UuidType())
+    default_http_response = wtypes.wsattr(types.FixedHTTPResponse)
     default_pool = wtypes.wsattr(pool_types.PoolSingleCreate)
     l7policies = wtypes.wsattr(
         [l7policy_types.L7PolicySingleCreate], default=[])
@@ -185,6 +192,7 @@ class ListenerPUT(BaseListenerType):
         wtypes.StringType(max_length=255))
     sni_container_refs = [wtypes.StringType(max_length=255)]
     default_pool_id = wtypes.wsattr(wtypes.UuidType())
+    default_http_response = wtypes.wsattr(types.FixedHTTPResponse)
     insert_headers = wtypes.wsattr(
         wtypes.DictType(str, wtypes.StringType(max_length=255)))
     timeout_client_data = wtypes.wsattr(
@@ -236,6 +244,7 @@ class ListenerSingleCreate(BaseListenerType):
         wtypes.StringType(max_length=255))
     sni_container_refs = [wtypes.StringType(max_length=255)]
     default_pool_id = wtypes.wsattr(wtypes.UuidType())
+    default_http_response = wtypes.wsattr(types.FixedHTTPResponse)
     default_pool = wtypes.wsattr(pool_types.PoolSingleCreate)
     l7policies = wtypes.wsattr(
         [l7policy_types.L7PolicySingleCreate], default=[])

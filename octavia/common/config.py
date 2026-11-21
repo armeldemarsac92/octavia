@@ -94,6 +94,13 @@ api_opts = [
                       'If not set, load balancers created without an '
                       'explicit availability zone will have the field '
                       'set to None.')),
+    cfg.ListOpt('enabled_gateway_action_providers', default=[],
+                help=_('Provider driver names whose fleets are compatible '
+                       'with fixed HTTP responses and weighted HTTP targets. '
+                       'Each name must also be enabled and the driver must '
+                       'support the corresponding action. Enable only after '
+                       'all relevant components and Amphora images have '
+                       'been upgraded.')),
     cfg.IntOpt('udp_connect_min_interval_health_monitor',
                default=3,
                help=_("The minimum health monitor delay interval for the "

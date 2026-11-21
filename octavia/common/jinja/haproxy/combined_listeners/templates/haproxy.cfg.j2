@@ -16,7 +16,7 @@
 {% extends 'base.j2' %}
 
 
-{% from 'macros.j2' import frontend_macro, backend_macro %}
+{% from 'macros.j2' import frontend_macro, backend_macro, fixed_response_backend_macro %}
 {% from 'macros.j2' import peers_macro %}
 
 
@@ -53,6 +53,18 @@ backend prometheus-exporter-internal
          {% for listener in loadbalancer.listeners if listener.enabled %}
              {{- frontend_macro(constants, lib_consts, listener, loadbalancer.vip_address,
                                 loadbalancer.additional_vips) }}
+             {% if listener.default_http_status_code is defined %}
+               {{- fixed_response_backend_macro(constants, listener, 'default',
+                                                 listener.default_http_status_code) }}
+             {% endif %}
+             {% for policy in listener.l7policies if policy.fixed_http_status_code is defined %}
+               {{- fixed_response_backend_macro(constants, listener, policy.id,
+                                                 policy.fixed_http_status_code) }}
+             {% endfor %}
+             {% for status_code in listener.weighted_response_codes %}
+               {{- fixed_response_backend_macro(constants, listener,
+                     'weighted-' ~ status_code, status_code) }}
+             {% endfor %}
              {% for pool in listener.pools if pool.enabled %}
                {{- backend_macro(constants, lib_consts, listener, pool, loadbalancer, state_file) }}
              {% endfor %}

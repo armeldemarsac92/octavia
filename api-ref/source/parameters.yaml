@@ -582,6 +582,12 @@ flavor:
   in: body
   required: true
   type: object
+gateway-capabilities:
+  description: |
+    The Gateway API capability identifiers enabled for the provider.
+  in: body
+  required: true
+  type: array
 flavor-capabilities:
   description: |
     The provider flavor capabilities dictionary object.

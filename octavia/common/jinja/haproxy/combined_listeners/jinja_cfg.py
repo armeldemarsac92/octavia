@@ -21,8 +21,10 @@ from octavia_lib.common import constants as lib_consts
 from oslo_log import log as logging
 from oslo_utils import versionutils
 
+from octavia.amphorae.driver_exceptions import exceptions as driver_except
 from octavia.common.config import cfg
 from octavia.common import constants
+from octavia.common import exceptions
 from octavia.common import utils as octavia_utils
 from octavia.common import validate
 from octavia.db import models
@@ -51,6 +53,9 @@ CLIENT_AUTH_MAP = {constants.CLIENT_AUTH_NONE: 'none',
 
 ACTIVE_PENDING_STATUSES = constants.SUPPORTED_PROVISIONING_STATUSES + (
     constants.DEGRADED,)
+
+# HAProxy's rand() reduces a 32-bit draw to the requested interval.
+HAPROXY_MAX_RANDOM_RANGE = 1 << 32
 
 BASE_PATH = '/var/lib/octavia'
 BASE_CRT_DIR = BASE_PATH + '/certs'
@@ -125,7 +130,7 @@ class JinjaTemplater:
             host_amphora, listeners, tls_certs=tls_certs,
             socket_path=socket_path,
             feature_compatibility=feature_compatibility,
-            amp_details=amp_details)
+            amp_details=amp_details, haproxy_version=version)
 
     def _get_template(self):
         """Returns the specified Jinja configuration template."""
@@ -163,7 +168,8 @@ class JinjaTemplater:
     def render_loadbalancer_obj(self, host_amphora, listeners,
                                 tls_certs=None, socket_path=None,
                                 feature_compatibility=None,
-                                amp_details: tp.Optional[dict] = None):
+                                amp_details: tp.Optional[dict] = None,
+                                haproxy_version=None):
         """Renders a templated configuration from a load balancer object
 
         :param host_amphora: The Amphora this configuration is hosted on
@@ -171,6 +177,7 @@ class JinjaTemplater:
         :param tls_certs: Dict of the TLS certificates for the listener
         :param socket_path: The socket path for Haproxy process
         :param amp_details: Detail information from the amphora
+        :param haproxy_version: HAProxy version for compatibility checks
         :return: Rendered configuration
         """
         feature_compatibility = feature_compatibility or {}
@@ -180,6 +187,22 @@ class JinjaTemplater:
             listeners,
             tls_certs,
             feature_compatibility)
+        if (haproxy_version and loadbalancer['enabled'] and
+                not versionutils.is_compatible("2.2.0", haproxy_version,
+                                               same_major=False)):
+            for listener in loadbalancer['listeners']:
+                if listener['enabled'] and (
+                        'default_http_status_code' in listener or any(
+                            'fixed_http_status_code' in policy
+                            for policy in listener['l7policies'])):
+                    raise driver_except.AmpVersionUnsupported(
+                        version=f'HAProxy {haproxy_version}; local HTTP '
+                                'responses require 2.2')
+                if (listener['enabled'] and
+                        'weighted_response_codes' in listener):
+                    raise driver_except.AmpVersionUnsupported(
+                        version=f'HAProxy {haproxy_version}; weighted L7 '
+                                'policies require 2.2')
         if not socket_path:
             socket_path = (f'{self.base_amp_path}/'
                            f'{listeners[0].load_balancer.id}.sock')
@@ -409,6 +432,10 @@ class JinjaTemplater:
             pools.append(self._transform_pool(
                 pool, feature_compatibility, tls_enabled, **kwargs))
         ret_value['pools'] = pools
+        if listener.default_http_response is not None:
+            ret_value['default_http_status_code'] = (
+                validate.fixed_http_status_code(
+                    listener.default_http_response))
         policy_gen = (policy for policy in listener.l7policies if
                       policy.provisioning_status != constants.PENDING_DELETE)
         if listener.default_pool:
@@ -417,10 +444,18 @@ class JinjaTemplater:
                     ret_value['default_pool'] = pool
                     break
 
+        available_pool_ids = {pool['id'] for pool in pools if pool['enabled']}
         l7policies = [self._transform_l7policy(
-                      x, feature_compatibility, tls_enabled, tls_certs)
-                      for x in policy_gen]
+            policy, feature_compatibility, tls_enabled, tls_certs,
+            available_pool_ids) for policy in policy_gen]
         ret_value['l7policies'] = l7policies
+        weighted_policies = [policy for policy in l7policies
+                             if 'weighted_targets' in policy]
+        if weighted_policies:
+            ret_value['weighted_response_codes'] = sorted({
+                target['status_code'] for policy in weighted_policies
+                for target in policy['weighted_targets']
+                if 'status_code' in target})
         return ret_value
 
     def _transform_pool(self, pool, feature_compatibility,
@@ -567,7 +602,8 @@ class JinjaTemplater:
         return value
 
     def _transform_l7policy(self, l7policy, feature_compatibility,
-                            listener_tls_enabled, tls_certs=None):
+                            listener_tls_enabled, tls_certs=None,
+                            available_pool_ids=()):
         """Transforms an L7 policy into an object that will
 
             be processed by the templating system
@@ -605,7 +641,43 @@ class JinjaTemplater:
         l7rules = [self._transform_l7rule(x, feature_compatibility)
                    for x in rule_gen]
         ret_value['l7rules'] = l7rules
+        if l7policy.enabled and l7rules:
+            if l7policy.action == constants.L7POLICY_ACTION_FIXED_RESPONSE:
+                ret_value['fixed_http_status_code'] = (
+                    validate.fixed_http_status_code(l7policy.fixed_response))
+            elif l7policy.action == constants.L7POLICY_ACTION_WEIGHTED_TARGETS:
+                targets, total = self._transform_weighted_targets(
+                    l7policy.targets, available_pool_ids)
+                ret_value['weighted_targets'] = targets
+                ret_value['total_weight'] = total
         return ret_value
+
+    @staticmethod
+    def _transform_weighted_targets(targets, available_pool_ids):
+        intervals = []
+        total = 0
+        for target in targets:
+            weight = target['weight']
+            if type(weight) is not int or weight < 0:
+                raise exceptions.InvalidL7PolicyArgs(
+                    msg='Weighted targets need nonnegative integer weights.')
+            if weight == 0:
+                continue
+            interval = {'first': total, 'last': total + weight - 1}
+            if 'fixed_response' in target:
+                interval['status_code'] = validate.fixed_http_status_code(
+                    target['fixed_response'])
+            elif target['pool_id'] in available_pool_ids:
+                interval['pool_id'] = target['pool_id']
+            else:
+                # Keep the unavailable target's share and terminate here.
+                interval['status_code'] = 503
+            intervals.append(interval)
+            total += weight
+        if not 0 < total <= HAPROXY_MAX_RANDOM_RANGE:
+            raise exceptions.InvalidL7PolicyArgs(
+                msg='Total weight is outside the HAProxy random range.')
+        return intervals, total
 
     def _transform_l7rule(self, l7rule, feature_compatibility):
         """Transforms an L7 rule into an object that will

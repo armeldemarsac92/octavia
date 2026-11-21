@@ -159,3 +159,75 @@ Response Example
 
 .. literalinclude:: examples/provider-availability-zone-capability-show-response.json
    :language: javascript
+
+
+Show Provider Gateway API Capabilities
+======================================
+
+.. rest_method:: GET /v2/lbaas/providers/{provider}/gateway_capabilities
+
+Shows the capabilities for the named provider in the Hibiscus build. The
+response contains only capabilities supported by the driver and enabled by
+the operator for that provider in this region. An enabled provider without
+any available capabilities returns ``{"gateway_capabilities": []}``.
+
+``fixed_http_responses_v1`` enables listener ``default_http_response`` and
+L7 policy ``FIXED_RESPONSE``. Both take a ``{"status_code": 404}`` or
+``{"status_code": 500}`` object. The listener field is mutually exclusive
+with a default pool. The policy uses the ``fixed_response`` field.
+
+``weighted_http_targets_v1`` enables the L7 policy ``WEIGHTED_TARGETS``.
+Its ``targets`` list contains 1 to 16 ordered items. Each item has an
+integer ``weight`` from 0 to 1,000,000 and either a ``pool_id`` on the
+same load balancer or a ``fixed_response``. At least one weight must be
+positive. A matching request selects one target proportionally to its
+weight. A pool target must be created before it is referenced.
+
+These fields require HTTP or terminated HTTPS. Create extended policies
+through the L7 policy endpoint or in the initial load balancer graph. To
+add one to a standalone listener, create the listener first.
+
+Octavia returns HTTP 501 for an otherwise valid request to add or replace
+action values, reactivate an extended action, or add or change its enabled
+matching rules while the capability is unavailable. The three action fields
+are available for projection with ``fields``. Use scalar fields for sorting
+and filtering. Stored values remain readable. Clear a listener
+default with ``default_http_response: null``. Convert a policy to a stock
+action or delete it to remove its stored action data.
+
+.. rest_status_code:: success ../http-status.yaml
+
+   - 200
+
+.. rest_status_code:: error ../http-status.yaml
+
+   - 400
+   - 401
+   - 403
+   - 500
+
+Request
+-------
+
+.. rest_parameters:: ../parameters.yaml
+
+   - provider: path-provider
+
+Response Parameters
+-------------------
+
+.. rest_parameters:: ../parameters.yaml
+
+   - gateway_capabilities: gateway-capabilities
+
+Response Example
+----------------
+
+.. code-block:: json
+
+   {
+     "gateway_capabilities": [
+       "fixed_http_responses_v1",
+       "weighted_http_targets_v1"
+     ]
+   }

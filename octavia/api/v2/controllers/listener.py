@@ -43,6 +43,39 @@ CONF = cfg.CONF
 LOG = logging.getLogger(__name__)
 
 
+def validate_http_policy_options_on_create(
+        driver, listener, *, creating_load_balancer=False):
+    protocol = listener['protocol']
+    default_response = listener.get('default_http_response')
+    validate.validate_default_http_response(
+        protocol, default_response,
+        listener.get('default_pool_id') or listener.get('default_pool'))
+    if default_response is not None:
+        driver_utils.require_fixed_http_responses(driver)
+
+    for policy in listener.get('l7policies') or []:
+        action = policy.get('action')
+        if (action not in (constants.L7POLICY_ACTION_FIXED_RESPONSE,
+                           constants.L7POLICY_ACTION_WEIGHTED_TARGETS) and
+                policy.get('fixed_response') is None and
+                policy.get('targets') is None):
+            continue
+        checked = validate.sanitize_l7policy_api_args(
+            policy.copy(), create=True)
+        driver_utils.require_gateway_policy_action(
+            driver, checked['action'], protocol)
+        if not creating_load_balancer:
+            raise exceptions.ValidationException(
+                detail=_('Create extended policies from the L7 policy '
+                         'endpoint after creating the listener.'))
+        if (action == constants.L7POLICY_ACTION_WEIGHTED_TARGETS and
+                any('pool_id' in target for target in checked['targets'])):
+            raise exceptions.ValidationException(
+                detail=_('Create weighted pool targets from the L7 policy '
+                         'endpoint after creating the load balancer and '
+                         'pools.'))
+
+
 class ListenersController(base.BaseController):
     RBAC_TYPE = constants.RBAC_LISTENER
 
@@ -401,6 +434,7 @@ class ListenersController(base.BaseController):
 
             listener_dict = db_prepare.create_listener(
                 listener.to_dict(render_unsets=True), None)
+            validate_http_policy_options_on_create(driver, listener_dict)
 
             if listener_dict['default_pool_id']:
                 if (listener_dict.get('protocol') ==
@@ -653,11 +687,35 @@ class ListenersController(base.BaseController):
             # Load the driver early as it also provides validation
             driver = driver_factory.get_driver(provider)
 
-            self._test_lb_and_listener_statuses(context.session,
-                                                load_balancer_id, id=id)
+            self._test_lb_and_listener_statuses(
+                context.session, load_balancer_id)
+            db_listener = self.repositories.listener.get_for_update(
+                context.session, id, show_deleted=False)
+
+            listener_dict = listener.to_dict(render_unsets=False)
+            default_http_response = listener_dict.get(
+                'default_http_response', db_listener.default_http_response)
+            reopening = (listener_dict.get('enabled') is True and
+                         not db_listener.enabled)
+            if (reopening or 'default_http_response' in listener_dict or
+                    'default_pool_id' in listener_dict):
+                validate.validate_default_http_response(
+                    db_listener.protocol, default_http_response,
+                    listener_dict.get('default_pool_id',
+                                      db_listener.default_pool_id))
+            if (listener_dict.get('default_http_response') is not None or
+                    (reopening and default_http_response is not None)):
+                driver_utils.require_fixed_http_responses(driver)
+            if reopening:
+                policy_repo = self.repositories.l7policy
+                for action in policy_repo.get_enabled_gateway_actions(
+                        context.session, id):
+                    driver_utils.require_gateway_policy_action(
+                        driver, action, db_listener.protocol)
+
+            db_listener.provisioning_status = constants.PENDING_UPDATE
 
             # Prepare the data for the driver data model
-            listener_dict = listener.to_dict(render_unsets=False)
             listener_dict['id'] = id
 
             provider_listener_dict = (

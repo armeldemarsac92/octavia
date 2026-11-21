@@ -105,18 +105,21 @@ class L7RuleController(base.BaseController):
         l7policy = self._get_db_l7policy(session, self.l7policy_id)
         listener_id = l7policy.listener_id
         load_balancer_id = l7policy.listener.load_balancer_id
-        # Check the parent is not locked for some reason (ERROR, etc.)
-        if l7policy.provisioning_status not in constants.MUTABLE_STATUSES:
-            raise exceptions.ImmutableObject(resource='L7Policy',
-                                             id=self.l7policy_id)
         if not self.repositories.test_and_set_lb_and_listeners_prov_status(
                 session, load_balancer_id,
                 constants.PENDING_UPDATE, constants.PENDING_UPDATE,
-                listener_ids=[listener_id], l7policy_id=self.l7policy_id):
+                listener_ids=[listener_id]):
             LOG.info("L7Rule cannot be created or modified because the "
                      "Load Balancer is in an immutable state")
             raise exceptions.ImmutableObject(resource='Load Balancer',
                                              id=load_balancer_id)
+        l7policy = self.repositories.l7policy.get_for_update(
+            session, self.l7policy_id, show_deleted=False)
+        if l7policy.provisioning_status not in constants.MUTABLE_STATUSES:
+            raise exceptions.ImmutableObject(resource='L7Policy',
+                                             id=self.l7policy_id)
+        l7policy.provisioning_status = constants.PENDING_UPDATE
+        return l7policy
 
     def _check_l7policy_max_rules(self, session):
         """Checks to make sure the L7Policy doesn't have too many rules."""
@@ -178,7 +181,11 @@ class L7RuleController(base.BaseController):
             l7rule_dict = db_prepare.create_l7rule(
                 l7rule.to_dict(render_unsets=True), self.l7policy_id)
 
-            self._test_lb_listener_policy_statuses(context.session)
+            db_l7policy = self._test_lb_listener_policy_statuses(
+                context.session)
+            if l7rule_dict['enabled']:
+                driver_utils.require_gateway_policy_action(
+                    driver, db_l7policy.action, db_l7policy.listener.protocol)
 
             db_l7rule = self._validate_create_l7rule(context.session,
                                                      l7rule_dict)
@@ -218,6 +225,14 @@ class L7RuleController(base.BaseController):
         if db_rule_l7policy_id != self.l7policy_id:
             raise exceptions.NotFound(resource='L7Rule', id=rule_id)
 
+    def _validate_rule_update(self, db_l7rule, updates):
+        new_l7rule = data_models.L7Rule.from_dict(
+            dict(db_l7rule.to_dict(), **updates))
+        try:
+            validate.l7rule_data(new_l7rule)
+        except Exception as e:
+            raise exceptions.L7RuleValidation(error=e)
+
     @wsme_pecan.wsexpose(l7rule_types.L7RuleRootResponse,
                          wtypes.text, body=l7rule_types.L7RuleRootPUT,
                          status_code=200)
@@ -247,22 +262,24 @@ class L7RuleController(base.BaseController):
             if l7rule.invert is None:
                 l7rule.invert = False
 
-            new_l7rule = db_l7rule.to_dict()
-            new_l7rule.update(l7rule.to_dict())
-            new_l7rule = data_models.L7Rule.from_dict(new_l7rule)
-
-            try:
-                validate.l7rule_data(new_l7rule)
-            except Exception as e:
-                raise exceptions.L7RuleValidation(error=e)
-
-            # Load the driver early as it also provides validation
+            l7rule_dict = l7rule.to_dict(render_unsets=False)
+            self._validate_rule_update(db_l7rule, l7rule_dict)
             driver = driver_factory.get_driver(provider)
 
-            self._test_lb_listener_policy_statuses(context.session)
+            db_l7policy = self._test_lb_listener_policy_statuses(
+                context.session)
+            context.session.refresh(db_l7rule, with_for_update=True)
+            self._validate_rule_update(db_l7rule, l7rule_dict)
 
-            # Prepare the data for the driver data model
-            l7rule_dict = l7rule.to_dict(render_unsets=False)
+            match_fields = {'type', 'compare_type', 'key', 'value', 'invert'}
+            enabled = l7rule_dict.get('enabled', db_l7rule.enabled)
+            if enabled and (
+                    not db_l7rule.enabled or any(
+                        field in l7rule_dict and
+                        l7rule_dict[field] != getattr(db_l7rule, field)
+                        for field in match_fields)):
+                driver_utils.require_gateway_policy_action(
+                    driver, db_l7policy.action, db_l7policy.listener.protocol)
             l7rule_dict['id'] = id
             provider_l7rule_dict = (
                 driver_utils.l7rule_dict_to_provider_dict(l7rule_dict))

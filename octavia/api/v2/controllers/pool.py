@@ -260,7 +260,7 @@ class PoolsController(base.BaseController):
             self._auth_validate_action(context, pool.project_id,
                                        constants.RBAC_POST)
 
-            if pool.listener_id and listener:
+            if listener is not None:
                 if listener.protocol == lib_consts.PROTOCOL_PROMETHEUS:
                     raise exceptions.ListenerNoChildren(
                         protocol=lib_consts.PROTOCOL_PROMETHEUS)
@@ -291,19 +291,23 @@ class PoolsController(base.BaseController):
                 raise exceptions.QuotaException(
                     resource=data_models.Pool._name())
 
-            listener_repo = self.repositories.listener
             pool_dict = db_prepare.create_pool(
                 pool.to_dict(render_unsets=True))
 
             listener_id = pool_dict.pop('listener_id', None)
-            if listener_id:
-                if listener_repo.has_default_pool(context.session,
-                                                  listener_id):
-                    raise exceptions.DuplicatePoolEntry()
-
             self._test_lb_and_listener_statuses(
                 context.session, lb_id=pool_dict['load_balancer_id'],
-                listener_ids=[listener_id] if listener_id else [])
+                listener_ids=[])
+
+            if listener_id:
+                listener = self.repositories.listener.get_for_update(
+                    context.session, listener_id, show_deleted=False)
+                if listener.default_pool_id:
+                    raise exceptions.DuplicatePoolEntry()
+                validate.validate_default_http_response(
+                    listener.protocol, listener.default_http_response,
+                    pool_dict['id'])
+                listener.provisioning_status = constants.PENDING_UPDATE
 
             db_pool = self._validate_create_pool(
                 context.session, pool_dict, listener_id)
@@ -556,6 +560,12 @@ class PoolsController(base.BaseController):
             self._test_lb_and_listener_statuses(
                 context.session, lb_id=db_pool.load_balancer_id,
                 listener_ids=self._get_affected_listener_ids(db_pool))
+            weighted_policy_id = (
+                self.repositories.l7policy.get_weighted_policy_using_pool(
+                    context.session, db_pool.id))
+            if weighted_policy_id:
+                raise exceptions.PoolInUseByL7Policy(
+                    id=db_pool.id, l7policy_id=weighted_policy_id)
             self.repositories.pool.update(
                 context.session, db_pool.id,
                 provisioning_status=constants.PENDING_DELETE)

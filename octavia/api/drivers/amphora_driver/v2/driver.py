@@ -63,6 +63,9 @@ VALID_L7POLICY_LISTENER_PROTOCOLS = [
 
 
 class AmphoraProviderDriver(driver_base.ProviderDriver):
+    supports_fixed_http_responses = True
+    supports_weighted_targets = True
+
     def __init__(self):
         super().__init__()
         self.target = messaging.Target(

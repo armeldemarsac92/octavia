@@ -424,12 +424,14 @@ class Listener(BaseDataModel):
                  client_authentication=None, client_crl_container_id=None,
                  allowed_cidrs=None, tls_ciphers=None, tls_versions=None,
                  alpn_protocols=None, hsts_max_age=None,
-                 hsts_include_subdomains=None, hsts_preload=None):
+                 hsts_include_subdomains=None, hsts_preload=None,
+                 default_http_response=None):
         self.id = id
         self.project_id = project_id
         self.name = name
         self.description = description
         self.default_pool_id = default_pool_id
+        self.default_http_response = default_http_response
         self.load_balancer_id = load_balancer_id
         self.protocol = protocol
         self.protocol_port = protocol_port
@@ -715,7 +717,8 @@ class L7Policy(BaseDataModel):
                  enabled=None, l7rules=None, provisioning_status=None,
                  operating_status=None, project_id=None, created_at=None,
                  updated_at=None, redirect_prefix=None, tags=None,
-                 redirect_http_code=None):
+                 redirect_http_code=None, fixed_response=None,
+                 targets=None):
         self.id = id
         self.name = name
         self.description = description
@@ -736,6 +739,8 @@ class L7Policy(BaseDataModel):
         self.redirect_prefix = redirect_prefix
         self.tags = tags
         self.redirect_http_code = redirect_http_code
+        self.fixed_response = fixed_response
+        self.targets = targets or []
 
     def _conditionally_remove_pool_links(self, pool):
         """Removes links to the given pool from parent objects.
@@ -777,7 +782,9 @@ class L7Policy(BaseDataModel):
                 self._conditionally_remove_pool_links(self.redirect_pool)
                 self.redirect_pool = None
                 self.redirect_pool_id = None
-            elif key == 'action' and value == constants.L7POLICY_ACTION_REJECT:
+            elif key == 'action' and value in (
+                    constants.L7POLICY_ACTION_REJECT,
+                    constants.L7POLICY_ACTION_FIXED_RESPONSE):
                 self.redirect_url = None
                 self._conditionally_remove_pool_links(self.redirect_pool)
                 self.redirect_pool = None

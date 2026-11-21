@@ -24,10 +24,12 @@ from oslo_utils import timeutils
 from oslo_utils import uuidutils
 from sqlalchemy.orm import defer
 from sqlalchemy.orm import exc as sa_exception
+from taskflow import engines
 
 from octavia.common import constants
 from octavia.common import data_models
 from octavia.common import exceptions
+from octavia.controller.worker.v2.flows import load_balancer_flows
 from octavia.db import api as db_api
 from octavia.db import models as db_models
 from octavia.db import repositories as repo
@@ -4833,6 +4835,113 @@ class L7PolicyRepositoryTest(BaseRepositoryTest):
                          new_l7policy.action)
         self.assertEqual(1, new_l7policy.position)
         self.assertIsNone(new_l7policy.redirect_url)
+
+    def test_weighted_targets_are_ordered_and_link_all_pools(self):
+        other_pool = self.create_pool(uuidutils.generate_uuid())
+        targets = [
+            {'weight': 4, 'pool_id': self.pool.id},
+            {'weight': 1, 'fixed_response': {'status_code': 500}},
+            {'weight': 0, 'pool_id': other_pool.id},
+        ]
+        policy = self.l7policy_repo.create(
+            self.session, listener_id=self.listener.id,
+            action=constants.L7POLICY_ACTION_WEIGHTED_TARGETS,
+            targets=targets,
+            operating_status=constants.ONLINE,
+            provisioning_status=constants.ACTIVE, enabled=True)
+        self.create_l7rule(uuidutils.generate_uuid(), policy.id)
+        self.session.commit()
+
+        policy_list, _ = self.l7policy_repo.get_all_API_list(
+            self.session, listener_id=self.listener.id)
+        self.assertEqual(targets, policy_list[0].targets)
+        listener = self.listener_repo.get(self.session, id=self.listener.id)
+        self.assertEqual([self.pool.id, other_pool.id],
+                         [pool.id for pool in listener.pools])
+        self.session.expire_all()
+        pools, _ = self.pool_repo.get_all_API_list(
+            self.session, id=other_pool.id)
+        self.assertEqual([listener.id],
+                         [item.id for item in pools[0].listeners])
+        self.session.expire_all()
+
+        self.l7policy_repo.update(self.session, id=policy.id, name='renamed')
+        self.assertEqual(targets, self.l7policy_repo.get(
+            self.session, id=policy.id).targets)
+
+        replacement = [targets[2], targets[1]]
+        self.l7policy_repo.update(
+            self.session, id=policy.id, targets=replacement)
+        self.session.commit()
+        self.assertEqual(replacement, self.l7policy_repo.get(
+            self.session, id=policy.id).targets)
+        self.pool_repo.delete(self.session, id=self.pool.id)
+        self.l7policy_repo.delete(self.session, id=policy.id)
+        self.pool_repo.delete(self.session, id=other_pool.id)
+
+    def test_weighted_targets_reject_deleted_pool_without_changing_order(self):
+        other_pool = self.create_pool(uuidutils.generate_uuid())
+        self.pool_repo.update(self.session, other_pool.id,
+                              provisioning_status=constants.DELETED)
+        targets = [
+            {'weight': 4, 'pool_id': self.pool.id},
+            {'weight': 1, 'fixed_response': {'status_code': 404}},
+        ]
+        policy = self.l7policy_repo.create(
+            self.session, listener_id=self.listener.id,
+            action=constants.L7POLICY_ACTION_WEIGHTED_TARGETS,
+            targets=targets,
+            operating_status=constants.ONLINE,
+            provisioning_status=constants.ACTIVE, enabled=True)
+        self.session.commit()
+
+        self.assertRaises(
+            exceptions.NotFound, self.l7policy_repo.update, self.session,
+            id=policy.id, targets=[targets[1], {
+                'weight': 0, 'pool_id': other_pool.id}])
+        self.session.rollback()
+        self.assertEqual(targets, self.l7policy_repo.get(
+            self.session, id=policy.id).targets)
+
+    def test_load_balancer_cascade_removes_weighted_policy_and_pool(self):
+        conf = self.useFixture(oslo_fixture.Config(CONF))
+        conf.config(group='controller_worker',
+                    network_driver='network_noop_driver',
+                    compute_driver='compute_noop_driver',
+                    event_notifications=False)
+        lb = self.create_loadbalancer(uuidutils.generate_uuid())
+        self.vip_repo.create(self.session, load_balancer_id=lb.id,
+                             ip_address=self.FAKE_IP)
+        self.listener_repo.update(self.session, self.listener.id,
+                                  load_balancer_id=lb.id)
+        self.pool_repo.update(self.session, self.pool.id,
+                              load_balancer_id=lb.id)
+        policy = self.l7policy_repo.create(
+            self.session, listener_id=self.listener.id,
+            action=constants.L7POLICY_ACTION_WEIGHTED_TARGETS,
+            targets=[{'weight': 1, 'pool_id': self.pool.id}],
+            operating_status=constants.ONLINE,
+            provisioning_status=constants.ACTIVE, enabled=True)
+        self.create_l7rule(uuidutils.generate_uuid(), policy.id)
+        self.session.commit()
+
+        load_balancer = {constants.LOADBALANCER_ID: lb.id,
+                         constants.VIP_ADDRESS: self.FAKE_IP}
+        flows = load_balancer_flows.LoadBalancerFlows()
+        flow = flows.get_cascade_delete_load_balancer_flow(
+            load_balancer, [{constants.LISTENER_ID: self.listener.id}],
+            [{constants.POOL_ID: self.pool.id}])
+        engines.run(flow, store={
+            constants.LOADBALANCER: load_balancer,
+            constants.LOADBALANCER_ID: lb.id,
+            constants.PROJECT_ID: lb.project_id,
+            constants.SERVER_GROUP_ID: None,
+        })
+
+        self.assertIsNone(self.l7policy_repo.get(self.session, id=policy.id))
+        self.assertIsNone(self.pool_repo.get(self.session, id=self.pool.id))
+        self.assertEqual(constants.DELETED, self.lb_repo.get(
+            self.session, id=lb.id).provisioning_status)
 
     def test_create_no_id(self):
         listener = self.create_listener(uuidutils.generate_uuid(), 80)

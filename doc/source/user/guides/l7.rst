@@ -164,6 +164,13 @@ notes about how policy position affects listener behavior:
   * ``REDIRECT_TO_POOL`` policies are only evaluated after all of the above,
     and in the order specified by the ``position`` of the policy.
 
+* The Hibiscus build evaluates ``FIXED_RESPONSE`` and ``WEIGHTED_TARGETS``
+  alongside ``REDIRECT_TO_POOL`` in position order. Existing ``REJECT``,
+  ``REDIRECT_TO_URL``, and ``REDIRECT_PREFIX`` policies retain their
+  precedence. A configured listener ``default_http_response`` applies when
+  no policy matches. The operator enables these actions for ready Amphora
+  fleets.
+
 * L7 Policies are evaluated in a specific order (as defined by the ``position``
   attribute), and the first policy that matches a given request will be the one
   whose action is followed.

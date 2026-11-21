@@ -42,6 +42,11 @@ class PaginationHelper:
                             'fields', 'page_reverse',
                             )
 
+    _non_query_fields = {
+        models.L7Policy: {'fixed_response', 'targets'},
+        models.Listener: {'default_http_response'},
+    }
+
     def __init__(self, params, sort_dir=constants.DEFAULT_SORT_DIR):
         """Pagination Helper takes params and a default sort direction
 
@@ -244,6 +249,14 @@ class PaginationHelper:
         :returns: The query with sorting/pagination/filtering added.
         """
 
+        non_query_fields = self._non_query_fields.get(model, ())
+        if (CONF.api_settings.allow_sorting or
+                (CONF.api_settings.allow_pagination and
+                 self.marker is not None)):
+            for key, _direction in self.sort_keys:
+                if key.partition('.')[0] in non_query_fields:
+                    raise exceptions.InvalidSortKey(key=key)
+
         # Add filtering
         if CONF.api_settings.allow_filtering:
             # Exclude (valid) arguments that are not used for data filtering
@@ -278,6 +291,10 @@ class PaginationHelper:
             if 'not-tags-any' in filter_params:
                 tag_params['not-tags-any'] = self._prepare_tags_list(
                     filter_params.pop('not-tags-any'))
+
+            if any(key.partition('.')[0] in non_query_fields
+                   for key in filter_params):
+                raise exceptions.InvalidFilterArgument()
 
             # Drop invalid arguments
             self.filters = {k: v for (k, v) in filter_params.items()
