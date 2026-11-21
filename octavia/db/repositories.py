@@ -1861,7 +1861,7 @@ class L7PolicyRepository(BaseRepository):
             raise exceptions.NotFound(
                 resource=data_models.Pool._name(), id=pool_id)
 
-    def validate_tcp_redirect_pool(self, session, listener, pool_id):
+    def get_redirect_pool_for_update(self, session, listener, pool_id):
         pool = (session.query(models.Pool)
                 .filter_by(id=pool_id, project_id=listener.project_id,
                            load_balancer_id=listener.load_balancer_id)
@@ -1871,8 +1871,41 @@ class L7PolicyRepository(BaseRepository):
         if pool is None:
             raise exceptions.NotFound(
                 resource=data_models.Pool._name(), id=pool_id)
+        return pool
+
+    def validate_tcp_redirect_pool(self, session, listener, pool_id):
+        pool = self.get_redirect_pool_for_update(session, listener, pool_id)
         validate.validate_tcp_redirect_pool_protocol(
             pool.protocol, pool.tls_enabled)
+
+    def has_active_tcp_sni_policy(self, session, load_balancer_id):
+        """Read live routes under the load balancer write lock."""
+        policy = self.model_class
+        listener = models.Listener
+        pool = models.Pool
+        rule = models.L7Rule
+        inactive_statuses = (consts.PENDING_DELETE, consts.DELETED)
+        return (session.query(policy.id)
+                .join(policy.listener)
+                .join(policy.redirect_pool)
+                .join(policy.l7rules)
+                .filter(
+                    listener.load_balancer_id == load_balancer_id,
+                    listener.protocol == consts.PROTOCOL_TCP,
+                    listener.enabled.is_(True),
+                    listener.provisioning_status.notin_(inactive_statuses),
+                    policy.enabled.is_(True),
+                    policy.action == consts.L7POLICY_ACTION_REDIRECT_TO_POOL,
+                    policy.provisioning_status.notin_(inactive_statuses),
+                    pool.enabled.is_(True),
+                    pool.protocol == consts.PROTOCOL_TCP,
+                    pool.tls_enabled.is_(False),
+                    pool.provisioning_status.notin_(inactive_statuses),
+                    rule.enabled.is_(True),
+                    rule.type == consts.L7RULE_TYPE_TLS_SNI,
+                    rule.provisioning_status.notin_(inactive_statuses),
+                )
+                .with_for_update().limit(1).scalar() is not None)
 
     def get_tcp_policy_using_pool(self, session, pool_id):
         model = self.model_class
