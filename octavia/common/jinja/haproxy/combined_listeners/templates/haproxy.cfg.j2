@@ -16,7 +16,7 @@
 {% extends 'base.j2' %}
 
 
-{% from 'macros.j2' import frontend_macro, backend_macro, fixed_response_backend_macro %}
+{% from 'macros.j2' import frontend_macro, backend_macro, closed_backend_macro, fixed_response_backend_macro %}
 {% from 'macros.j2' import peers_macro %}
 
 
@@ -65,8 +65,12 @@ backend prometheus-exporter-internal
                {{- fixed_response_backend_macro(constants, listener,
                      'weighted-' ~ status_code, status_code) }}
              {% endfor %}
-             {% for pool in listener.pools if pool.enabled %}
-               {{- backend_macro(constants, lib_consts, listener, pool, loadbalancer, state_file) }}
+             {% for pool in listener.pools %}
+               {% if pool.enabled %}
+                 {{- backend_macro(constants, lib_consts, listener, pool, loadbalancer, state_file) }}
+               {% elif pool.closed %}
+                 {{- closed_backend_macro(listener, pool) }}
+               {% endif %}
              {% endfor %}
          {% endfor %}
     {% endif %}

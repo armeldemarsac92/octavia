@@ -1,0 +1,12 @@
+#!/bin/bash
+set -eu
+
+binary=/tmp/in_target.d/octavia-haproxy-strict
+if [[ -f "$binary" ]]; then
+    version=$("$binary" -v)
+    if [[ "$version" != "HAProxy version 3.0.19-ade9c1262-octavia-strict-dns-v1 "* ]]; then
+        echo "Expected the Octavia HAProxy strict DNS build" >&2
+        exit 1
+    fi
+    install -m 0755 "$binary" /usr/sbin/haproxy
+fi

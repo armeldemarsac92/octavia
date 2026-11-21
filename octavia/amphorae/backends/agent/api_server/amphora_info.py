@@ -22,6 +22,7 @@ import pyroute2
 import webob
 
 from octavia.amphorae.backends.agent import api_server
+from octavia.amphorae.backends.agent.api_server import haproxy_compatibility
 from octavia.amphorae.backends.agent.api_server import util
 from octavia.amphorae.backends.utils import network_utils
 from octavia.common import constants as consts
@@ -98,6 +99,8 @@ class AmphoraInfo:
                 'topology_status': consts.TOPOLOGY_STATUS_OK,
                 'listeners': listeners,
                 'packages': {}}
+        if haproxy_compatibility.supports_backend_tls_hostname():
+            body[consts.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME] = True
         if extend_body:
             body.update(extend_body)
         return webob.Response(json=body)

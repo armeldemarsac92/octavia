@@ -1,0 +1,21 @@
+---
+features:
+  - |
+    HTTP pools can set ``backend_tls_hostname`` to send a fixed backend TLS
+    SNI and authenticate against a DNS subject alternative name in the backend
+    certificate, using an explicit pool CA reference. The regional provider
+    advertises ``backend_tls_hostname_v1`` when an operator opts in.
+  - |
+    When a protected pool cannot load its TLS credentials or an Amphora in
+    the pair lacks strict DNS support, the provider configures an empty
+    backend and marks the affected pool provisioning status ``ERROR``.
+    Matching HTTP requests receive 503. Subsequent successful deployment
+    can restore the pool. An administratively disabled HTTP pool with the
+    reserved controller tag ``gateway-api-openstack.backend-tls=v1`` also
+    keeps its empty backend selected while backend TLS is being enrolled
+    or removed, even when its hostname is unset.
+upgrade:
+  - |
+    Enable ``enabled_backend_tls_hostname_providers`` after upgrading the
+    database, octavia-lib, Octavia services and the regional Amphora fleet
+    with the strict DNS HAProxy build described in the image element.

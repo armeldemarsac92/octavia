@@ -15,9 +15,22 @@
 import re
 import subprocess
 
+from oslo_config import cfg
 from oslo_log import log as logging
 
 LOG = logging.getLogger(__name__)
+CONF = cfg.CONF
+
+
+def supports_backend_tls_hostname():
+    try:
+        output = subprocess.check_output(
+            [CONF.haproxy_amphora.haproxy_cmd, '-v'],
+            stderr=subprocess.STDOUT, encoding='utf-8', timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return output.startswith(
+        'HAProxy version 3.0.19-ade9c1262-octavia-strict-dns-v1 ')
 
 
 def get_haproxy_versions():

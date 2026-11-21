@@ -171,6 +171,16 @@ backend {{ fixed_response_backend_name(constants, listener, response_id) }}
 {% endmacro %}
 
 
+{% macro closed_backend_macro(listener, pool) %}
+{# HAProxy returns 503 for an empty HTTP backend, including older versions. #}
+backend {{ pool.id }}:{{ listener.id }}
+    mode {{ listener.protocol_mode }}
+    timeout connect {{ listener.timeout_member_connect }}
+    timeout server {{ listener.timeout_member_data }}
+
+{% endmacro %}
+
+
 {% macro l7policy_rules_macro(constants, l7policy) %}
     {% for l7rule in l7policy.l7rules %}
         {{- l7rule_macro(constants, l7rule) -}}
@@ -187,7 +197,8 @@ backend {{ fixed_response_backend_name(constants, listener, response_id) }}
     {% if l7policy.weighted_targets is defined or
           l7policy.fixed_http_status_code is defined or
           (l7policy.action == constants.L7POLICY_ACTION_REDIRECT_TO_POOL and
-           l7policy.redirect_pool and l7policy.redirect_pool.enabled) %}
+           l7policy.redirect_pool and
+           (l7policy.redirect_pool.enabled or l7policy.redirect_pool.closed)) %}
     http-request set-var(txn.octavia_l7_policy) str({{ l7policy.id }}) if !{ var(txn.octavia_l7_policy) -m found }{{ l7rule_list_macro(l7policy) }}
         {% if l7policy.weighted_targets is defined %}
     http-request set-var(txn.octavia_weighted_draw) rand({{ l7policy.total_weight }}) if {{ selected_policy_match_macro(l7policy.id) }}
@@ -207,7 +218,8 @@ backend {{ fixed_response_backend_name(constants, listener, response_id) }}
     http-request deny if{{ l7rule_list_macro(l7policy) }}
     {% elif l7policy.action == constants.L7POLICY_ACTION_REDIRECT_TO_URL %}
     redirect {{- redirect_http_code_opt }} location {{ l7policy.redirect_url }} if{{ l7rule_list_macro(l7policy) }}
-    {% elif l7policy.action == constants.L7POLICY_ACTION_REDIRECT_TO_POOL and l7policy.redirect_pool.enabled %}
+    {% elif l7policy.action == constants.L7POLICY_ACTION_REDIRECT_TO_POOL and
+            (l7policy.redirect_pool.enabled or l7policy.redirect_pool.closed) %}
     use_backend {{ l7policy.redirect_pool.id }}:{{ listener.id }} if{{ l7rule_list_macro(l7policy) }}
     {% elif l7policy.action == constants.L7POLICY_ACTION_FIXED_RESPONSE %}
     {# Keep status responses in the same ordered switching stage as pools. #}
@@ -269,7 +281,8 @@ frontend {{ listener.id }}
     {% endfor %}
     {% if listener.default_http_status_code is defined %}
     default_backend {{ fixed_response_backend_name(constants, listener, 'default') }}
-    {% elif listener.default_pool and listener.default_pool.enabled %}
+    {% elif listener.default_pool and
+            (listener.default_pool.enabled or listener.default_pool.closed) %}
     default_backend {{ listener.default_pool.id }}:{{ listener.id }}
     {% endif %}
     timeout client {{ listener.timeout_client_data }}
@@ -303,7 +316,9 @@ frontend {{ listener.id }}
         {% else %}
             {% set alpn_opt = "" %}
         {% endif %}
-        {% if pool.health_monitor.type == constants.HEALTH_MONITOR_HTTPS %}
+        {% if pool.backend_tls_hostname %}
+            {% set monitor_ssl_opt = " check-ssl check-sni %s"|format(pool.backend_tls_hostname) %}
+        {% elif pool.health_monitor.type == constants.HEALTH_MONITOR_HTTPS %}
             {% set monitor_ssl_opt = " check-ssl verify none" %}
         {% else %}
             {% set monitor_ssl_opt = "" %}
@@ -345,7 +360,12 @@ frontend {{ listener.id }}
     {% endif %}
     {% if pool.tls_enabled %}
         {% set def_opt_prefix = " ssl" %}
-        {% set def_sni_opt = " sni ssl_fc_sni" %}
+        {% if pool.backend_tls_hostname %}
+            {% set def_sni_opt = " sni str(%s) verifyhost-strict %s"|format(
+                pool.backend_tls_hostname, pool.backend_tls_hostname) %}
+        {% else %}
+            {% set def_sni_opt = " sni ssl_fc_sni" %}
+        {% endif %}
     {% else %}
         {% set def_opt_prefix = "" %}
         {% set def_sni_opt = "" %}
@@ -360,7 +380,7 @@ frontend {{ listener.id }}
         {% set def_verify_opt = " verify required" %}
         {% if pool.crl %}
             {% set crl_opt = " crl-file %s"|format(pool.crl) %}
-        {% else %}
+        {% elif not pool.backend_tls_hostname %}
             {% set def_verify_opt = "" %}
         {% endif %}
     {% elif pool.tls_enabled %}

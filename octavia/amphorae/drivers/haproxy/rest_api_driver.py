@@ -21,6 +21,7 @@ import time
 from typing import Optional
 import warnings
 
+from cryptography import x509
 from oslo_context import context as oslo_context
 from oslo_log import log as logging
 import requests
@@ -32,10 +33,12 @@ from octavia.amphorae.drivers.haproxy import exceptions as exc
 from octavia.amphorae.drivers.keepalived import vrrp_rest_driver
 from octavia.common.config import cfg
 from octavia.common import constants as consts
+from octavia.common import exceptions
 import octavia.common.jinja.haproxy.combined_listeners.jinja_cfg as jinja_combo
 from octavia.common.jinja.lvs import jinja_cfg as jinja_udp_cfg
 from octavia.common.tls_utils import cert_parser
 from octavia.common import utils
+from octavia.common import validate
 from octavia.db import api as db_api
 from octavia.db import models as db_models
 from octavia.db import repositories as repo
@@ -131,11 +134,26 @@ class HaproxyAmphoraLoadBalancerDriver(
 
         Updates the configuration of the listeners on a single amphora.
         """
-        # if the amphora does not yet have listeners, no need to update them.
+        if amphora is None or amphora.status == consts.DELETED:
+            return
+
+        opted_in, protected = self._backend_tls_pools(loadbalancer)
+        if opted_in:
+            peers = {amp.id: amp for amp in loadbalancer.amphorae
+                     if amp.status != consts.DELETED}
+            peers[amphora.id] = amphora
+            self._update_backend_tls_listeners(
+                loadbalancer, [amphora], peers.values(), protected,
+                timeout_dict=timeout_dict)
+        else:
+            self._update_amphora_listeners(
+                loadbalancer, amphora, timeout_dict=timeout_dict)
+
+    def _update_amphora_listeners(
+            self, loadbalancer, amphora, timeout_dict=None, *,
+            amp_details=None, backend_tls_certs=None):
         if not loadbalancer.listeners:
             LOG.debug('No listeners found to update.')
-            return
-        if amphora is None or amphora.status == consts.DELETED:
             return
 
         # Check which HAProxy version is on the amp
@@ -145,7 +163,7 @@ class HaproxyAmphoraLoadBalancerDriver(
         self._populate_amphora_api_version(amphora)
 
         has_tcp = False
-        certs = {}
+        certs = dict(backend_tls_certs or {})
         listeners_to_update = []
         for listener in loadbalancer.listeners:
             LOG.debug("%s updating listener %s on amphora %s",
@@ -194,8 +212,9 @@ class HaproxyAmphoraLoadBalancerDriver(
         if has_tcp:
             if listeners_to_update:
                 # Generate HaProxy configuration from listener object
-                amp_details = self.clients[amphora.api_version].get_details(
-                    amphora)
+                if amp_details is None:
+                    client = self.clients[amphora.api_version]
+                    amp_details = client.get_details(amphora)
                 config = self.jinja_combo.build_config(
                     host_amphora=amphora, listeners=listeners_to_update,
                     tls_certs=certs,
@@ -230,9 +249,96 @@ class HaproxyAmphoraLoadBalancerDriver(
                     amp, listener.id)
 
     def update(self, loadbalancer):
-        for amphora in loadbalancer.amphorae:
-            if amphora.status != consts.DELETED:
-                self.update_amphora_listeners(loadbalancer, amphora)
+        amphorae = [amphora for amphora in loadbalancer.amphorae
+                    if amphora.status != consts.DELETED]
+        opted_in, protected = self._backend_tls_pools(loadbalancer)
+        if opted_in and amphorae:
+            self._update_backend_tls_listeners(
+                loadbalancer, amphorae, amphorae, protected)
+        else:
+            for amphora in amphorae:
+                self._update_amphora_listeners(loadbalancer, amphora)
+
+    @staticmethod
+    def _backend_tls_pools(loadbalancer):
+        opted_in = False
+        pools = {}
+        for listener in loadbalancer.listeners:
+            if listener.protocol in consts.LVS_PROTOCOLS:
+                continue
+            for pool in listener.pools:
+                if (getattr(pool, 'backend_tls_hostname', None) is None and
+                        not utils.is_disabled_backend_tls_pool(pool)):
+                    continue
+                opted_in = True
+                if (loadbalancer.enabled and listener.enabled and
+                        pool.enabled and pool.provisioning_status not in
+                        (consts.PENDING_DELETE, consts.DELETED)):
+                    pools[pool.id] = (listener, pool)
+        return opted_in, pools
+
+    def _update_backend_tls_listeners(self, loadbalancer, amphorae, peers,
+                                      protected, timeout_dict=None):
+        # Preflight the entire pair and stage the trust material before any
+        # reload. Both amphorae use an empty backend if either lacks support.
+        details = {}
+        capability = consts.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME
+        for amphora in peers if protected else amphorae:
+            try:
+                self._populate_amphora_api_version(amphora, timeout_dict)
+                client = self.clients[amphora.api_version]
+                detail = client.get_details(amphora, timeout_dict=timeout_dict)
+                details[amphora.id] = (
+                    detail if isinstance(detail, dict) else {})
+            except (driver_except.AmphoraDriverError, exc.APIException,
+                    requests.RequestException, ValueError):
+                details[amphora.id] = {}
+            if protected and details[amphora.id].get(capability) is not True:
+                LOG.warning('Strict backend TLS support could not be '
+                            'confirmed on amphora %s.', amphora.id)
+
+        supported = all(detail.get(capability) is True
+                        for detail in details.values())
+        certs = {}
+        for pool_id, (listener, pool) in protected.items():
+            if supported:
+                try:
+                    for amphora in amphorae:
+                        certs[pool_id] = self._process_pool_certs(
+                            listener, pool, amphora, loadbalancer.id)
+                    continue
+                except Exception as error:
+                    LOG.warning('Backend TLS pool %s will close because its '
+                                'TLS configuration could not be prepared '
+                                '(%s).', pool_id, type(error).__name__)
+            certs[pool_id] = {'closed': True}
+
+        reload_error = None
+        for amphora in amphorae:
+            try:
+                self._update_amphora_listeners(
+                    loadbalancer, amphora, timeout_dict=timeout_dict,
+                    amp_details=details[amphora.id], backend_tls_certs=certs)
+            except Exception as error:
+                LOG.warning('Could not reload listeners on amphora %s (%s).',
+                            amphora.id, type(error).__name__)
+                if reload_error is None:
+                    reload_error = error
+
+        closed = {pool_id for pool_id, material in certs.items()
+                  if material.get('closed')}
+        recovered = set()
+        if reload_error is None and len(amphorae) == len(peers):
+            recovered = {pool_id for pool_id, (_, pool) in protected.items()
+                         if pool_id not in closed and
+                         pool.provisioning_status == consts.ERROR}
+        if closed or recovered:
+            pool_repo = repo.PoolRepository()
+            with db_api.session().begin() as session:
+                pool_repo.set_backend_tls_pool_statuses(
+                    session, closed=closed, recovered=recovered)
+        if reload_error is not None:
+            raise reload_error
 
     def upload_cert_amp(self, amp, pem):
         LOG.debug("Amphora %s updating cert in REST driver "
@@ -470,7 +576,8 @@ class HaproxyAmphoraLoadBalancerDriver(
                 self._upload_cert(amphora, obj_id, crt_list, md5sum, name)
         return {'tls_cert': tls_cert, 'sni_certs': sni_certs}
 
-    def _process_secret(self, listener, secret_ref, amphora=None, obj_id=None):
+    def _process_secret(self, listener, secret_ref, amphora=None, obj_id=None,
+                        *, validate_pem=None):
         """Get the secret from the cert manager and upload it to the amp.
 
         :returns: The filename of the secret in the amp.
@@ -483,6 +590,8 @@ class HaproxyAmphoraLoadBalancerDriver(
             secret = secret.encode('utf-8')
         except AttributeError:
             pass
+        if validate_pem is not None:
+            validate_pem(secret)
         md5sum = hashlib.md5(
             secret, usedforsecurity=False).hexdigest()  # nosec
         id = hashlib.sha1(secret).hexdigest()  # nosec
@@ -499,20 +608,34 @@ class HaproxyAmphoraLoadBalancerDriver(
         #         'ca_cert': ca_cert_full_filename,
         #         'crl': crl_full_filename}}
         pool_certs_dict = {}
-        for pool in listener.pools:
-            if pool.id not in pool_certs_dict:
-                pool_certs_dict[pool.id] = self._process_pool_certs(
-                    listener, pool, amphora, obj_id)
+        pools = {pool.id: pool for pool in listener.pools}
         for l7policy in listener.l7policies:
-            if (l7policy.redirect_pool and
-                    l7policy.redirect_pool.id not in pool_certs_dict):
-                pool_certs_dict[l7policy.redirect_pool.id] = (
-                    self._process_pool_certs(listener, l7policy.redirect_pool,
-                                             amphora, obj_id))
+            if l7policy.redirect_pool:
+                pools.setdefault(l7policy.redirect_pool.id,
+                                 l7policy.redirect_pool)
+        for pool in pools.values():
+            # Protected pools are staged once for the pair, independently of
+            # the listener's own credentials and the legacy pool path.
+            if getattr(pool, 'backend_tls_hostname', None) is not None:
+                continue
+            pool_certs_dict[pool.id] = self._process_pool_certs(
+                listener, pool, amphora, obj_id)
         return pool_certs_dict
 
     def _process_pool_certs(self, listener, pool, amphora, obj_id):
         pool_cert_dict = {}
+        if utils.is_disabled_backend_tls_pool(pool):
+            return pool_cert_dict
+        hostname = getattr(pool, 'backend_tls_hostname', None)
+        if hostname is not None and (
+                not validate.is_exact_sni_name(hostname) or
+                pool.protocol != consts.PROTOCOL_HTTP or
+                pool.tls_enabled is not True or
+                not pool.ca_tls_certificate_id or
+                getattr(pool, 'backend_h2c', False)):
+            raise exceptions.ValidationException(detail=(
+                'Missing or invalid backend TLS identity or trust '
+                'configuration.'))
 
         # Handle the client cert(s) and key
         if pool.tls_certificate_id:
@@ -532,13 +655,19 @@ class HaproxyAmphoraLoadBalancerDriver(
             pool_cert_dict['client_cert'] = os.path.join(
                 CONF.haproxy_amphora.base_cert_dir, obj_id, name)
         if pool.ca_tls_certificate_id:
+            kwargs = {}
+            if hostname is not None:
+                kwargs['validate_pem'] = x509.load_pem_x509_certificates
             name = self._process_secret(listener, pool.ca_tls_certificate_id,
-                                        amphora, obj_id)
+                                        amphora, obj_id, **kwargs)
             pool_cert_dict['ca_cert'] = os.path.join(
                 CONF.haproxy_amphora.base_cert_dir, obj_id, name)
         if pool.crl_container_id:
+            kwargs = {}
+            if hostname is not None:
+                kwargs['validate_pem'] = x509.load_pem_x509_crl
             name = self._process_secret(listener, pool.crl_container_id,
-                                        amphora, obj_id)
+                                        amphora, obj_id, **kwargs)
             pool_cert_dict['crl'] = os.path.join(
                 CONF.haproxy_amphora.base_cert_dir, obj_id, name)
 
@@ -830,8 +959,8 @@ class AmphoraAPIClient1_0(AmphoraAPIClientBase):
             return r.json()
         return None
 
-    def get_details(self, amp):
-        r = self.get(amp, "details")
+    def get_details(self, amp, timeout_dict=None):
+        r = self.get(amp, "details", timeout_dict=timeout_dict)
         if exc.check_exception(r):
             return r.json()
         return None

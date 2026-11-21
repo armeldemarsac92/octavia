@@ -125,11 +125,11 @@ class Loadbalancer:
             file.write(new_config)
 
         # use haproxy to check the config
-        cmd = (f"haproxy -c -L {peer_name} -f {name} -f "
-               f"{consts.HAPROXY_USER_GROUP_CFG}")
+        cmd = [util.CONF.haproxy_amphora.haproxy_cmd, '-c', '-L', peer_name,
+               '-f', name, '-f', consts.HAPROXY_USER_GROUP_CFG]
 
         try:
-            subprocess.check_output(cmd.split(), stderr=subprocess.STDOUT,
+            subprocess.check_output(cmd, stderr=subprocess.STDOUT,
                                     encoding='utf-8')
         except subprocess.CalledProcessError as e:
             LOG.error("Failed to verify haproxy file: %s %s", e, e.output)

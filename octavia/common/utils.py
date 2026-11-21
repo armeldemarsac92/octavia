@@ -45,6 +45,14 @@ def get_hostname():
     return socket.gethostname()
 
 
+def is_disabled_backend_tls_pool(pool):
+    return not pool.enabled and (
+        getattr(pool, 'backend_tls_hostname', None) is not None or
+        (pool.protocol == constants.PROTOCOL_HTTP and
+         constants.GATEWAY_BACKEND_TLS_POOL_TAG in
+         (getattr(pool, 'tags', None) or ())))
+
+
 def base64_sha1_string(string_to_hash):
     """Get a b64-encoded sha1 hash of a string. Not intended to be secure!"""
     # TODO(rm_work): applying nosec here because this is not intended to be

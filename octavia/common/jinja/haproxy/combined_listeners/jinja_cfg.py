@@ -208,6 +208,27 @@ class JinjaTemplater:
                     raise driver_except.AmpVersionUnsupported(
                         version=f'HAProxy {haproxy_version}; request header '
                                 'operations require 2.2')
+        if loadbalancer['enabled']:
+            for listener in loadbalancer['listeners']:
+                if not listener['enabled']:
+                    continue
+                for pool in listener['pools']:
+                    hostname = pool.get('backend_tls_hostname')
+                    if not pool['enabled'] or hostname is None:
+                        continue
+                    if (amp_details or {}).get(
+                            constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME
+                    ) is not True:
+                        raise driver_except.AmpVersionUnsupported(
+                            version='HAProxy requires strict backend DNS '
+                                    'authentication support')
+                    if (not validate.is_exact_sni_name(hostname) or
+                            pool['tls_enabled'] is not True or
+                            not pool.get('ca_cert') or
+                            pool.get('backend_h2c')):
+                        raise exceptions.ValidationException(detail=(
+                            'Missing or invalid backend TLS identity or '
+                            'trust configuration.'))
         if not socket_path:
             socket_path = (f'{self.base_amp_path}/'
                            f'{listeners[0].load_balancer.id}.sock')
@@ -526,6 +547,14 @@ class JinjaTemplater:
             'crl_path': '',
             'tls_enabled': pool.tls_enabled
         }
+        hostname = getattr(pool, 'backend_tls_hostname', None)
+        if hostname is not None:
+            ret_value['backend_tls_hostname'] = hostname
+        if (octavia_utils.is_disabled_backend_tls_pool(pool) or
+                (pool_tls_certs and pool_tls_certs.get('closed'))):
+            ret_value['closed'] = True
+            ret_value['enabled'] = False
+            return ret_value
         members_gen = (mem for mem in pool.members if
                        mem.provisioning_status != constants.PENDING_DELETE)
         members = [self._transform_member(x, feature_compatibility)
