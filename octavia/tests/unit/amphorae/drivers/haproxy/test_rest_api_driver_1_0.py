@@ -420,6 +420,20 @@ class TestHaproxyAmphoraLoadBalancerDriverTest(base.TestCase):
 
         self.assertEqual(ref_cert_dict, result)
 
+    def test_disabled_protected_pool_skips_certificates(self):
+        pool = data_models.Pool(
+            id='protected-pool', enabled=False, tls_enabled=True,
+            backend_tls_hostname='backend.example.test',
+            tls_certificate_id='unavailable-client-cert',
+            ca_tls_certificate_id='unavailable-ca',
+            crl_container_id='unavailable-crl')
+        listener = self.sl._replace(pools=[pool])
+
+        self.assertEqual(
+            {pool.id: {}}, self.driver._process_listener_pool_certs(
+                listener, self.amp, self.lb.id))
+        self.assertEqual([], self.driver.cert_manager.mock_calls)
+
     @mock.patch('octavia.amphorae.drivers.haproxy.rest_api_driver.'
                 'HaproxyAmphoraLoadBalancerDriver._process_secret')
     @mock.patch('octavia.amphorae.drivers.haproxy.rest_api_driver.'

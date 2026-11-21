@@ -922,6 +922,60 @@ class TestHaproxyCfg(base.TestCase):
                       config)
         self.assertNotIn('verify none', config)
 
+    def test_disabled_protected_pool_keeps_its_l7_match(self):
+        listener = sample_configs_combined.sample_listener_tuple(l7=True)
+        healthy, target = listener.pools
+        policy = listener.l7policies[0]._replace(
+            action=constants.L7POLICY_ACTION_REDIRECT_TO_POOL,
+            l7rules=[sample_configs_combined.sample_l7rule_tuple(
+                'protected-path', type=constants.L7RULE_TYPE_PATH,
+                compare_type=constants.L7RULE_COMPARE_TYPE_EQUAL_TO,
+                value='/protected')])
+        # Both policies match. A closed pool must also prevent a lower
+        # weighted policy from winning the same request.
+        fallback = policy._replace(
+            id='fallback', action=constants.L7POLICY_ACTION_WEIGHTED_TARGETS,
+            redirect_pool=None,
+            l7rules=[policy.l7rules[0]._replace(id='fallback-path')],
+            targets=[{'weight': 1, 'pool_id': healthy.id}])
+        amp = sample_configs_combined.sample_amphora_tuple()
+        backend = f'{target.id}:{listener.id}'
+
+        for hostname in ('backend.example.test', None):
+            with self.subTest(hostname=hostname):
+                disabled = SimpleNamespace(**dict(
+                    target._asdict(), enabled=False, tls_enabled=True,
+                    backend_tls_hostname=hostname,
+                    ca_tls_certificate_id='unavailable-ca'))
+                updated = listener._replace(
+                    pools=[healthy, disabled], default_pool=healthy,
+                    l7policies=[policy._replace(redirect_pool=disabled),
+                                fallback])
+                rendered = self.jinja_cfg.build_config(
+                    amp, [updated], None, haproxy_versions=['3', '0', '19'],
+                    amp_details={})
+                frontend, _, backends = rendered.partition('\nbackend ')
+                protected_route = f'use_backend {backend} if protected-path'
+                self.assertIn(
+                    f'default_backend {healthy.id}:{listener.id}', frontend)
+                self.assertNotIn('verifyhost-strict', rendered)
+                self.assertNotIn('ca-file', rendered)
+                if hostname is not None:
+                    self.assertIn(protected_route, frontend)
+                    self.assertIn(
+                        f'str({policy.id}) if !{{ var(txn.octavia_l7_policy) '
+                        '-m found } protected-path', frontend)
+                    routes = [line.strip() for line in frontend.splitlines()
+                              if line.lstrip().startswith('use_backend ')]
+                    self.assertEqual(protected_route, routes[0])
+                    _, _, section = backends.partition(f'{backend}\n')
+                    section = section.partition('\nbackend ')[0]
+                    self.assertIn('mode http', section)
+                    self.assertNotIn('\n    server ', section)
+                else:
+                    self.assertNotIn(protected_route, frontend)
+                    self.assertNotIn(f'{backend}\n', backends)
+
     def test_render_template_https_real_monitor(self):
         fe = ("frontend sample_listener_id_1\n"
               "    maxconn {maxconn}\n"
