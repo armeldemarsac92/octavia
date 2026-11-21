@@ -2781,6 +2781,60 @@ class TestPool(base.BaseAPITest):
                                          res.json['faultstring'])
                     self.assert_correct_status(lb_id=self.lb_id)
 
+    @mock.patch.object(noop_driver.NoopProviderDriver, 'supports_backend_h2c',
+                       True, create=True)
+    def test_backend_h2c_enrollment_and_clear(self):
+        args = (self.lb_id, constants.PROTOCOL_HTTP,
+                constants.LB_ALGORITHM_ROUND_ROBIN)
+        self.create_pool(*args, backend_h2c=True, status=501)
+        self.conf.config(group='api_settings',
+                         enabled_backend_h2c_providers=['noop_driver'])
+        pool = self.create_pool(*args, backend_h2c=True)['pool']
+        self.assertIs(True, pool['backend_h2c'])
+        self.set_lb_status(self.lb_id)
+        path = self.POOL_PATH.format(pool_id=pool['id'])
+        self.put(path, {'pool': {'tls_enabled': True}}, status=400)
+        self.put(path, {'pool': {'admin_state_up': False}})
+        self.set_lb_status(self.lb_id)
+        self.conf.config(group='api_settings',
+                         enabled_backend_h2c_providers=[])
+        self.assertIs(True, self.get(path).json['pool']['backend_h2c'])
+        self.put(path, {'pool': {'admin_state_up': True}}, status=501)
+        self.put(path, {'pool': {'backend_h2c': False}})
+        self.assertIs(False, self.get(path).json['pool']['backend_h2c'])
+        self.set_lb_status(self.lb_id)
+        self.put(path, {'pool': {'backend_h2c': True}}, status=501)
+
+    @mock.patch.object(noop_driver.NoopProviderDriver, 'supports_backend_h2c',
+                       True, create=True)
+    def test_backend_h2c_requires_plain_http(self):
+        self.conf.config(group='api_settings',
+                         enabled_backend_h2c_providers=['noop_driver'])
+        for protocol, options in ((constants.PROTOCOL_TCP, {}),
+                                  (constants.PROTOCOL_HTTP,
+                                   {'tls_enabled': True})):
+            self.create_pool(self.lb_id, protocol,
+                             constants.LB_ALGORITHM_ROUND_ROBIN,
+                             backend_h2c=True, status=400, **options)
+
+    @mock.patch.object(noop_driver.NoopProviderDriver, 'supports_backend_h2c',
+                       True, create=True)
+    def test_backend_h2c_nested_pool(self):
+        pool = {'name': 'grpc', 'protocol': constants.PROTOCOL_HTTP,
+                'lb_algorithm': constants.LB_ALGORITHM_ROUND_ROBIN,
+                'backend_h2c': True}
+        body = {'loadbalancer': {
+            'vip_subnet_id': uuidutils.generate_uuid(),
+            'project_id': self.project_id,
+            'listeners': [{'name': 'http', 'protocol': constants.PROTOCOL_HTTP,
+                           'protocol_port': 80, 'default_pool': pool}]}}
+        self.post(self.LBS_PATH, body, status=501)
+        self.conf.config(group='api_settings',
+                         enabled_backend_h2c_providers=['noop_driver'])
+        result = self.post(self.LBS_PATH, body).json['loadbalancer']
+        selected, = result['pools']
+        self.assertIs(True, selected['backend_h2c'])
+
     def test_create_with_alpn(self):
         alpn_protocols = [lib_constants.ALPN_PROTOCOL_HTTP_2,
                           lib_constants.ALPN_PROTOCOL_HTTP_1_1]

@@ -965,6 +965,20 @@ class ListenerCidrRepository(BaseRepository):
 class PoolRepository(BaseRepository):
     model_class = models.Pool
 
+    def get_transport_for_update(self, session, pool_id):
+        # Read current values after locking the load balancer. The initial
+        # pool read may be from an older REPEATABLE READ snapshot.
+        pool = self.model_class
+        row = (session.query(pool.protocol, pool.backend_h2c, pool.tls_enabled,
+                             pool.enabled)
+               .filter(pool.id == pool_id,
+                       pool.provisioning_status != consts.DELETED)
+               .with_for_update().one_or_none())
+        if row is None:
+            raise exceptions.NotFound(resource=data_models.Pool._name(),
+                                      id=pool_id)
+        return row
+
     def get_all_API_list(self, session, pagination_helper=None, **filters):
         """Get a list of pools for the API list call.
 
