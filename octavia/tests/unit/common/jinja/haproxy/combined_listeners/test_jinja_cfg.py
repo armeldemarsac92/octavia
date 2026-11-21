@@ -1601,7 +1601,7 @@ class TestHaproxyCfg(base.TestCase):
         self.assertIn(
             r'acl full req.fhdr(\"X-Color\x23\x27Tag\") -m bin '
             '6f6e652c202274776f22', rendered)
-        self.assertIn('acl legacy req.hdr(X-Color) -m str one', rendered)
+        self.assertIn('acl legacy req.hdr(X-Color) -m str -- one', rendered)
 
     def test_request_headers_use_selected_policy_in_shared_backend(self):
         amp = sample_configs_combined.sample_amphora_tuple()
