@@ -47,7 +47,7 @@ def validate_policy_options_on_create(
         driver, listener, *, creating_load_balancer=False):
     protocol = listener['protocol']
     tcp_tls_termination = listener.get('tcp_tls_termination', False)
-    if type(tcp_tls_termination) is not bool:
+    if not isinstance(tcp_tls_termination, bool):
         raise exceptions.ValidationException(detail=_(
             'tcp_tls_termination must be true or false.'))
     if tcp_tls_termination:
