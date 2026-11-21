@@ -298,11 +298,9 @@ class L7PolicyController(base.BaseController):
             enabled = l7policy_dict.get('enabled', db_l7policy.enabled)
             reopening = enabled and not db_l7policy.enabled
             policy_repo = self.repositories.l7policy
-            if (reopening and not tcp_policy and
-                    policy_repo.has_enabled_l7rule(
-                        lock_session, constants.L7RULE_TYPE_HTTP_HEADER_EXACT,
-                        policy_id=id)):
-                driver_utils.require_http_header_exact(driver)
+            if reopening and not tcp_policy:
+                driver_utils.require_active_http_l7rule_capabilities(
+                    driver, policy_repo, lock_session, policy_id=id)
             activates_policy = enabled and (
                 reopening or
                 l7policy_dict.get('position', db_l7policy.position) !=

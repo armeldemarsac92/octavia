@@ -284,8 +284,8 @@ class L7RuleController(base.BaseController):
                 for field in match_fields)
             driver_utils.validate_l7rule_context(
                 driver, l7rule_dict.get('type', db_l7rule.type), protocol,
-                admit_http_header_exact=(match_changed or
-                                         (enabled and not db_l7rule.enabled)))
+                admit_http_l7rule=(match_changed or
+                                   (enabled and not db_l7rule.enabled)))
             tcp_policy = driver_utils.uses_tls_sni_policy_path(
                 driver, protocol)
             if ((enabled and (not db_l7rule.enabled or match_changed)) or

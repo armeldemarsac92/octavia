@@ -1583,6 +1583,27 @@ class TestHaproxyCfg(base.TestCase):
             f'use_backend {backend_prefix}{listener_id}-later if later_rule',
         ], routes)
 
+    def test_http_method_and_path_rules_share_policy_condition(self):
+        amp = sample_configs_combined.sample_amphora_tuple()
+        rule = sample_configs_combined.sample_l7rule_tuple
+        for protocol in ('HTTP', 'TERMINATED_HTTPS'):
+            with self.subTest(protocol=protocol):
+                listener = sample_configs_combined.sample_listener_tuple(
+                    l7=True, proto=protocol)
+                policy = listener.l7policies[0]._replace(l7rules=[
+                    rule('catalog', type='PATH', compare_type='EQUAL_TO',
+                         value='/catalog'),
+                    rule('read', type='HTTP_METHOD', compare_type='EQUAL_TO',
+                         value='GET'),
+                ])
+                listener = listener._replace(l7policies=[policy])
+                rendered = self.jinja_cfg.build_config(
+                    amp, [listener], None, haproxy_versions=['3', '0', '19'],
+                    amp_details=None)
+                self.assertIn('acl read method GET\n', rendered)
+                self.assertIn('acl catalog path -m str -- /catalog\n', rendered)
+                self.assertIn('if catalog read\n', rendered)
+
     def test_full_header_rule_and_legacy_header_acl(self):
         amp = sample_configs_combined.sample_amphora_tuple()
         listener = sample_configs_combined.sample_listener_tuple(l7=True)
