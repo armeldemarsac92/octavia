@@ -1295,6 +1295,7 @@ class TestDatabaseTasks(base.TestCase):
              mock.call(mock_session, listeners[1].id,
                        provisioning_status=constants.ERROR)])
 
+    @mock.patch('octavia.db.repositories.PoolRepository.mark_active')
     @mock.patch('octavia.db.repositories.PoolRepository.update')
     @mock.patch('octavia.db.repositories.MemberRepository.update')
     @mock.patch('octavia.db.repositories.HealthMonitorRepository.update')
@@ -1308,6 +1309,7 @@ class TestDatabaseTasks(base.TestCase):
                                              mock_hm_repo_update,
                                              mock_member_repo_update,
                                              mock_pool_repo_update,
+                                             mock_pool_repo_mark_active,
                                              mock_generate_uuid,
                                              mock_LOG,
                                              mock_get_session,
@@ -1356,13 +1358,10 @@ class TestDatabaseTasks(base.TestCase):
                        provisioning_status=constants.ACTIVE),
              mock.call(mock_session, listeners[1].id,
                        provisioning_status=constants.ACTIVE)])
-        repo.PoolRepository.update.assert_has_calls(
-            [mock.call(mock_session, default_pool.id,
-                       provisioning_status=constants.ACTIVE),
-             mock.call(mock_session, redirect_pool.id,
-                       provisioning_status=constants.ACTIVE),
-             mock.call(mock_session, unused_pool.id,
-                       provisioning_status=constants.ACTIVE)])
+        mock_pool_repo_mark_active.assert_has_calls(
+            [mock.call(mock_session, default_pool.id),
+             mock.call(mock_session, redirect_pool.id),
+             mock.call(mock_session, unused_pool.id)])
         repo.HealthMonitorRepository.update.assert_has_calls(
             [mock.call(mock_session, health_monitor.id,
                        provisioning_status=constants.ACTIVE)])
@@ -2780,9 +2779,11 @@ class TestDatabaseTasks(base.TestCase):
             id=MEMBER_ID,
             provisioning_status=constants.ERROR)
 
+    @mock.patch('octavia.db.repositories.PoolRepository.mark_active')
     @mock.patch('octavia.db.repositories.PoolRepository.update')
     def test_mark_pool_active_in_db(self,
                                     mock_pool_repo_update,
+                                    mock_pool_repo_mark_active,
                                     mock_generate_uuid,
                                     mock_LOG,
                                     mock_get_session,
@@ -2796,10 +2797,8 @@ class TestDatabaseTasks(base.TestCase):
 
         mock_session = mock_get_session().begin().__enter__()
 
-        mock_pool_repo_update.assert_called_once_with(
-            mock_session,
-            POOL_ID,
-            provisioning_status=constants.ACTIVE)
+        mock_pool_repo_mark_active.assert_called_once_with(
+            mock_session, POOL_ID)
 
         # Test the revert
         mock_pool_repo_update.reset_mock()

@@ -550,8 +550,11 @@ class JinjaTemplater:
         hostname = getattr(pool, 'backend_tls_hostname', None)
         if hostname is not None:
             ret_value['backend_tls_hostname'] = hostname
-            if not pool.enabled:
-                ret_value['closed'] = True
+        if (octavia_utils.is_disabled_backend_tls_pool(pool) or
+                (pool_tls_certs and pool_tls_certs.get('closed'))):
+            ret_value['closed'] = True
+            ret_value['enabled'] = False
+            return ret_value
         members_gen = (mem for mem in pool.members if
                        mem.provisioning_status != constants.PENDING_DELETE)
         members = [self._transform_member(x, feature_compatibility)

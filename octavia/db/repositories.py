@@ -28,6 +28,7 @@ from oslo_log import log as logging
 from oslo_serialization import jsonutils
 from oslo_utils import timeutils
 from oslo_utils import uuidutils
+from sqlalchemy import or_
 from sqlalchemy.orm import attributes
 from sqlalchemy.orm import lazyload
 from sqlalchemy.orm import noload
@@ -953,6 +954,33 @@ class ListenerCidrRepository(BaseRepository):
 
 class PoolRepository(BaseRepository):
     model_class = models.Pool
+
+    def set_backend_tls_pool_statuses(self, session, *, closed, recovered):
+        pool = self.model_class
+        protected = session.query(pool).filter(
+            pool.backend_tls_hostname.is_not(None), pool.enabled.is_(True))
+        if closed:
+            protected.filter(
+                pool.id.in_(closed),
+                pool.provisioning_status.not_in(
+                    (consts.PENDING_DELETE, consts.DELETED))).update(
+                        {'provisioning_status': consts.ERROR})
+        if recovered:
+            protected.filter(
+                pool.id.in_(recovered),
+                pool.provisioning_status == consts.ERROR).update(
+                    {'provisioning_status': consts.ACTIVE})
+
+    def mark_active(self, session, id):
+        pool = self.model_class
+        # The Amphora driver records closed protected pools after applying
+        # the safe configuration. A flow must not turn those errors ACTIVE.
+        session.query(pool).filter(
+            pool.id == id,
+            or_(pool.backend_tls_hostname.is_(None),
+                pool.enabled.is_(False),
+                pool.provisioning_status != consts.ERROR)).update(
+                    {'provisioning_status': consts.ACTIVE})
 
     def get_transport_for_update(self, session, pool_id):
         # Read current values after locking the load balancer. The initial

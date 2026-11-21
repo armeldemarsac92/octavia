@@ -224,9 +224,7 @@ class TaskUtils:
         """
         try:
             with db_apis.session().begin() as session:
-                self.pool_repo.update(session,
-                                      id=pool_id,
-                                      provisioning_status=constants.ACTIVE)
+                self.pool_repo.mark_active(session, pool_id)
         except Exception as e:
             LOG.error("Failed to update pool %(pool)s provisioning status "
                       "to ACTIVE due to: %(except)s", {'pool': pool_id,
