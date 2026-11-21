@@ -236,3 +236,36 @@ The capabilities endpoint then also includes ``tls_sni_suffix_v1``.
 Removing the provider from the wildcard opt-in prevents new wildcard rules,
 changes to wildcard matches and reactivation. Existing wildcard routes
 continue to render and can be disabled or removed.
+
+TLS termination on a TCP listener
+---------------------------------
+
+Amphora can terminate TLS and forward the decrypted stream to a plaintext TCP
+pool. Create a listener with ``protocol=TCP``, ``tcp_tls_termination=true`` and
+``default_tls_container_ref`` pointing to a project-authorized Barbican
+certificate. The existing optional SNI certificate list and client CA and CRL
+settings apply. The TCP listener starts without ALPN advertisements unless
+configured explicitly. HTTP insertion, redirects and response handling are
+unavailable in this mode.
+
+Use the ``TLS_SNI`` rule type with ``EQUAL_TO`` for exact names or ``ENDS_WITH``
+for wildcard suffixes. Exact names take precedence over wildcard matches, with
+the longest suffix first among wildcards. Configure a plaintext TCP default
+pool for a deliberate catch-all. Without a default pool, unmatched names
+close without connecting to a member. A matching disabled pool is closed.
+
+The default is disabled. After upgrading the database, API, octavia-lib and
+all workers, add the provider name to
+``[api_settings] enabled_tcp_tls_termination_providers`` only in regions with a
+qualified TLS-capable HAProxy fleet. This publishes
+``tcp_tls_termination_v1`` for that provider independently of the TLS
+passthrough capabilities. It also requires
+``[api_settings] allow_tls_terminated_listeners``. Removing the opt-in blocks
+creation, routing and certificate changes, and reactivation. Existing traffic
+can continue, and operators can still disable or delete the endpoint. Drain
+and remove these listeners before downgrading workers.
+
+This listener mode is chosen at creation. Use a different listener for TLS
+passthrough. Supported targets have ``protocol=TCP`` and
+``tls_enabled=false``. Backend TLS re-encryption requires a separate
+capability.

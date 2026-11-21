@@ -189,7 +189,8 @@ class L7PolicyController(base.BaseController):
                 l7policy.to_dict(render_unsets=True),
                 load_balancer_id, listener_id)
             driver_utils.require_gateway_policy_action(
-                driver, l7policy_dict['action'], listener.protocol)
+                driver, l7policy_dict['action'], listener.protocol,
+                tcp_tls_termination=listener.tcp_tls_termination)
             validate_policy_request_headers(
                 l7policy_dict, listener.protocol, driver)
 
@@ -206,7 +207,7 @@ class L7PolicyController(base.BaseController):
                 l7policy_dict['https_listener_hostname'] = hostname
             pool_id = l7policy_dict.get('redirect_pool_id')
             if driver_utils.uses_tls_sni_policy_path(
-                    driver, listener.protocol):
+                    driver, listener.protocol, listener.tcp_tls_termination):
                 self.repositories.l7policy.validate_tcp_redirect_pool(
                     lock_session, listener, pool_id)
             elif pool_id:
@@ -290,7 +291,7 @@ class L7PolicyController(base.BaseController):
             action = l7policy_dict.get('action', db_l7policy.action)
             routing_changed = {'action', 'fixed_response', 'targets'}
             tcp_policy = driver_utils.uses_tls_sni_policy_path(
-                driver, listener.protocol)
+                driver, listener.protocol, listener.tcp_tls_termination)
             pool_id = l7policy_dict.get('redirect_pool_id')
             if tcp_policy:
                 if l7policy.redirect_pool_id is None:
@@ -331,10 +332,12 @@ class L7PolicyController(base.BaseController):
                     retained_operations = db_l7policy.request_header_operations
                 driver_utils.require_gateway_policy_action(
                     driver, action, listener.protocol,
-                    request_header_operations=retained_operations)
+                    request_header_operations=retained_operations,
+                    tcp_tls_termination=listener.tcp_tls_termination)
                 if tcp_policy:
-                    if policy_repo.has_enabled_tls_sni_suffix_rule(
-                            lock_session, policy_id=id):
+                    if (not listener.tcp_tls_termination and
+                            policy_repo.has_enabled_tls_sni_suffix_rule(
+                                lock_session, policy_id=id)):
                         driver_utils.require_tls_sni_suffix(driver)
                     target = l7policy_dict.get(
                         'redirect_pool_id', db_l7policy.redirect_pool_id)

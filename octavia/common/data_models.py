@@ -428,7 +428,8 @@ class Listener(BaseDataModel):
                  allowed_cidrs=None, tls_ciphers=None, tls_versions=None,
                  alpn_protocols=None, hsts_max_age=None,
                  hsts_include_subdomains=None, hsts_preload=None,
-                 default_http_response=None, https_virtual_hosts=None):
+                 default_http_response=None, https_virtual_hosts=None,
+                 tcp_tls_termination=False):
         self.id = id
         self.project_id = project_id
         self.name = name
@@ -436,6 +437,7 @@ class Listener(BaseDataModel):
         self.default_pool_id = default_pool_id
         self.default_http_response = default_http_response
         self.https_virtual_hosts = https_virtual_hosts
+        self.tcp_tls_termination = tcp_tls_termination
         self.load_balancer_id = load_balancer_id
         self.protocol = protocol
         self.protocol_port = protocol_port

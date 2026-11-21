@@ -249,9 +249,10 @@ class JinjaTemplater:
             constants.INSECURE_FORK)
         enable_prometheus = prometheus_listener and feature_compatibility.get(
             lib_consts.PROTOCOL_PROMETHEUS, False)
-        term_https_listener = any(
-            lsnr.protocol == lib_consts.PROTOCOL_TERMINATED_HTTPS for lsnr in
-            listeners)
+        has_tls_termination = any(
+            lsnr.protocol == lib_consts.PROTOCOL_TERMINATED_HTTPS or
+            getattr(lsnr, 'tcp_tls_termination', False) is True
+            for lsnr in listeners)
 
         jinja_dict = {
             'loadbalancer': loadbalancer,
@@ -274,7 +275,7 @@ class JinjaTemplater:
         except (KeyError, TypeError):
             pass
 
-        if term_https_listener:
+        if has_tls_termination:
             try:
                 mem = amp_details["memory"]
                 # Account for 32 KB per established connection for each
@@ -369,6 +370,15 @@ class JinjaTemplater:
 
             be processed by the templating system
         """
+        tcp_tls_termination = getattr(listener, 'tcp_tls_termination',
+                                      False) is True
+        active = listener.enabled and loadbalancer.enabled
+        if tcp_tls_termination and active:
+            if (listener.protocol != constants.PROTOCOL_TCP or
+                    not listener.tls_certificate_id):
+                raise exceptions.ValidationException(detail=(
+                    'TLS termination requires a TCP listener and a server '
+                    'certificate.'))
         ret_value = {
             'id': listener.id,
             'protocol_port': listener.protocol_port,
@@ -390,6 +400,8 @@ class JinjaTemplater:
             lib_consts.PROTOCOL_PROMETHEUS: feature_compatibility.get(
                 lib_consts.PROTOCOL_PROMETHEUS, False)
         }
+        if tcp_tls_termination:
+            ret_value['tcp_tls_termination'] = True
         if self.connection_logging:
             ret_value['user_log_format'] = (
                 self._format_log_string(loadbalancer, listener.protocol))
@@ -404,7 +416,8 @@ class JinjaTemplater:
                 CONF.haproxy_amphora.base_cert_dir,
                 loadbalancer.id, f'{listener.id}.pem')
 
-        if tls_certs is not None:
+        if (tls_certs is not None and
+                (not tcp_tls_termination or active)):
             if listener.client_ca_tls_certificate_id:
                 ret_value['client_ca_tls_path'] = '%s' % (
                     os.path.join(
@@ -419,8 +432,9 @@ class JinjaTemplater:
                                  tls_certs[listener.client_crl_container_id]))
 
         tls_enabled = False
-        if listener.protocol in (constants.PROTOCOL_TERMINATED_HTTPS,
-                                 constants.PROTOCOL_PROMETHEUS):
+        if tcp_tls_termination or listener.protocol in (
+                constants.PROTOCOL_TERMINATED_HTTPS,
+                constants.PROTOCOL_PROMETHEUS):
             tls_enabled = True
             if listener.tls_ciphers is not None:
                 if not validate.VALID_CIPHER_RE.match(listener.tls_ciphers):
@@ -458,11 +472,18 @@ class JinjaTemplater:
         pool_gen = (pool for pool in listener.pools if
                     pool.provisioning_status != constants.PENDING_DELETE)
         for pool in pool_gen:
+            if tcp_tls_termination and active:
+                validate.validate_tcp_redirect_pool_protocol(
+                    pool.protocol, pool.tls_enabled)
             kwargs = {}
             if tls_certs is not None and tls_certs.get(pool.id):
                 kwargs = {'pool_tls_certs': tls_certs.get(pool.id)}
-            pools.append(self._transform_pool(
-                pool, feature_compatibility, tls_enabled, **kwargs))
+            rendered_pool = self._transform_pool(
+                pool, feature_compatibility, tls_enabled, **kwargs)
+            if tcp_tls_termination and not pool.enabled:
+                # Keep the matched route closed without falling back.
+                rendered_pool['closed'] = True
+            pools.append(rendered_pool)
         ret_value['pools'] = pools
         https_sections = None
         if listener.https_virtual_hosts is not None:
@@ -488,7 +509,10 @@ class JinjaTemplater:
                     ret_value['default_pool'] = pool
                     break
 
-        available_pool_ids = {pool['id'] for pool in pools if pool['enabled']}
+        available_pool_ids = {
+            pool['id'] for pool in pools
+            if pool['enabled'] or (tcp_tls_termination and pool.get('closed'))
+        }
         if listener.protocol == constants.PROTOCOL_TCP:
             policy_gen = (policy for policy in policy_gen
                           if self._is_routable_sni_policy(
@@ -515,10 +539,16 @@ class JinjaTemplater:
             l7policies.append(transformed)
         if listener.protocol == constants.PROTOCOL_TCP and l7policies:
             l7policies.sort(key=self._sni_policy_priority)
-            ret_value['inspect_tls_sni'] = True
-            if not ret_value['timeout_tcp_inspect']:
-                ret_value['timeout_tcp_inspect'] = (
-                    constants.DEFAULT_TLS_SNI_INSPECT_TIMEOUT)
+            if tcp_tls_termination:
+                pools_by_id = {pool['id']: pool for pool in pools}
+                for policy in l7policies:
+                    pool_id = policy['redirect_pool']['id']
+                    policy['redirect_pool'] = pools_by_id[pool_id]
+            else:
+                ret_value['inspect_tls_sni'] = True
+                if not ret_value['timeout_tcp_inspect']:
+                    ret_value['timeout_tcp_inspect'] = (
+                        constants.DEFAULT_TLS_SNI_INSPECT_TIMEOUT)
         ret_value['l7policies'] = l7policies
         operations_by_pool = {}
         for policy in l7policies:
