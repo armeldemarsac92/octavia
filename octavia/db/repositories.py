@@ -1899,12 +1899,13 @@ class L7PolicyRepository(BaseRepository):
             query = query.filter(rule.compare_type == compare_type)
         return query.with_for_update().limit(1).scalar() is not None
 
-    def has_enabled_tls_sni_suffix_rule(self, session, *, policy_id=None,
-                                        **policy_filters):
-        """Read suffix rules under the load balancer write lock.
+    def has_enabled_l7rule(self, session, rule_type, *, compare_type=None,
+                           policy_id=None, load_balancer_id=None,
+                           **policy_filters):
+        """Find an active child under the parent's provisioning lock.
 
-        Policy updates include the policy being re-enabled. Listener and pool
-        updates consider only policies whose own admin state is enabled.
+        A policy or listener being reopened may itself be disabled. A load
+        balancer reopening affects only already-enabled policies and listeners.
         """
         policy = self.model_class
         rule = models.L7Rule
@@ -1913,16 +1914,26 @@ class L7PolicyRepository(BaseRepository):
         else:
             policy_filters['id'] = policy_id
         inactive_statuses = (consts.PENDING_DELETE, consts.DELETED)
-        return (session.query(rule.id)
-                .join(rule.l7policy)
-                .filter_by(**policy_filters)
-                .filter(
-                    policy.provisioning_status.notin_(inactive_statuses),
-                    rule.enabled.is_(True),
-                    rule.type == consts.L7RULE_TYPE_TLS_SNI,
-                    rule.compare_type == consts.L7RULE_COMPARE_TYPE_ENDS_WITH,
-                    rule.provisioning_status.notin_(inactive_statuses))
-                .with_for_update().limit(1).scalar() is not None)
+        query = (session.query(rule.id)
+                 .join(rule.l7policy)
+                 .filter_by(**policy_filters)
+                 .filter(policy.provisioning_status.notin_(inactive_statuses),
+                         rule.enabled.is_(True), rule.type == rule_type,
+                         rule.provisioning_status.notin_(inactive_statuses)))
+        if compare_type is not None:
+            query = query.filter(rule.compare_type == compare_type)
+        if load_balancer_id is not None:
+            listener = models.Listener
+            query = query.join(policy.listener).filter(
+                listener.load_balancer_id == load_balancer_id,
+                listener.enabled.is_(True),
+                listener.provisioning_status.notin_(inactive_statuses))
+        return query.with_for_update().limit(1).scalar() is not None
+
+    def has_enabled_tls_sni_suffix_rule(self, session, **filters):
+        return self.has_enabled_l7rule(
+            session, consts.L7RULE_TYPE_TLS_SNI,
+            compare_type=consts.L7RULE_COMPARE_TYPE_ENDS_WITH, **filters)
 
     def get_tcp_policy_using_pool(self, session, pool_id):
         model = self.model_class

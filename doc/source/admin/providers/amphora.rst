@@ -135,9 +135,10 @@ configuration.
 
 The provider's ``gateway_capabilities`` endpoint then includes
 ``http_header_exact_v1``. Removing a provider name prevents creation,
-match changes and re-enabling of these rules. Existing rules remain
-readable and can be disabled or deleted. Remove them before downgrading
-the workers.
+match changes and re-enabling of these rules. Reopening a policy,
+listener or load balancer that would activate an enabled exact rule
+requires the same enrollment. Operators can keep serving existing rules,
+disable them or delete them. Drain them before downgrading the workers.
 
 Amphora compares the UTF-8 bytes of the configured value with the request
 field content. A MySQL-compatible database connection must support

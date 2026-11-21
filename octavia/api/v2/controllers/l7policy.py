@@ -296,8 +296,15 @@ class L7PolicyController(base.BaseController):
                 self._validate_redirect_pool_protocol(
                     lock_session, listener, pool_id)
             enabled = l7policy_dict.get('enabled', db_l7policy.enabled)
+            reopening = enabled and not db_l7policy.enabled
+            policy_repo = self.repositories.l7policy
+            if (reopening and not tcp_policy and
+                    policy_repo.has_enabled_l7rule(
+                        lock_session, constants.L7RULE_TYPE_HTTP_HEADER_EXACT,
+                        policy_id=id)):
+                driver_utils.require_http_header_exact(driver)
             activates_policy = enabled and (
-                not db_l7policy.enabled or
+                reopening or
                 l7policy_dict.get('position', db_l7policy.position) !=
                 db_l7policy.position)
             if activates_policy or routing_changed.intersection(l7policy_dict):
@@ -308,7 +315,6 @@ class L7PolicyController(base.BaseController):
                     driver, action, listener.protocol,
                     request_header_operations=retained_operations)
                 if tcp_policy:
-                    policy_repo = self.repositories.l7policy
                     if policy_repo.has_enabled_tls_sni_suffix_rule(
                             lock_session, policy_id=id):
                         driver_utils.require_tls_sni_suffix(driver)

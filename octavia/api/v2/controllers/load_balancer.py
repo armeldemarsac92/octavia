@@ -813,15 +813,21 @@ class LoadBalancersController(base.BaseController):
 
             self._test_lb_status(context.session, id)
 
-            if (load_balancer.admin_state_up is True and not db_lb.enabled and
+            reopening = (load_balancer.admin_state_up is True and
+                         not db_lb.enabled)
+            if (reopening and self.repositories.l7policy.has_enabled_l7rule(
+                    context.session, constants.L7RULE_TYPE_HTTP_HEADER_EXACT,
+                    load_balancer_id=id)):
+                driver_utils.require_http_header_exact(driver)
+            if (reopening and
                     driver_utils.uses_tls_sni_policy_path(
                         driver, constants.PROTOCOL_TCP) and
                     self.repositories.l7policy.has_active_tcp_sni_policy(
                         context.session, id)):
                 driver_utils.require_tls_sni_passthrough(driver)
                 if self.repositories.l7policy.has_active_tcp_sni_policy(
-                        context.session, id,
-                        compare_type=constants.L7RULE_COMPARE_TYPE_ENDS_WITH):
+                        context.session, id, compare_type=(
+                            constants.L7RULE_COMPARE_TYPE_ENDS_WITH)):
                     driver_utils.require_tls_sni_suffix(driver)
 
             # Prepare the data for the driver data model
