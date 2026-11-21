@@ -686,6 +686,52 @@ class TestL7Rule(base.BaseAPITest):
             l7rule_prov_status=constants.PENDING_CREATE,
             l7rule_op_status=constants.OFFLINE)
 
+    @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
+    def test_full_header_rule_create_and_update(self, rpc):
+        lb = self.create_load_balancer(
+            uuidutils.generate_uuid(), provider='amphora')['loadbalancer']
+        lb_id = lb['id']
+        self.set_lb_status(lb_id)
+        listener = self.create_listener('HTTP', 80, lb_id)['listener']
+        self.set_lb_status(lb_id)
+        policy = self.create_l7policy(listener['id'], 'REJECT')['l7policy']
+        self.set_lb_status(lb_id)
+
+        key = 'X-' + 'a' * 254
+        value = 'one, ' + 'x' * 4091
+        rpc.return_value.cast.reset_mock()
+        self.create_l7rule(policy['id'], 'HTTP_HEADER_EXACT', 'EQUAL_TO',
+                           value, key=key, status=501)
+        self.conf.config(group='api_settings',
+                         enabled_http_header_exact_providers=['amphora'])
+        self.create_l7rule(policy['id'], 'HEADER', 'EQUAL_TO',
+                           'one', key=key, status=400)
+        self.create_l7rule(policy['id'], 'HEADER', 'EQUAL_TO',
+                           'x' * 256, key='X-Version', status=400)
+        self.create_l7rule(policy['id'], 'HTTP_HEADER_EXACT', 'REGEX',
+                           value, key=key, status=400)
+        self.create_l7rule(policy['id'], 'HTTP_HEADER_EXACT', 'EQUAL_TO',
+                           ' one', key=key, status=400)
+        rpc.return_value.cast.assert_not_called()
+        rule = self.create_l7rule(policy['id'], 'HTTP_HEADER_EXACT',
+                                  'EQUAL_TO', value, key=key)['rule']
+        self.assertEqual(key, rule['key'])
+        self.assertEqual(value, rule['value'])
+        path = self.L7RULE_PATH.format(l7policy_id=policy['id'],
+                                       l7rule_id=rule['id'])
+        self.set_lb_status(lb_id)
+        self.put(path, {'rule': {'type': 'HEADER'}}, status=400)
+        new_value = 'two,\t café'
+        self.put(path, {'rule': {'value': new_value}})
+        self.set_lb_status(lb_id)
+        self.assertEqual(new_value, self.get(path).json['rule']['value'])
+        self.conf.config(group='api_settings',
+                         enabled_http_header_exact_providers=[])
+        self.put(path, {'rule': {'value': 'one, other'}}, status=501)
+        self.put(path, {'rule': {'admin_state_up': False}})
+        self.set_lb_status(lb_id)
+        self.put(path, {'rule': {'admin_state_up': True}}, status=501)
+
     def test_create_cookie_rule(self):
         api_l7rule = self.create_l7rule(
             self.l7policy_id, constants.L7RULE_TYPE_COOKIE,

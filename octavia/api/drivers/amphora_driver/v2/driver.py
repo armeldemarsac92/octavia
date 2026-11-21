@@ -66,6 +66,7 @@ class AmphoraProviderDriver(driver_base.ProviderDriver):
     supports_fixed_http_responses = True
     supports_weighted_targets = True
     supports_request_header_operations = True
+    supports_http_header_exact = True
     supports_backend_h2c = True
     supports_tls_sni_passthrough = True
     supports_tls_sni_suffix = True

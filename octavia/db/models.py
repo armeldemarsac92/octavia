@@ -17,6 +17,7 @@
 
 from oslo_db.sqlalchemy import models
 import sqlalchemy as sa
+from sqlalchemy.dialects import mysql
 from sqlalchemy.ext import orderinglist
 from sqlalchemy import orm
 from sqlalchemy.orm import Mapped
@@ -765,8 +766,13 @@ class L7Rule(base_models.BASE, base_models.IdMixin, base_models.ProjectMixin,
             "l7rule_compare_type.name",
             name="fk_l7rule_l7rule_compare_type_name"),
         nullable=False)
-    key = sa.Column(sa.String(255), nullable=True)
-    value = sa.Column(sa.String(255), nullable=False)
+    key = sa.Column(sa.String(constants.MAX_L7RULE_HEADER_NAME_LENGTH),
+                    nullable=True)
+    value = sa.Column(
+        sa.String(constants.MAX_L7RULE_HEADER_VALUE_LENGTH).with_variant(
+            mysql.VARCHAR(constants.MAX_L7RULE_HEADER_VALUE_LENGTH,
+                          charset='utf8mb4'), 'mysql', 'mariadb'),
+        nullable=False)
     invert = sa.Column(sa.Boolean(), default=False, nullable=False)
     enabled = sa.Column(sa.Boolean(), nullable=False)
     l7policy = orm.relationship("L7Policy", uselist=False,

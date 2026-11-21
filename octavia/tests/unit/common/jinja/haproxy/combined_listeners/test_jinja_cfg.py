@@ -1583,6 +1583,26 @@ class TestHaproxyCfg(base.TestCase):
             f'use_backend {backend_prefix}{listener_id}-later if later_rule',
         ], routes)
 
+    def test_full_header_rule_and_legacy_header_acl(self):
+        amp = sample_configs_combined.sample_amphora_tuple()
+        listener = sample_configs_combined.sample_listener_tuple(l7=True)
+        policy = listener.l7policies[0]
+        rule = sample_configs_combined.sample_l7rule_tuple
+        policy = policy._replace(l7rules=[
+            rule('full', type='HTTP_HEADER_EXACT', compare_type='EQUAL_TO',
+                 key="X-Color#'Tag", value='one, "two"'),
+            rule('legacy', type='HEADER', compare_type='EQUAL_TO',
+                 key='X-Color', value='one'),
+        ])
+        listener = listener._replace(l7policies=[policy])
+        rendered = self.jinja_cfg.build_config(
+            amp, [listener], None, haproxy_versions=['3', '0', '19'],
+            amp_details=None)
+        self.assertIn(
+            r'acl full req.fhdr(\"X-Color\x23\x27Tag\") -m bin '
+            '6f6e652c202274776f22', rendered)
+        self.assertIn('acl legacy req.hdr(X-Color) -m str one', rendered)
+
     def test_request_headers_use_selected_policy_in_shared_backend(self):
         amp = sample_configs_combined.sample_amphora_tuple()
         listener = sample_configs_combined.sample_listener_tuple(l7=True)

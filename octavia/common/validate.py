@@ -167,6 +167,28 @@ def l7rule_data(l7rule):
     """Raises an error if the l7rule given is invalid in some way."""
     if not l7rule.value:
         raise exceptions.InvalidL7Rule(msg=_('L7 rule type requires a value'))
+    if l7rule.type == constants.L7RULE_TYPE_HTTP_HEADER_EXACT:
+        if l7rule.compare_type != constants.L7RULE_COMPARE_TYPE_EQUAL_TO:
+            raise exceptions.InvalidL7Rule(msg=_(
+                'HTTP_HEADER_EXACT requires EQUAL_TO.'))
+        if not l7rule.key or not _HEADER_NAME_RE.fullmatch(l7rule.key):
+            raise exceptions.InvalidL7Rule(msg=_(
+                'HTTP_HEADER_EXACT requires a valid HTTP header name.'))
+        if (len(l7rule.value) > constants.MAX_L7RULE_HEADER_VALUE_LENGTH or
+                l7rule.value != l7rule.value.strip(' \t') or
+                _HEADER_VALUE_CONTROL_RE.search(l7rule.value)):
+            raise exceptions.InvalidL7Rule(msg=_(
+                'HTTP_HEADER_EXACT requires valid HTTP field content '
+                'without surrounding whitespace.'))
+        return True
+
+    legacy_limit = constants.MAX_LEGACY_L7RULE_FIELD_LENGTH
+    if (len(l7rule.value) > legacy_limit or
+            (l7rule.key and len(l7rule.key) > legacy_limit)):
+        raise exceptions.InvalidL7Rule(msg=_(
+            'L7 rule keys and values are limited to 255 characters for '
+            'this type.'))
+
     if l7rule.type == constants.L7RULE_TYPE_TLS_SNI:
         if not is_tls_sni_rule(l7rule):
             raise exceptions.InvalidL7Rule(msg=_(
