@@ -462,6 +462,7 @@ class JinjaTemplater:
             policy, feature_compatibility, tls_enabled, tls_certs,
             available_pool_ids) for policy in policy_gen]
         if listener.protocol == constants.PROTOCOL_TCP and l7policies:
+            l7policies.sort(key=self._sni_policy_priority)
             ret_value['inspect_tls_sni'] = True
             if not ret_value['timeout_tcp_inspect']:
                 ret_value['timeout_tcp_inspect'] = (
@@ -659,6 +660,17 @@ class JinjaTemplater:
             return False
         rules = self._active_l7rules(policy)
         return bool(rules) and all(validate.is_tls_sni_rule(r) for r in rules)
+
+    @staticmethod
+    def _sni_policy_priority(policy):
+        # Rules in a policy are ANDed. An exact rule constrains the entire
+        # policy to one name. Otherwise its longest suffix is most specific.
+        # Stable sorting keeps listener policy positions for equal matches.
+        exact = constants.L7RULE_COMPARE_TYPE_EQUAL_TO
+        return min(
+            (0, 0) if rule['compare_type'] == exact
+            else (1, -len(rule['value']))
+            for rule in policy['l7rules'])
 
     def _transform_l7policy(self, l7policy, feature_compatibility,
                             listener_tls_enabled, tls_certs=None,

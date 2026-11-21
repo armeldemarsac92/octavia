@@ -68,6 +68,7 @@ class AmphoraProviderDriver(driver_base.ProviderDriver):
     supports_request_header_operations = True
     supports_backend_h2c = True
     supports_tls_sni_passthrough = True
+    supports_tls_sni_suffix = True
 
     def __init__(self):
         super().__init__()

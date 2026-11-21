@@ -549,17 +549,21 @@ class PoolsController(base.BaseController):
             if (driver_utils.uses_tls_sni_policy_path(
                     driver, db_pool.protocol) and
                     (pool.tls_enabled is True or pool.admin_state_up is True)):
+                policy_repo = self.repositories.l7policy
                 current = self.repositories.pool.get_transport_for_update(
                     context.session, id)
                 reopening = pool.admin_state_up is True and not current.enabled
                 if ((pool.tls_enabled is True or reopening) and
-                        self.repositories.l7policy.get_tcp_policy_using_pool(
+                        policy_repo.get_tcp_policy_using_pool(
                             context.session, id)):
                     if pool.tls_enabled is True:
                         raise exceptions.ValidationException(detail=_(
                             'A TCP listener policy requires TLS passthrough '
                             'to its pool.'))
                     driver_utils.require_tls_sni_passthrough(driver)
+                    if policy_repo.has_enabled_tls_sni_suffix_rule(
+                            context.session, redirect_pool_id=id):
+                        driver_utils.require_tls_sni_suffix(driver)
 
             # Prepare the data for the driver data model
             pool_dict = pool.to_dict(render_unsets=False)

@@ -1878,33 +1878,62 @@ class L7PolicyRepository(BaseRepository):
         validate.validate_tcp_redirect_pool_protocol(
             pool.protocol, pool.tls_enabled)
 
-    def has_active_tcp_sni_policy(self, session, load_balancer_id):
+    def has_active_tcp_sni_policy(self, session, load_balancer_id,
+                                  compare_type=None):
         """Read live routes under the load balancer write lock."""
         policy = self.model_class
         listener = models.Listener
         pool = models.Pool
         rule = models.L7Rule
         inactive_statuses = (consts.PENDING_DELETE, consts.DELETED)
-        return (session.query(policy.id)
-                .join(policy.listener)
-                .join(policy.redirect_pool)
-                .join(policy.l7rules)
+        query = (
+            session.query(policy.id)
+            .join(policy.listener)
+            .join(policy.redirect_pool)
+            .join(policy.l7rules)
+            .filter(
+                listener.load_balancer_id == load_balancer_id,
+                listener.protocol == consts.PROTOCOL_TCP,
+                listener.enabled.is_(True),
+                listener.provisioning_status.notin_(inactive_statuses),
+                policy.enabled.is_(True),
+                policy.action == consts.L7POLICY_ACTION_REDIRECT_TO_POOL,
+                policy.provisioning_status.notin_(inactive_statuses),
+                pool.enabled.is_(True),
+                pool.protocol == consts.PROTOCOL_TCP,
+                pool.tls_enabled.is_(False),
+                pool.provisioning_status.notin_(inactive_statuses),
+                rule.enabled.is_(True),
+                rule.type == consts.L7RULE_TYPE_TLS_SNI,
+                rule.provisioning_status.notin_(inactive_statuses),
+            ))
+        if compare_type is not None:
+            query = query.filter(rule.compare_type == compare_type)
+        return query.with_for_update().limit(1).scalar() is not None
+
+    def has_enabled_tls_sni_suffix_rule(self, session, *, policy_id=None,
+                                        **policy_filters):
+        """Read suffix rules under the load balancer write lock.
+
+        Policy updates include the policy being re-enabled. Listener and pool
+        updates consider only policies whose own admin state is enabled.
+        """
+        policy = self.model_class
+        rule = models.L7Rule
+        if policy_id is None:
+            policy_filters['enabled'] = True
+        else:
+            policy_filters['id'] = policy_id
+        inactive_statuses = (consts.PENDING_DELETE, consts.DELETED)
+        return (session.query(rule.id)
+                .join(rule.l7policy)
+                .filter_by(**policy_filters)
                 .filter(
-                    listener.load_balancer_id == load_balancer_id,
-                    listener.protocol == consts.PROTOCOL_TCP,
-                    listener.enabled.is_(True),
-                    listener.provisioning_status.notin_(inactive_statuses),
-                    policy.enabled.is_(True),
-                    policy.action == consts.L7POLICY_ACTION_REDIRECT_TO_POOL,
                     policy.provisioning_status.notin_(inactive_statuses),
-                    pool.enabled.is_(True),
-                    pool.protocol == consts.PROTOCOL_TCP,
-                    pool.tls_enabled.is_(False),
-                    pool.provisioning_status.notin_(inactive_statuses),
                     rule.enabled.is_(True),
                     rule.type == consts.L7RULE_TYPE_TLS_SNI,
-                    rule.provisioning_status.notin_(inactive_statuses),
-                )
+                    rule.compare_type == consts.L7RULE_COMPARE_TYPE_ENDS_WITH,
+                    rule.provisioning_status.notin_(inactive_statuses))
                 .with_for_update().limit(1).scalar() is not None)
 
     def get_tcp_policy_using_pool(self, session, pool_id):
