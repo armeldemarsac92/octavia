@@ -737,9 +737,45 @@ class TestL7Rule(base.BaseAPITest):
         self.conf.config(group='api_settings',
                          enabled_http_header_exact_providers=[])
         self.put(path, {'rule': {'value': 'one, other'}}, status=501)
+        policy_path = self.L7POLICY_PATH.format(l7policy_id=policy['id'])
+        listener_path = self.LISTENER_PATH.format(listener_id=listener['id'])
+        lb_path = self.LB_PATH.format(lb_id=lb_id)
+        parents = (
+            (policy_path, 'l7policy'),
+            (listener_path, 'listener'),
+            (lb_path, 'loadbalancer'),
+        )
+        for parent_path, tag in parents:
+            with self.subTest(parent=tag):
+                self.put(parent_path, {tag: {'admin_state_up': False}})
+                self.set_lb_status(lb_id)
+                rpc.return_value.cast.reset_mock()
+                self.put(parent_path, {tag: {'admin_state_up': True}},
+                         status=501)
+                rpc.return_value.cast.assert_not_called()
+                self.assertFalse(
+                    self.get(parent_path).json[tag]['admin_state_up'])
+                self.conf.config(
+                    group='api_settings',
+                    enabled_http_header_exact_providers=['amphora'])
+                reopened = self.put(parent_path,
+                                    {tag: {'admin_state_up': True}}).json[tag]
+                self.assertTrue(reopened['admin_state_up'])
+                self.set_lb_status(lb_id)
+                self.conf.config(
+                    group='api_settings',
+                    enabled_http_header_exact_providers=[])
         self.put(path, {'rule': {'admin_state_up': False}})
         self.set_lb_status(lb_id)
         self.put(path, {'rule': {'admin_state_up': True}}, status=501)
+        self.create_l7rule(policy['id'], 'HEADER', 'EQUAL_TO',
+                           'one', key='X-Version')
+        self.set_lb_status(lb_id)
+        self.put(policy_path, {'l7policy': {'admin_state_up': False}})
+        self.set_lb_status(lb_id)
+        reopened = self.put(policy_path, {
+            'l7policy': {'admin_state_up': True}}).json['l7policy']
+        self.assertTrue(reopened['admin_state_up'])
 
     def test_create_cookie_rule(self):
         api_l7rule = self.create_l7rule(
