@@ -64,6 +64,8 @@ def validate_policy_options_on_create(
                     validate.l7rule_data(data_models.L7Rule.from_dict(rule))
                 except exceptions.InvalidL7Rule as e:
                     raise exceptions.L7RuleValidation(error=e) from e
+                driver_utils.require_tls_sni_rule_comparison(
+                    driver, rule['compare_type'])
         if (not tcp_policy and
                 action not in (constants.L7POLICY_ACTION_FIXED_RESPONSE,
                                constants.L7POLICY_ACTION_WEIGHTED_TARGETS) and
@@ -726,6 +728,11 @@ class ListenersController(base.BaseController):
                     driver_utils.require_gateway_policy_action(
                         driver, action, db_listener.protocol,
                         request_header_operations=headers)
+                if (driver_utils.uses_tls_sni_policy_path(
+                        driver, db_listener.protocol) and
+                        policy_repo.has_enabled_tls_sni_suffix_rule(
+                            context.session, listener_id=id)):
+                    driver_utils.require_tls_sni_suffix(driver)
 
             db_listener.provisioning_status = constants.PENDING_UPDATE
 

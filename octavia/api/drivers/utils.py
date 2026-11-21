@@ -58,6 +58,9 @@ def gateway_capabilities(driver):
     if (driver.name in api_settings.enabled_tls_sni_providers and
             getattr(driver, 'supports_tls_sni_passthrough', False) is True):
         capabilities.append(constants.GATEWAY_CAPABILITY_TLS_SNI)
+        if (driver.name in api_settings.enabled_tls_sni_suffix_providers and
+                getattr(driver, 'supports_tls_sni_suffix', False) is True):
+            capabilities.append(constants.GATEWAY_CAPABILITY_TLS_SNI_SUFFIX)
     return capabilities
 
 
@@ -98,6 +101,19 @@ def require_tls_sni_passthrough(driver):
         raise exceptions.ProviderUnsupportedOptionError(
             prov=driver.name, user_msg=_(
                 'TLS SNI passthrough is unavailable for this provider.'))
+
+
+def require_tls_sni_suffix(driver):
+    if (constants.GATEWAY_CAPABILITY_TLS_SNI_SUFFIX not in
+            gateway_capabilities(driver)):
+        raise exceptions.ProviderUnsupportedOptionError(
+            prov=driver.name, user_msg=_(
+                'TLS SNI suffix routing is unavailable for this provider.'))
+
+
+def require_tls_sni_rule_comparison(driver, compare_type):
+    if compare_type == constants.L7RULE_COMPARE_TYPE_ENDS_WITH:
+        require_tls_sni_suffix(driver)
 
 
 def validate_l7rule_context(driver, rule_type, protocol):

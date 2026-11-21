@@ -100,15 +100,31 @@ request must match all the policy's rules to match the policy.
 If you need to express a logical OR operation between rules, then do this by
 creating multiple policies with the same action.
 
-With ``tls_sni_passthrough_v1`` enabled, a TCP listener can route by the
-TLS ClientHello server name. Use ``TLS_SNI`` with ``EQUAL_TO`` and supply an
-exact DNS hostname without a key or inversion. The policy must redirect
-to a TCP pool with ``tls_enabled`` set to ``false``.
+The Amphora provider can route connections on a TCP listener by the TLS
+ClientHello server name. A ``TLS_SNI`` rule belongs to a
+``REDIRECT_TO_POOL`` policy targeting a TCP pool with ``tls_enabled`` set
+to ``false``. Both comparisons ignore case and accept neither a key nor
+inversion.
+
+For an exact DNS hostname, use ``EQUAL_TO``. The region must enable
+``tls_sni_passthrough_v1`` for the provider.
 
 .. code-block:: json
 
    {"rule": {"type": "TLS_SNI", "compare_type": "EQUAL_TO",
              "value": "a.example.test"}}
+
+For a DNS wildcard, use ``ENDS_WITH``. The region must enable both
+``tls_sni_passthrough_v1`` and ``tls_sni_suffix_v1`` for the provider. The
+wildcard matches subdomains at any depth, such as ``a.b.example.test``.
+The apex ``example.test`` is excluded. Exact matches take precedence over
+wildcards. The longest matching suffix wins among wildcards, with policy
+position breaking ties.
+
+.. code-block:: json
+
+   {"rule": {"type": "TLS_SNI", "compare_type": "ENDS_WITH",
+             "value": "*.example.test"}}
 
 .. rest_status_code:: success ../http-status.yaml
 

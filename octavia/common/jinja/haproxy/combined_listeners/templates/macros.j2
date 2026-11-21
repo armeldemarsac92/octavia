@@ -106,7 +106,11 @@ bind {{ lb_vip_address }}:{{ listener.protocol_port }} {{
 
 {% macro l7rule_macro(constants, l7rule) %}
     {% if l7rule.type == constants.L7RULE_TYPE_TLS_SNI %}
+        {% if l7rule.compare_type == constants.L7RULE_COMPARE_TYPE_ENDS_WITH %}
+        acl {{ l7rule.id }} req.ssl_sni -i -m end {{ l7rule.value[1:] }}
+        {% else %}
         acl {{ l7rule.id }} req.ssl_sni -i -m str {{ l7rule.value }}
+        {% endif %}
     {% elif l7rule.type == constants.L7RULE_TYPE_HOST_NAME %}
         acl {{ l7rule.id }} req.hdr(host) -i {{ l7rule_compare_type_macro(
             constants, l7rule.compare_type) }} -- {{ l7rule.value }}

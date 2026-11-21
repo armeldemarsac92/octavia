@@ -137,3 +137,31 @@ includes ``tls_sni_passthrough_v1``. Removing the provider name disables new
 SNI policy and rule admission. Updated workers can still render existing
 routes and handle their removal. Remove the SNI policies before downgrading
 the workers.
+
+TLS passthrough by wildcard SNI
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Use a ``TLS_SNI`` rule with comparison ``ENDS_WITH`` and a DNS wildcard
+such as ``*.example.test``. It matches subdomains such as
+``a.example.test`` and ``a.b.example.test``, case-insensitively. It does
+not match the apex ``example.test`` or names such as
+``a.notexample.test``. Keys and inversion are unsupported.
+
+On a TCP listener, a matching exact rule takes precedence over a wildcard,
+and the longest matching wildcard suffix takes precedence over broader
+suffixes. Policy position breaks ties. The rules in each policy must still
+all match.
+
+Wildcard admission defaults to disabled. After upgrading the API, workers
+and Amphora fleet, enroll the provider in both settings.
+
+.. code-block:: ini
+
+   [api_settings]
+   enabled_tls_sni_providers = amphora
+   enabled_tls_sni_suffix_providers = amphora
+
+The capabilities endpoint then also includes ``tls_sni_suffix_v1``.
+Removing the provider from the wildcard opt-in prevents new wildcard rules,
+changes to wildcard matches and reactivation. Existing wildcard routes
+continue to render and can be disabled or removed.

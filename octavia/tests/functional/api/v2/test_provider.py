@@ -68,6 +68,20 @@ class TestGatewayCapabilities(base.BaseAPITest):
         self.assertEqual(
             {'gateway_capabilities': []},
             self.get(self.capabilities_path('noop_driver')).json)
+        self.conf.config(
+            group='api_settings',
+            enabled_tls_sni_suffix_providers=['amphora', 'noop_driver'])
+        self.assertEqual(
+            {'gateway_capabilities': ['tls_sni_passthrough_v1',
+                                      'tls_sni_suffix_v1']},
+            self.get(self.capabilities_path()).json)
+        self.assertEqual(
+            {'gateway_capabilities': []},
+            self.get(self.capabilities_path('noop_driver')).json)
+        self.conf.config(group='api_settings', enabled_tls_sni_providers=[])
+        self.assertEqual(
+            {'gateway_capabilities': []},
+            self.get(self.capabilities_path()).json)
 
     def test_requires_opt_in_for_the_requested_compatible_provider(self):
         empty = {'gateway_capabilities': []}
