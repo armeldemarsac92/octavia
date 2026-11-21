@@ -193,6 +193,10 @@ class L7PolicyController(base.BaseController):
             self._test_lb_and_listener_statuses(
                 lock_session, lb_id=load_balancer_id,
                 listener_ids=[listener_id])
+            if driver_utils.uses_tls_sni_policy_path(
+                    driver, listener.protocol):
+                self.repositories.l7policy.validate_tcp_redirect_pool(
+                    lock_session, listener, l7policy_dict['redirect_pool_id'])
             db_l7policy = self._validate_create_l7policy(
                 lock_session, l7policy_dict)
 
@@ -280,6 +284,10 @@ class L7PolicyController(base.BaseController):
             driver = driver_factory.get_driver(provider)
             action = l7policy_dict.get('action', db_l7policy.action)
             routing_changed = {'action', 'fixed_response', 'targets'}
+            tcp_policy = driver_utils.uses_tls_sni_policy_path(
+                driver, listener.protocol)
+            if tcp_policy and l7policy_dict.get('redirect_pool_id'):
+                routing_changed.add('redirect_pool_id')
             enabled = l7policy_dict.get('enabled', db_l7policy.enabled)
             activates_policy = enabled and (
                 not db_l7policy.enabled or
@@ -292,6 +300,11 @@ class L7PolicyController(base.BaseController):
                 driver_utils.require_gateway_policy_action(
                     driver, action, listener.protocol,
                     request_header_operations=retained_operations)
+                if tcp_policy:
+                    target = l7policy_dict.get(
+                        'redirect_pool_id', db_l7policy.redirect_pool_id)
+                    self.repositories.l7policy.validate_tcp_redirect_pool(
+                        lock_session, listener, target)
             validate_policy_request_headers(
                 l7policy_dict, listener.protocol, driver,
                 old_policy=db_l7policy)

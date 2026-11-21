@@ -1360,6 +1360,52 @@ class TestHaproxyCfg(base.TestCase):
         self.assertEqual(sample_configs_combined.sample_base_expected_config(
             frontend=fe, global_opts=g_opts), rendered_obj)
 
+    def test_render_tcp_clienthello_sni(self):
+        samples = sample_configs_combined
+        default_pool = samples.sample_pool_tuple(
+            proto='TCP', persistence=False)
+        target = samples.sample_pool_tuple(
+            proto='TCP', sample_pool=2, persistence=False)
+        rule = samples.sample_l7rule_tuple(
+            'route-sni', type='TLS_SNI', compare_type='EQUAL_TO',
+            value='A.example.test')
+        policy = samples.sample_l7policy_tuple('policy')._replace(
+            redirect_pool=target, l7rules=[rule])
+        listener = samples.sample_listener_tuple(
+            proto='TCP', persistence=False)._replace(
+                default_pool=default_pool, pools=[default_pool, target])
+
+        def render(current_policy):
+            return self.jinja_cfg.render_loadbalancer_obj(
+                samples.sample_amphora_tuple(),
+                [listener._replace(l7policies=[current_policy])], {})
+
+        config = render(policy)
+        self.assertIn('tcp-request inspect-delay 1000', config)
+        self.assertIn('tcp-request content accept if { req.ssl_hello_type 1 }',
+                      config)
+        self.assertIn('acl route-sni req.ssl_sni -i -m str A.example.test',
+                      config)
+        self.assertIn(
+            'use_backend sample_pool_id_2:sample_listener_id_1 if route-sni',
+            config)
+        self.assertIn(
+            'default_backend sample_pool_id_1:sample_listener_id_1', config)
+        for inactive in (
+                policy._replace(enabled=False),
+                policy._replace(provisioning_status=constants.PENDING_DELETE),
+                policy._replace(l7rules=[]),
+                policy._replace(l7rules=[rule._replace(enabled=False)]),
+                policy._replace(l7rules=[rule._replace(type='HOST_NAME')]),
+                policy._replace(redirect_pool=None)):
+            with self.subTest(policy=inactive):
+                config = render(inactive)
+                self.assertNotIn('use_backend', config)
+                self.assertNotIn('req.ssl_', config)
+                self.assertIn(
+                    'default_backend sample_pool_id_1:sample_listener_id_1',
+                    config)
+
     def test_render_template_l7policies(self):
         fe = ("frontend sample_listener_id_1\n"
               "    maxconn {maxconn}\n"

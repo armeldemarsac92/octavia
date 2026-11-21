@@ -99,6 +99,9 @@ api_opts = [
                        'header operations. Enable only after the Octavia '
                        'services, driver and Amphora images support these '
                        'operations.')),
+    cfg.ListOpt('enabled_tls_sni_providers', default=[],
+                help=_('Providers enabled in this region for TLS ClientHello '
+                       'SNI routing on TCP listeners.')),
     cfg.ListOpt('enabled_backend_h2c_providers', default=[],
                 help=_('Provider driver names whose regional fleets support '
                        'HTTP/2 prior knowledge on cleartext HTTP pools.')),

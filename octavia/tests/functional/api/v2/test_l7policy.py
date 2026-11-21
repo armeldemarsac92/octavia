@@ -2079,3 +2079,121 @@ class TestL7Policy(base.BaseAPITest):
                         self._build_body(new_l7policy), status=400)
                     self.assertEqual(expect_error_msg, res.json['faultstring'])
                     self.assert_correct_status(lb_id=self.lb_id)
+
+    @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
+    def test_tls_sni_admission_and_withdrawal(self, rpc):
+        lb = self.create_load_balancer(
+            uuidutils.generate_uuid(), provider='amphora')['loadbalancer']
+        lb_id = lb['id']
+        self.set_lb_status(lb_id)
+        listener = self.create_listener('TCP', 443, lb_id)['listener']
+        self.set_lb_status(lb_id)
+        pool = self.create_pool(
+            lb_id, 'TCP', 'ROUND_ROBIN')['pool']
+        self.set_lb_status(lb_id)
+        target = {'redirect_pool_id': pool['id']}
+
+        rpc.return_value.cast.reset_mock()
+        self.create_l7policy(listener['id'], 'REDIRECT_TO_POOL',
+                             status=501, **target)
+        rpc.return_value.cast.assert_not_called()
+        self.conf.config(group='api_settings',
+                         enabled_tls_sni_providers=['amphora'])
+        proxy_pool = self.create_pool(
+            lb_id, 'PROXY', 'ROUND_ROBIN')['pool']
+        self.set_lb_status(lb_id)
+        self.create_l7policy(
+            listener['id'], 'REDIRECT_TO_POOL',
+            redirect_pool_id=proxy_pool['id'], status=400)
+        self.create_l7policy(listener['id'], 'REJECT', status=400)
+        policy = self.create_l7policy(
+            listener['id'], 'REDIRECT_TO_POOL', **target)['l7policy']
+        policy_path = self.L7POLICY_PATH.format(l7policy_id=policy['id'])
+        self.set_lb_status(lb_id)
+        self.create_l7rule(
+            policy['id'], 'HOST_NAME', 'EQUAL_TO', 'a.example.test',
+            status=400)
+        self.create_l7rule(
+            policy['id'], 'TLS_SNI', 'EQUAL_TO', '*.example.test',
+            status=400)
+        rule = self.create_l7rule(
+            policy['id'], 'TLS_SNI', 'EQUAL_TO', 'A.example.test')['rule']
+        path = self.L7RULE_PATH.format(l7policy_id=policy['id'],
+                                       l7rule_id=rule['id'])
+        self.set_lb_status(lb_id)
+        self.app.patch_json(self._get_full_path(path),
+                            params={'rule': {'value': 'b.example.test'}},
+                            status=405)
+        self.put(path, {'rule': {'invert': True}}, status=400)
+        self.put(path, {'rule': {'type': 'HOST_NAME'}}, status=400)
+        unrelated = self.create_l7policy(
+            self.listener_id, 'REJECT')['l7policy']
+        wrong_parent = self.L7RULE_PATH.format(l7policy_id=unrelated['id'],
+                                               l7rule_id=rule['id'])
+        self.put(wrong_parent, {'rule': {'type': 'HOST_NAME'}}, status=404)
+        self.put(policy_path, {'l7policy': {
+            'redirect_pool_id': proxy_pool['id']}}, status=400)
+        self.put(path, {'rule': {'value': 'b.example.test'}})
+        self.set_lb_status(lb_id)
+        self.assertEqual('b.example.test',
+                         self.get(path).json['rule']['value'])
+
+        pool_path = self.POOL_PATH.format(pool_id=pool['id'])
+        listener_path = self.LISTENER_PATH.format(listener_id=listener['id'])
+        self.put(pool_path, {'pool': {'tls_enabled': True}}, status=400)
+        self.put(pool_path, {'pool': {'admin_state_up': False}})
+        self.set_lb_status(lb_id)
+        self.put(listener_path, {'listener': {'admin_state_up': False}})
+        self.set_lb_status(lb_id)
+
+        self.conf.config(group='api_settings', enabled_tls_sni_providers=[])
+        self.put(pool_path, {'pool': {'admin_state_up': True}}, status=501)
+        self.put(listener_path, {'listener': {'admin_state_up': True}},
+                 status=501)
+        self.put(path, {'rule': {'value': 'c.example.test'}}, status=501)
+        self.put(path, {'rule': {'admin_state_up': False}})
+        self.set_lb_status(lb_id)
+        self.put(path, {'rule': {'admin_state_up': True}}, status=501)
+        self.put(policy_path, {'l7policy': {'admin_state_up': False}})
+        self.set_lb_status(lb_id)
+        self.put(policy_path, {'l7policy': {'admin_state_up': True}},
+                 status=501)
+        self.delete(path)
+        self.set_lb_status(lb_id)
+        self.delete(policy_path)
+
+    @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
+    def test_tls_sni_nested_create(self, rpc):
+        project_id = uuidutils.generate_uuid()
+        pool = {'name': 'passthrough', 'protocol': 'TCP',
+                'lb_algorithm': 'ROUND_ROBIN'}
+        rule = {'type': 'TLS_SNI', 'compare_type': 'EQUAL_TO',
+                'value': 'a.example.test'}
+        policy = {'action': 'REDIRECT_TO_POOL',
+                  'redirect_pool': {'name': pool['name']}, 'rules': [rule]}
+        listener = {'name': 'sni', 'protocol': 'TCP', 'protocol_port': 443,
+                    'l7policies': [policy]}
+        body = {'loadbalancer': {'project_id': project_id,
+                                 'provider': 'amphora',
+                                 'vip_subnet_id': uuidutils.generate_uuid(),
+                                 'listeners': [listener], 'pools': [pool]}}
+        driver = 'octavia.api.drivers.amphora_driver.v2.driver'
+        create_vip = f'{driver}.AmphoraProviderDriver.create_vip_port'
+        with mock.patch(create_vip) as vip:
+            self.post(self.LBS_PATH, body, status=501)
+            self.conf.config(group='api_settings',
+                             enabled_tls_sni_providers=['amphora'])
+            listener['protocol'] = 'HTTP'
+            self.post(self.LBS_PATH, body, status=400)
+            listener['protocol'] = 'TCP'
+            pool['protocol'] = 'PROXY'
+            self.post(self.LBS_PATH, body, status=400)
+            vip.assert_not_called()
+            rpc.return_value.cast.assert_not_called()
+
+        pool['protocol'] = 'TCP'
+        load_balancer = self.post(self.LBS_PATH, body).json['loadbalancer']
+        saved_policy = load_balancer['listeners'][0]['l7policies'][0]
+        self.assertEqual('TLS_SNI', saved_policy['rules'][0]['type'])
+        self.assertEqual(load_balancer['pools'][0]['id'],
+                         saved_policy['redirect_pool_id'])

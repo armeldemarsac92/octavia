@@ -41,6 +41,13 @@ class L7RuleController(base.BaseController):
         super().__init__()
         self.l7policy_id = l7policy_id
 
+    def _get_policy_l7rule(self, session, rule_id):
+        rule = self._get_db_l7rule(session, rule_id, show_deleted=False)
+        if rule.l7policy_id != self.l7policy_id:
+            raise exceptions.NotFound(
+                resource=data_models.L7Rule._name(), id=rule_id)
+        return rule
+
     @wsme_pecan.wsexpose(l7rule_types.L7RuleRootResponse, wtypes.text,
                          [wtypes.text], ignore_extra_args=True)
     def get(self, id, fields=None):
@@ -48,11 +55,7 @@ class L7RuleController(base.BaseController):
         context = pecan_request.context.get('octavia_context')
 
         with context.session.begin():
-            l7rule = self._get_db_l7rule(
-                context.session,
-                id,
-                show_deleted=False
-            )
+            l7rule = self._get_policy_l7rule(context.session, id)
 
             self._auth_validate_action(context, l7rule.project_id,
                                        constants.RBAC_GET_ONE)
@@ -179,11 +182,20 @@ class L7RuleController(base.BaseController):
 
             db_l7policy = self._test_lb_listener_policy_statuses(
                 context.session)
-            if l7rule_dict['enabled']:
+            protocol = db_l7policy.listener.protocol
+            driver_utils.validate_l7rule_context(
+                driver, l7rule.type, protocol)
+            tcp_policy = driver_utils.uses_tls_sni_policy_path(
+                driver, protocol)
+            if l7rule_dict['enabled'] or tcp_policy:
                 driver_utils.require_gateway_policy_action(
                     driver, db_l7policy.action, db_l7policy.listener.protocol,
                     request_header_operations=(
                         db_l7policy.request_header_operations))
+            if tcp_policy:
+                self.repositories.l7policy.validate_tcp_redirect_pool(
+                    context.session, db_l7policy.listener,
+                    db_l7policy.redirect_pool_id)
 
             db_l7rule = self._validate_create_l7rule(context.session,
                                                      l7rule_dict)
@@ -235,8 +247,7 @@ class L7RuleController(base.BaseController):
         l7rule = l7rule_.rule
         context = pecan_request.context.get('octavia_context')
         with context.session.begin():
-            db_l7rule = self._get_db_l7rule(context.session, id,
-                                            show_deleted=False)
+            db_l7rule = self._get_policy_l7rule(context.session, id)
             db_l7policy = self._get_db_l7policy(context.session,
                                                 self.l7policy_id,
                                                 show_deleted=False)
@@ -259,18 +270,28 @@ class L7RuleController(base.BaseController):
                 context.session)
             context.session.refresh(db_l7rule, with_for_update=True)
             self._validate_rule_update(db_l7rule, l7rule_dict)
+            protocol = db_l7policy.listener.protocol
+            driver_utils.validate_l7rule_context(
+                driver, l7rule_dict.get('type', db_l7rule.type), protocol)
 
             match_fields = {'type', 'compare_type', 'key', 'value', 'invert'}
             enabled = l7rule_dict.get('enabled', db_l7rule.enabled)
-            if enabled and (
-                    not db_l7rule.enabled or any(
-                        field in l7rule_dict and
-                        l7rule_dict[field] != getattr(db_l7rule, field)
-                        for field in match_fields)):
+            match_changed = any(
+                field in l7rule_dict and
+                l7rule_dict[field] != getattr(db_l7rule, field)
+                for field in match_fields)
+            tcp_policy = driver_utils.uses_tls_sni_policy_path(
+                driver, protocol)
+            if ((enabled and (not db_l7rule.enabled or match_changed)) or
+                    (tcp_policy and match_changed)):
                 driver_utils.require_gateway_policy_action(
                     driver, db_l7policy.action, db_l7policy.listener.protocol,
                     request_header_operations=(
                         db_l7policy.request_header_operations))
+                if tcp_policy:
+                    self.repositories.l7policy.validate_tcp_redirect_pool(
+                        context.session, db_l7policy.listener,
+                        db_l7policy.redirect_pool_id)
             l7rule_dict['id'] = id
             provider_l7rule_dict = (
                 driver_utils.l7rule_dict_to_provider_dict(l7rule_dict))
@@ -308,8 +329,7 @@ class L7RuleController(base.BaseController):
         """Deletes a l7rule."""
         context = pecan_request.context.get('octavia_context')
         with context.session.begin():
-            db_l7rule = self._get_db_l7rule(context.session, id,
-                                            show_deleted=False)
+            db_l7rule = self._get_policy_l7rule(context.session, id)
 
             db_l7policy = self._get_db_l7policy(context.session,
                                                 self.l7policy_id,
