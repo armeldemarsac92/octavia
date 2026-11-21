@@ -20,6 +20,7 @@ from wsme import types as wtypes
 from wsmeext import pecan as wsme_pecan
 
 from octavia.api.drivers import driver_factory
+from octavia.api.drivers import utils as driver_utils
 from octavia.api.v2.controllers import base
 from octavia.api.v2.types import provider as provider_types
 from octavia.common import constants
@@ -54,11 +55,7 @@ class ProviderController(base.BaseController):
 
     @pecan_expose()
     def _lookup(self, provider, *remainder):
-        """Overridden pecan _lookup method for custom routing.
-
-        Currently it checks if this was a flavor capabilities request and
-        routes the request to the FlavorCapabilitiesController.
-        """
+        """Route requests for a specific provider's capabilities."""
         if provider and remainder:
             if remainder[0] == 'flavor_capabilities':
                 return (FlavorCapabilitiesController(provider=provider),
@@ -67,7 +64,28 @@ class ProviderController(base.BaseController):
                 return (
                     AvailabilityZoneCapabilitiesController(provider=provider),
                     remainder[1:])
+            if remainder[0] == 'gateway_capabilities':
+                return (GatewayCapabilitiesController(provider=provider),
+                        remainder[1:])
         return None
+
+
+class GatewayCapabilitiesController(base.BaseController):
+    RBAC_TYPE = constants.RBAC_PROVIDER_GATEWAY
+
+    def __init__(self, provider):
+        super().__init__()
+        self.provider = provider
+
+    @wsme_pecan.wsexpose(provider_types.GatewayCapabilitiesResponse,
+                         status_code=200)
+    def get_all(self):
+        context = pecan_request.context.get('octavia_context')
+        self._auth_validate_action(context, context.project_id,
+                                   constants.RBAC_GET_ALL)
+        driver = driver_factory.get_driver(self.provider)
+        return provider_types.GatewayCapabilitiesResponse(
+            gateway_capabilities=driver_utils.gateway_capabilities(driver))
 
 
 class FlavorCapabilitiesController(base.BaseController):

@@ -22,6 +22,7 @@ from oslo_config import cfg
 from oslo_config import fixture as oslo_fixture
 from oslo_utils import uuidutils
 
+from octavia.api.drivers.noop_driver import driver as noop_driver
 from octavia.common import constants
 import octavia.common.context
 from octavia.common import data_models
@@ -536,6 +537,20 @@ class TestListener(base.BaseAPITest):
         objects = response.json.get(self.root_tag_list)
         self.assertEqual(len(objects), 0)
 
+    @mock.patch.object(noop_driver.NoopProviderDriver,
+                       'supports_weighted_targets', True, create=True)
+    def test_create_listener_rejects_nested_weighted_policy(self):
+        self.conf.config(group='api_settings',
+                         enabled_gateway_action_providers=['noop_driver'])
+        policy = {
+            'action': 'WEIGHTED_TARGETS',
+            'targets': [{'weight': 1,
+                         'fixed_response': {'status_code': 500}}],
+        }
+        response = self.create_listener('HTTP', 80, self.lb_id,
+                                        l7policies=[policy], status=400)
+        self.assertIn('L7 policy endpoint', response['faultstring'])
+
     def test_get(self):
         listener = self.create_listener(
             constants.PROTOCOL_HTTP, 80, self.lb_id).get(self.root_tag)
@@ -655,6 +670,85 @@ class TestListener(base.BaseAPITest):
                                       constants.PENDING_UPDATE)
         self.assert_final_listener_statuses(self.lb_id, listener_api.get('id'))
         return listener_api
+
+    @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
+    def test_amphora_listener_defaults_require_opt_in(self, rpc):
+        lb = self.create_load_balancer(
+            uuidutils.generate_uuid(), provider='amphora')['loadbalancer']
+        self.set_lb_status(lb['id'])
+        response = {'status_code': 404}
+        rpc.return_value.cast.reset_mock()
+        self.create_listener('HTTP', 80, lb['id'], status=501,
+                             default_http_response=response)
+        self.create_listener('HTTP', 80, lb['id'], status=501, l7policies=[{
+            'action': 'FIXED_RESPONSE', 'fixed_response': response}])
+        rpc.return_value.cast.assert_not_called()
+        listener = self.create_listener('HTTP', 80, lb['id'])['listener']
+        self.set_lb_status(lb['id'])
+        path = self.LISTENER_PATH.format(listener_id=listener['id'])
+        payload = {'listener': {'default_http_response': response}}
+        self.put(path, payload, status=501)
+
+        self.conf.config(group='api_settings',
+                         enabled_gateway_action_providers=['amphora'])
+        self.put(path, payload)
+        self.set_lb_status(lb['id'])
+        self.conf.config(group='api_settings',
+                         enabled_gateway_action_providers=[])
+        retained = self.put(path, {
+            'listener': {'name': 'retained'}}).json['listener']
+        self.assertEqual(response, retained['default_http_response'])
+        self.set_lb_status(lb['id'])
+        cleared = self.put(path, {'listener': {
+            'default_http_response': None}}).json['listener']
+        self.assertIsNone(cleared.get('default_http_response'))
+
+    @mock.patch.object(noop_driver.NoopProviderDriver,
+                       'supports_fixed_http_responses', True)
+    def test_default_http_response_update_and_clear(self):
+        self.conf.config(group='api_settings',
+                         enabled_gateway_action_providers=['noop_driver'])
+        response = {'status_code': 404}
+        listener = self.create_listener(
+            'HTTP', 80, self.lb_id,
+            default_http_response=response)['listener']
+        path = self.LISTENER_PATH.format(listener_id=listener['id'])
+        self.set_lb_status(self.lb_id)
+        self.put(path, {'listener': {'name': 'renamed'}})
+        updated = self.get(path).json['listener']
+        self.assertEqual(response, updated['default_http_response'])
+        self.set_lb_status(self.lb_id)
+        self.put(path, {'listener': {'default_pool_id': self.pool_id}},
+                 status=400)
+        listener = self.put(path, {'listener': {
+            'default_http_response': None,
+            'default_pool_id': self.pool_id}}).json['listener']
+        self.assertIsNone(listener.get('default_http_response'))
+        self.assertEqual(self.pool_id, listener['default_pool_id'])
+
+    def test_default_http_response_rejects_non_http_and_invalid_status(self):
+        for protocol, status_code in [('TCP', 404), ('HTTP', 503),
+                                      ('HTTP', '404')]:
+            with self.subTest(protocol=protocol, status_code=status_code):
+                self.create_listener(
+                    protocol, 80, self.lb_id, status=400,
+                    default_http_response={'status_code': status_code})
+
+    def test_default_http_response_rejected_by_unsupported_provider(self):
+        lb = self.create_load_balancer(
+            uuidutils.generate_uuid(), provider='noop_driver-alt')
+        lb_id = lb['loadbalancer']['id']
+        self.set_lb_status(lb_id)
+        response = {'status_code': 404}
+        self.create_listener('HTTP', 80, lb_id, status=501,
+                             default_http_response=response)
+        listener = self.create_listener('HTTP', 80, lb_id)['listener']
+        self.set_lb_status(lb_id)
+        path = self.LISTENER_PATH.format(listener_id=listener['id'])
+        self.put(path, {'listener': {'default_http_response': response}},
+                 status=501)
+        self.assertNotIn('default_http_response',
+                         self.get(path).json['listener'])
 
     def test_create_with_timeouts(self):
         optionals = {

@@ -22,6 +22,13 @@ rules = [
         "List enabled providers",
         [{'method': 'GET', 'path': '/v2/lbaas/providers'}]
     ),
+    policy.DocumentedRuleDefault(
+        f'{constants.RBAC_PROVIDER_GATEWAY}{constants.RBAC_GET_ALL}',
+        constants.RULE_API_READ,
+        "Show enabled provider Gateway API capabilities",
+        [{'method': 'GET',
+          'path': '/v2/lbaas/providers/{provider}/gateway_capabilities'}]
+    ),
 ]
 
 

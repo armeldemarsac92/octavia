@@ -35,6 +35,35 @@ LOG = logging.getLogger(__name__)
 CONF = cfg.CONF
 
 
+def gateway_capabilities(driver):
+    if driver.name not in CONF.api_settings.enabled_gateway_action_providers:
+        return []
+
+    capabilities = []
+    if getattr(driver, 'supports_fixed_http_responses', False) is True:
+        capabilities.append(constants.GATEWAY_CAPABILITY_FIXED_HTTP_RESPONSES)
+    if getattr(driver, 'supports_weighted_targets', False) is True:
+        capabilities.append(constants.GATEWAY_CAPABILITY_WEIGHTED_HTTP_TARGETS)
+    return capabilities
+
+
+def require_fixed_http_responses(driver):
+    if (constants.GATEWAY_CAPABILITY_FIXED_HTTP_RESPONSES not in
+            gateway_capabilities(driver)):
+        raise exceptions.ProviderUnsupportedOptionError(
+            prov=driver.name, user_msg=_(
+                'Local HTTP responses are unavailable for this provider.'))
+
+
+def require_weighted_targets(driver):
+    if (constants.GATEWAY_CAPABILITY_WEIGHTED_HTTP_TARGETS not in
+            gateway_capabilities(driver)):
+        raise exceptions.ProviderUnsupportedOptionError(
+            prov=driver.name, user_msg=_(
+                'Weighted L7 policy targets are unavailable for this '
+                'provider.'))
+
+
 def call_provider(provider, driver_method, *args, **kwargs):
     """Wrap calls to the provider driver to handle driver errors.
 
@@ -189,6 +218,8 @@ def db_listeners_to_provider_dicts_list_of_dicts(db_listeners,
 def db_listener_to_provider_listener(db_listener, for_delete=False):
     new_listener_dict = listener_dict_to_provider_dict(
         db_listener.to_dict(recurse=True), for_delete=for_delete)
+    if new_listener_dict.get('default_http_response') is None:
+        new_listener_dict.pop('default_http_response', None)
     if ('default_pool' in new_listener_dict and
             new_listener_dict['default_pool']):
         provider_pool = db_pool_to_provider_pool(db_listener.default_pool,
@@ -514,12 +545,20 @@ def db_l7policies_to_provider_l7policies(db_l7policies):
 
 
 def db_l7policy_to_provider_l7policy(db_l7policy):
-    new_l7policy_dict = l7policy_dict_to_provider_dict(
-        db_l7policy.to_dict(recurse=True))
+    l7policy_dict = db_l7policy.to_dict(recurse=True)
+    # ORM snapshots expose serialized targets through a property.
+    targets = db_l7policy.targets
+    if targets:
+        l7policy_dict['targets'] = targets
+    else:
+        l7policy_dict.pop('targets', None)
+    new_l7policy_dict = l7policy_dict_to_provider_dict(l7policy_dict)
     if 'l7rules' in new_l7policy_dict:
         del new_l7policy_dict['l7rules']
         new_l7rules = db_l7rules_to_provider_l7rules(db_l7policy.l7rules)
         new_l7policy_dict['rules'] = new_l7rules
+    if new_l7policy_dict.get('fixed_response') is None:
+        new_l7policy_dict.pop('fixed_response', None)
     return driver_dm.L7Policy.from_dict(new_l7policy_dict)
 
 

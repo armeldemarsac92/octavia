@@ -344,8 +344,9 @@ class LoadBalancerFlows:
         if cascade:
             listeners_delete = self._get_delete_listeners_flow(listeners)
             pools_delete = self._get_delete_pools_flow(pools)
-            delete_LB_flow.add(pools_delete)
+            # Listener deletion removes L7 policy references to the pools.
             delete_LB_flow.add(listeners_delete)
+            delete_LB_flow.add(pools_delete)
             member_ports_delete = self.get_delete_member_ports_subflow(
                 lb[constants.LOADBALANCER_ID])
             delete_LB_flow.add(member_ports_delete)

@@ -148,10 +148,45 @@ bind {{ lb_vip_address }}:{{ listener.protocol_port }} {{
 {% endmacro %}
 
 
-{% macro l7policy_macro(constants, l7policy, listener) %}
+{% macro fixed_response_backend_name(constants, listener, response_id) -%}
+    {{ constants.HAPROXY_FIXED_RESPONSE_BACKEND_PREFIX }}{{ listener.id }}-{{ response_id }}
+{%- endmacro %}
+
+
+{% macro fixed_response_backend_macro(constants, listener, response_id, status_code) %}
+backend {{ fixed_response_backend_name(constants, listener, response_id) }}
+    mode http
+    http-request return status {{ status_code }}
+
+{% endmacro %}
+
+
+{% macro l7policy_rules_macro(constants, l7policy) %}
     {% for l7rule in l7policy.l7rules %}
         {{- l7rule_macro(constants, l7rule) -}}
     {% endfor %}
+{% endmacro %}
+
+
+{% macro weighted_policy_match_macro(l7policy) -%}
+    { var(txn.octavia_l7_policy) -m str {{ l7policy.id }} }
+{%- endmacro %}
+
+
+{% macro weighted_policy_draw_macro(constants, l7policy) %}
+    {% if l7policy.weighted_targets is defined or
+          l7policy.fixed_http_status_code is defined or
+          (l7policy.action == constants.L7POLICY_ACTION_REDIRECT_TO_POOL and
+           l7policy.redirect_pool.enabled) %}
+    http-request set-var(txn.octavia_l7_policy) str({{ l7policy.id }}) if !{ var(txn.octavia_l7_policy) -m found }{{ l7rule_list_macro(l7policy) }}
+        {% if l7policy.weighted_targets is defined %}
+    http-request set-var(txn.octavia_weighted_draw) rand({{ l7policy.total_weight }}) if {{ weighted_policy_match_macro(l7policy) }}
+        {% endif %}
+    {% endif %}
+{% endmacro %}
+
+
+{% macro l7policy_macro(constants, l7policy, listener) %}
     {% if l7policy.redirect_http_code %}
         {% set redirect_http_code_opt = " code %s"|format(
         l7policy.redirect_http_code) %}
@@ -164,6 +199,18 @@ bind {{ lb_vip_address }}:{{ listener.protocol_port }} {{
     redirect {{- redirect_http_code_opt }} location {{ l7policy.redirect_url }} if{{ l7rule_list_macro(l7policy) }}
     {% elif l7policy.action == constants.L7POLICY_ACTION_REDIRECT_TO_POOL and l7policy.redirect_pool.enabled %}
     use_backend {{ l7policy.redirect_pool.id }}:{{ listener.id }} if{{ l7rule_list_macro(l7policy) }}
+    {% elif l7policy.action == constants.L7POLICY_ACTION_FIXED_RESPONSE %}
+    {# Keep status responses in the same ordered switching stage as pools. #}
+    use_backend {{ fixed_response_backend_name(constants, listener, l7policy.id) }} if{{ l7rule_list_macro(l7policy) }}
+    {% elif l7policy.weighted_targets is defined %}
+        {% for target in l7policy.weighted_targets %}
+            {% if target.pool_id is defined %}
+                {% set backend = target.pool_id ~ ':' ~ listener.id %}
+            {% else %}
+                {% set backend = fixed_response_backend_name(constants, listener, 'weighted-' ~ target.status_code) %}
+            {% endif %}
+    use_backend {{ backend }} if {{ weighted_policy_match_macro(l7policy) }} { var(txn.octavia_weighted_draw) -m int {{ target.first }}:{{ target.last }} }
+        {% endfor %}
     {% elif l7policy.action == constants.L7POLICY_ACTION_REDIRECT_PREFIX %}
     redirect {{- redirect_http_code_opt }} prefix {{ l7policy.redirect_prefix }} if{{ l7rule_list_macro(l7policy) }}
     {% endif %}
@@ -187,11 +234,26 @@ frontend {{ listener.id }}
     {{ bind_macro(constants, lib_consts, listener, add_vip)|trim() }}
     {% endfor %}
     mode {{ listener.protocol_mode }}
-    {% for l7policy in listener.l7policies if (l7policy.enabled and
-                                               l7policy.l7rules|length > 0) %}
+    {% set policies = listener.l7policies|selectattr('enabled')|selectattr('l7rules')|list %}
+    {% if listener.weighted_response_codes is defined %}
+        {# Match the first eligible switching policy before sampling. Only a
+           weighted winner draws, and txn variables are reset per request. #}
+        {% for l7policy in policies %}
+            {{- l7policy_rules_macro(constants, l7policy) -}}
+        {% endfor %}
+        {% for l7policy in policies %}
+            {{- weighted_policy_draw_macro(constants, l7policy) -}}
+        {% endfor %}
+    {% endif %}
+    {% for l7policy in policies %}
+        {% if listener.weighted_response_codes is not defined %}
+            {{- l7policy_rules_macro(constants, l7policy) -}}
+        {% endif %}
         {{- l7policy_macro(constants, l7policy, listener) -}}
     {% endfor %}
-    {% if listener.default_pool and listener.default_pool.enabled %}
+    {% if listener.default_http_status_code is defined %}
+    default_backend {{ fixed_response_backend_name(constants, listener, 'default') }}
+    {% elif listener.default_pool and listener.default_pool.enabled %}
     default_backend {{ listener.default_pool.id }}:{{ listener.id }}
     {% endif %}
     timeout client {{ listener.timeout_client_data }}

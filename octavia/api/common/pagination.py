@@ -279,6 +279,10 @@ class PaginationHelper:
                 tag_params['not-tags-any'] = self._prepare_tags_list(
                     filter_params.pop('not-tags-any'))
 
+            # Weighted destinations are an ordered collection.
+            if model is models.L7Policy and 'targets' in filter_params:
+                raise exceptions.InvalidFilterArgument()
+
             # Drop invalid arguments
             self.filters = {k: v for (k, v) in filter_params.items()
                             if k in vars(model.__data_model__())}
@@ -309,6 +313,9 @@ class PaginationHelper:
                 current_sort_key = (
                     model.__v2_wsme__.translate_key_to_db_obj(
                         current_sort_key))
+                if (model is models.L7Policy and
+                        current_sort_key.split('.', 1)[0] == 'targets'):
+                    raise exceptions.InvalidSortKey(key=current_sort_key)
                 sort_dir_func = {
                     constants.ASC: sqlalchemy.asc,
                     constants.DESC: sqlalchemy.desc,

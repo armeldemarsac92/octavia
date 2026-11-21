@@ -38,6 +38,8 @@ class L7PolicyResponse(BaseL7PolicyType):
     listener_id = wtypes.wsattr(wtypes.UuidType())
     redirect_pool_id = wtypes.wsattr(wtypes.UuidType())
     redirect_url = wtypes.wsattr(wtypes.StringType())
+    fixed_response = wtypes.wsattr(types.FixedHTTPResponse)
+    targets = wtypes.wsattr(types.WeightedL7PolicyTargets())
     redirect_prefix = wtypes.wsattr(wtypes.StringType())
     position = wtypes.wsattr(wtypes.IntegerType())
     rules = wtypes.wsattr([types.IdOnlyType])
@@ -49,6 +51,13 @@ class L7PolicyResponse(BaseL7PolicyType):
     @classmethod
     def from_db_obj(cls, db_obj):
         result = super().from_db_obj(db_obj)
+        if db_obj.fixed_response is not None:
+            result.fixed_response = types.FixedHTTPResponse(
+                **db_obj.fixed_response)
+        else:
+            result.fixed_response = wtypes.Unset
+        if not db_obj.targets:
+            result.targets = wtypes.Unset
 
         if cls._full_response():
             result.rules = [
@@ -93,6 +102,8 @@ class L7PolicyPOST(BaseL7PolicyType):
         mandatory=True)
     redirect_pool_id = wtypes.wsattr(wtypes.UuidType())
     redirect_url = wtypes.wsattr(types.URLType())
+    fixed_response = wtypes.wsattr(types.FixedHTTPResponse)
+    targets = wtypes.wsattr(types.WeightedL7PolicyTargets())
     redirect_prefix = wtypes.wsattr(types.URLType())
     position = wtypes.wsattr(wtypes.IntegerType(
         minimum=constants.MIN_POLICY_POSITION,
@@ -118,6 +129,8 @@ class L7PolicyPUT(BaseL7PolicyType):
         wtypes.Enum(str, *constants.SUPPORTED_L7POLICY_ACTIONS))
     redirect_pool_id = wtypes.wsattr(wtypes.UuidType())
     redirect_url = wtypes.wsattr(types.URLType())
+    fixed_response = wtypes.wsattr(types.FixedHTTPResponse)
+    targets = wtypes.wsattr(types.WeightedL7PolicyTargets())
     redirect_prefix = wtypes.wsattr(types.URLType())
     position = wtypes.wsattr(wtypes.IntegerType(
         minimum=constants.MIN_POLICY_POSITION,
@@ -141,6 +154,8 @@ class L7PolicySingleCreate(BaseL7PolicyType):
         mandatory=True)
     redirect_pool = wtypes.wsattr(pool_types.PoolSingleCreate)
     redirect_url = wtypes.wsattr(types.URLType())
+    fixed_response = wtypes.wsattr(types.FixedHTTPResponse)
+    targets = wtypes.wsattr(types.WeightedL7PolicyTargets())
     redirect_prefix = wtypes.wsattr(types.URLType())
     position = wtypes.wsattr(wtypes.IntegerType(
         minimum=constants.MIN_POLICY_POSITION,

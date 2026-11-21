@@ -28,6 +28,8 @@ from oslo_log import log as logging
 from oslo_serialization import jsonutils
 from oslo_utils import timeutils
 from oslo_utils import uuidutils
+from sqlalchemy.orm import attributes
+from sqlalchemy.orm import lazyload
 from sqlalchemy.orm import raiseload
 from sqlalchemy.orm import Session
 from sqlalchemy.orm import subqueryload
@@ -984,6 +986,10 @@ class PoolRepository(BaseRepository):
              subqueryload(models.L7Policy.l7rules)),
             (subqueryload(models.Pool.l7policies).
              subqueryload(models.L7Policy.listener)),
+            (subqueryload(models.Pool._l7policy_targets).
+             subqueryload(models.L7PolicyTarget.l7policy).options(
+                 subqueryload(models.L7Policy.l7rules),
+                 subqueryload(models.L7Policy.listener))),
             subqueryload(models.Pool.load_balancer),
             subqueryload(models.Pool.members),
             subqueryload(models.Pool.session_persistence),
@@ -1123,6 +1129,10 @@ class ListenerRepository(BaseRepository):
         if tags is not None:
             resource = session.get(self.model_class, id)
             resource.tags = tags
+        validate.validate_default_http_response(
+            listener_db.protocol, model_kwargs.get(
+                'default_http_response', listener_db.default_http_response),
+            model_kwargs.get('default_pool_id', listener_db.default_pool_id))
         # Verify any newly specified default_pool_id exists
         default_pool_id = model_kwargs.get('default_pool_id')
         if default_pool_id:
@@ -1820,13 +1830,57 @@ class L7PolicyRepository(BaseRepository):
 
     def _validate_l7policy_pool_data(self, session, l7policy):
         """Does validations on a given L7 policy."""
-        if l7policy.action == consts.L7POLICY_ACTION_REDIRECT_TO_POOL:
+        if l7policy.action == consts.L7POLICY_ACTION_FIXED_RESPONSE:
+            listener = session.get(models.Listener, l7policy.listener_id)
+            validate.validate_fixed_http_protocol(listener.protocol)
+        elif l7policy.action == consts.L7POLICY_ACTION_REDIRECT_TO_POOL:
             session.expire(session.query(models.Listener).filter_by(
                 id=l7policy.listener_id).first())
             listener = (session.query(models.Listener).
                         filter_by(id=l7policy.listener_id).first())
             self._pool_check(session, l7policy.redirect_pool_id,
                              listener.load_balancer_id, listener.project_id)
+
+    def _weighted_target_pools(self, session, listener_id, targets):
+        listener = session.get(models.Listener, listener_id)
+        validate.validate_weighted_l7policy_protocol(listener.protocol)
+        pool_ids = {target['pool_id'] for target in targets
+                    if 'pool_id' in target}
+        if not pool_ids:
+            return {}
+
+        pools = (session.query(models.Pool)
+                 .filter(models.Pool.id.in_(pool_ids))
+                 .filter_by(project_id=listener.project_id,
+                            load_balancer_id=listener.load_balancer_id)
+                 .filter(models.Pool.provisioning_status.not_in(
+                     (consts.PENDING_DELETE, consts.DELETED)))
+                 .order_by(models.Pool.id)
+                 .populate_existing()
+                 .with_for_update()
+                 .all())
+        pools_by_id = {pool.id: pool for pool in pools}
+        for pool_id in sorted(pool_ids):
+            pool = pools_by_id.get(pool_id)
+            if pool is None:
+                raise exceptions.NotFound(
+                    resource=data_models.Pool._name(), id=pool_id)
+            if pool.protocol not in consts.VALID_LISTENER_POOL_PROTOCOL_MAP[
+                    listener.protocol]:
+                raise exceptions.ValidationException(
+                    detail="The pool protocol '%s' is invalid while the "
+                           "listener protocol is '%s'." %
+                           (pool.protocol, listener.protocol))
+        return pools_by_id
+
+    def get_weighted_policy_using_pool(self, session, pool_id):
+        # Read under the load balancer lock to see references committed by
+        # any concurrent L7 policy changes before permitting pool deletion.
+        return (session.query(models.L7PolicyTarget.l7policy_id)
+                .filter_by(pool_id=pool_id)
+                .with_for_update()
+                .limit(1)
+                .scalar())
 
     def get_all(self, session, pagination_helper=None, **filters):
         deleted = filters.pop('show_deleted', True)
@@ -1852,6 +1906,7 @@ class L7PolicyRepository(BaseRepository):
             subqueryload(models.L7Policy.l7rules),
             subqueryload(models.L7Policy.listener),
             subqueryload(models.L7Policy.redirect_pool),
+            subqueryload(models.L7Policy._targets),
             subqueryload(models.L7Policy._tags),
             raiseload('*'))
 
@@ -1859,12 +1914,35 @@ class L7PolicyRepository(BaseRepository):
             session, pagination_helper=pagination_helper,
             query_options=query_options, **filters)
 
-    def update(self, session, id, **model_kwargs):
-        l7policy_db = session.query(self.model_class).filter_by(
-            id=id).first()
-        if not l7policy_db:
+    def get_for_update(self, session, id, show_deleted=True):
+        """Load the current policy and its targets for a write transaction."""
+        query = (session.query(self.model_class).filter_by(id=id)
+                 .options(lazyload('*')).populate_existing()
+                 .with_for_update())
+        if not show_deleted:
+            query = query.filter(
+                self.model_class.provisioning_status != consts.DELETED)
+        policy = query.first()
+        if policy is None:
             raise exceptions.NotFound(
                 resource=data_models.L7Policy._name(), id=id)
+
+        # A lazy load can still see an old REPEATABLE READ snapshot even
+        # after admission under the load balancer lock. Read the targets
+        # with a lock and replace any collection already in the identity map.
+        targets = []
+        if policy.action == consts.L7POLICY_ACTION_WEIGHTED_TARGETS:
+            targets = (session.query(models.L7PolicyTarget)
+                       .filter_by(l7policy_id=id)
+                       .order_by(models.L7PolicyTarget.position)
+                       .populate_existing()
+                       .with_for_update()
+                       .all())
+        attributes.set_committed_value(policy, '_targets', targets)
+        return policy
+
+    def update(self, session, id, **model_kwargs):
+        l7policy_db = self.get_for_update(session, id)
 
         # Necessary to work around unexpected / idiotic behavior of
         # the SQLAlchemy Orderinglist extension if the position changes.
@@ -1873,9 +1951,16 @@ class L7PolicyRepository(BaseRepository):
             position = None
 
         model_kwargs.update(listener_id=l7policy_db.listener_id)
-        l7policy = self.model_class(
-            **validate.sanitize_l7policy_api_args(model_kwargs))
+        model_kwargs = validate.sanitize_l7policy_api_args(
+            model_kwargs, old_policy=l7policy_db)
+        update_targets = 'targets' in model_kwargs
+        targets = model_kwargs.pop('targets', None) or []
+        l7policy = self.model_class(**model_kwargs)
         self._validate_l7policy_pool_data(session, l7policy)
+        if update_targets:
+            pools = self._weighted_target_pools(
+                session, l7policy.listener_id, targets) if targets else {}
+            l7policy_db._replace_targets(targets, pools)
 
         if l7policy.action:
             model_kwargs.update(action=l7policy.action)
@@ -1932,10 +2017,16 @@ class L7PolicyRepository(BaseRepository):
             listener_db = session.query(models.Listener).filter_by(
                 id=model_kwargs.get('listener_id')).first()
             model_kwargs.update(listener=listener_db)
-        l7policy = self.model_class(
-            **validate.sanitize_l7policy_api_args(model_kwargs,
-                                                  create=True))
+        model_kwargs = validate.sanitize_l7policy_api_args(
+            model_kwargs, create=True)
+        targets = model_kwargs.pop('targets', None)
+        if targets:
+            pools = self._weighted_target_pools(
+                session, model_kwargs['listener_id'], targets)
+        l7policy = self.model_class(**model_kwargs)
         self._validate_l7policy_pool_data(session, l7policy)
+        if targets:
+            l7policy._replace_targets(targets, pools)
         session.add(l7policy)
         session.flush()
 
