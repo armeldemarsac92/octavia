@@ -67,6 +67,7 @@ class AmphoraProviderDriver(driver_base.ProviderDriver):
     supports_weighted_targets = True
     supports_request_header_operations = True
     supports_backend_h2c = True
+    supports_tls_sni_passthrough = True
 
     def __init__(self):
         super().__init__()
@@ -402,7 +403,11 @@ class AmphoraProviderDriver(driver_base.ProviderDriver):
         with session.begin():
             db_listener = self.repositories.listener.get(
                 session, id=l7policy.listener_id)
-        if db_listener.protocol not in VALID_L7POLICY_LISTENER_PROTOCOLS:
+        tcp_redirect = (
+            db_listener.protocol == lib_consts.PROTOCOL_TCP and
+            l7policy.action == consts.L7POLICY_ACTION_REDIRECT_TO_POOL)
+        if (db_listener.protocol not in VALID_L7POLICY_LISTENER_PROTOCOLS and
+                not tcp_redirect):
             msg = ('%s protocol listeners do not support L7 policies' % (
                 db_listener.protocol))
             raise exceptions.UnsupportedOptionError(

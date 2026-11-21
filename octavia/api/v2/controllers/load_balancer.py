@@ -555,8 +555,9 @@ class LoadBalancersController(base.BaseController):
             listeners = lb_dict.pop('listeners', []) or []
             pools = lb_dict.pop('pools', []) or []
             for listener_dict in listeners:
-                listener.validate_http_policy_options_on_create(
+                listener.validate_policy_options_on_create(
                     driver, listener_dict, creating_load_balancer=True)
+            self._prepare_graph_pools(driver, listeners, pools)
 
             flavor_dict = self._apply_flavor_to_lb_dict(lock_session, driver,
                                                         lb_dict)
@@ -713,7 +714,8 @@ class LoadBalancersController(base.BaseController):
 
         return lb_types.LoadBalancerFullRootResponse(loadbalancer=result)
 
-    def _graph_create(self, session, db_lb, listeners, pools):
+    @staticmethod
+    def _prepare_graph_pools(driver, listeners, pools):
         # Track which pools must have a full specification
         pools_required = set()
         # Look through listeners and find any extra pools, and move them to the
@@ -770,6 +772,15 @@ class LoadBalancersController(base.BaseController):
                     detail="Pool '{name}' was referenced but no full "
                            "definition was found.".format(name=pool_ref))
 
+        pools_by_name = {p.get('name'): p for p in pools}
+        for li in listeners:
+            if driver_utils.uses_tls_sni_policy_path(driver, li['protocol']):
+                for policy in li.get('l7policies') or []:
+                    target = pools_by_name[policy['redirect_pool']['name']]
+                    validate.validate_tcp_redirect_pool_protocol(
+                        target.get('protocol'), target.get('tls_enabled'))
+
+    def _graph_create(self, session, db_lb, listeners, pools):
         # Make sure the user can access the subnets of the members
         context = pecan_request.context.get('octavia_context')
         valid_subnets = set()

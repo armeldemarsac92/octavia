@@ -105,7 +105,9 @@ bind {{ lb_vip_address }}:{{ listener.protocol_port }} {{
 
 
 {% macro l7rule_macro(constants, l7rule) %}
-    {% if l7rule.type == constants.L7RULE_TYPE_HOST_NAME %}
+    {% if l7rule.type == constants.L7RULE_TYPE_TLS_SNI %}
+        acl {{ l7rule.id }} req.ssl_sni -i -m str {{ l7rule.value }}
+    {% elif l7rule.type == constants.L7RULE_TYPE_HOST_NAME %}
         acl {{ l7rule.id }} req.hdr(host) -i {{ l7rule_compare_type_macro(
             constants, l7rule.compare_type) }} -- {{ l7rule.value }}
     {% elif l7rule.type == constants.L7RULE_TYPE_PATH %}
@@ -234,6 +236,10 @@ frontend {{ listener.id }}
     {{ bind_macro(constants, lib_consts, listener, add_vip)|trim() }}
     {% endfor %}
     mode {{ listener.protocol_mode }}
+    {% if listener.inspect_tls_sni is defined %}
+    tcp-request inspect-delay {{ listener.timeout_tcp_inspect }}
+    tcp-request content accept if { req.ssl_hello_type 1 }
+    {% endif %}
     {% set policies = listener.l7policies|selectattr('enabled')|selectattr('l7rules')|list %}
     {% set select_policy = listener.weighted_response_codes is defined or
                            listener.request_header_operations_by_pool is defined %}
@@ -259,7 +265,7 @@ frontend {{ listener.id }}
     default_backend {{ listener.default_pool.id }}:{{ listener.id }}
     {% endif %}
     timeout client {{ listener.timeout_client_data }}
-    {% if listener.timeout_tcp_inspect %}
+    {% if listener.timeout_tcp_inspect and listener.inspect_tls_sni is not defined %}
     tcp-request inspect-delay {{ listener.timeout_tcp_inspect }}
     {% endif %}
     {% if listener.protocol == lib_consts.PROTOCOL_PROMETHEUS and

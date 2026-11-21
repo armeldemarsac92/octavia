@@ -1861,6 +1861,31 @@ class L7PolicyRepository(BaseRepository):
             raise exceptions.NotFound(
                 resource=data_models.Pool._name(), id=pool_id)
 
+    def validate_tcp_redirect_pool(self, session, listener, pool_id):
+        pool = (session.query(models.Pool)
+                .filter_by(id=pool_id, project_id=listener.project_id,
+                           load_balancer_id=listener.load_balancer_id)
+                .filter(models.Pool.provisioning_status.notin_(
+                    (consts.PENDING_DELETE, consts.DELETED)))
+                .populate_existing().with_for_update().first())
+        if pool is None:
+            raise exceptions.NotFound(
+                resource=data_models.Pool._name(), id=pool_id)
+        validate.validate_tcp_redirect_pool_protocol(
+            pool.protocol, pool.tls_enabled)
+
+    def get_tcp_policy_using_pool(self, session, pool_id):
+        model = self.model_class
+        return (session.query(model.id)
+                .join(model.listener)
+                .filter(models.Listener.protocol == consts.PROTOCOL_TCP)
+                .filter(model.redirect_pool_id == pool_id)
+                .filter(model.action ==
+                        consts.L7POLICY_ACTION_REDIRECT_TO_POOL)
+                .filter(model.provisioning_status.notin_(
+                    (consts.PENDING_DELETE, consts.DELETED)))
+                .with_for_update().limit(1).scalar())
+
     def _validate_l7policy_pool_data(self, session, l7policy):
         """Does validations on a given L7 policy."""
         if l7policy.request_header_operations:
@@ -1950,16 +1975,18 @@ class L7PolicyRepository(BaseRepository):
             session, pagination_helper=pagination_helper,
             query_options=query_options, **filters)
 
-    def get_enabled_gateway_policies(self, session, listener_id):
+    def get_enabled_gateway_policies(self, session, listener_id, protocol):
         """Read current extended actions under the listener write lock."""
         model = self.model_class
+        actions = [consts.L7POLICY_ACTION_FIXED_RESPONSE,
+                   consts.L7POLICY_ACTION_WEIGHTED_TARGETS]
+        if protocol == consts.PROTOCOL_TCP:
+            actions.append(consts.L7POLICY_ACTION_REDIRECT_TO_POOL)
         return (
             session.query(model.action, model.request_header_operations)
             .filter_by(listener_id=listener_id, enabled=True)
-            .filter(model.action.in_((
-                consts.L7POLICY_ACTION_FIXED_RESPONSE,
-                consts.L7POLICY_ACTION_WEIGHTED_TARGETS)) |
-                model.request_header_operations.isnot(None))
+            .filter(model.action.in_(actions) |
+                    model.request_header_operations.isnot(None))
             .filter(model.provisioning_status.notin_((
                 consts.PENDING_DELETE, consts.DELETED)))
             .with_for_update().all())

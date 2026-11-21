@@ -55,6 +55,9 @@ def gateway_capabilities(driver):
     if (driver.name in api_settings.enabled_backend_h2c_providers and
             getattr(driver, 'supports_backend_h2c', False) is True):
         capabilities.append(constants.GATEWAY_CAPABILITY_BACKEND_H2C)
+    if (driver.name in api_settings.enabled_tls_sni_providers and
+            getattr(driver, 'supports_tls_sni_passthrough', False) is True):
+        capabilities.append(constants.GATEWAY_CAPABILITY_TLS_SNI)
     return capabilities
 
 
@@ -84,6 +87,31 @@ def require_request_header_operations(driver):
                 'this provider.'))
 
 
+def uses_tls_sni_policy_path(driver, protocol):
+    return (protocol == constants.PROTOCOL_TCP and
+            getattr(driver, 'supports_tls_sni_passthrough', False) is True)
+
+
+def require_tls_sni_passthrough(driver):
+    if (constants.GATEWAY_CAPABILITY_TLS_SNI not in
+            gateway_capabilities(driver)):
+        raise exceptions.ProviderUnsupportedOptionError(
+            prov=driver.name, user_msg=_(
+                'TLS SNI passthrough is unavailable for this provider.'))
+
+
+def validate_l7rule_context(driver, rule_type, protocol):
+    if rule_type == constants.L7RULE_TYPE_TLS_SNI:
+        if protocol != constants.PROTOCOL_TCP:
+            raise exceptions.L7RuleValidation(error=_(
+                'TLS_SNI requires a TCP listener.'))
+        if not uses_tls_sni_policy_path(driver, protocol):
+            require_tls_sni_passthrough(driver)
+    elif uses_tls_sni_policy_path(driver, protocol):
+        raise exceptions.L7RuleValidation(error=_(
+            'TCP listener policies require TLS_SNI rules.'))
+
+
 def require_gateway_policy_action(driver, action, protocol, *,
                                   request_header_operations=None):
     if action == constants.L7POLICY_ACTION_FIXED_RESPONSE:
@@ -92,6 +120,11 @@ def require_gateway_policy_action(driver, action, protocol, *,
     elif action == constants.L7POLICY_ACTION_WEIGHTED_TARGETS:
         validate.validate_weighted_l7policy_protocol(protocol)
         require_weighted_targets(driver)
+    elif uses_tls_sni_policy_path(driver, protocol):
+        require_tls_sni_passthrough(driver)
+        if action != constants.L7POLICY_ACTION_REDIRECT_TO_POOL:
+            raise exceptions.ValidationException(detail=_(
+                'TCP listener policies require the REDIRECT_TO_POOL action.'))
     if request_header_operations:
         require_request_header_operations(driver)
         validate.validate_request_header_protocol(protocol)
