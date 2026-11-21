@@ -557,7 +557,13 @@ class LoadBalancersController(base.BaseController):
             for listener_dict in listeners:
                 listener.validate_policy_options_on_create(
                     driver, listener_dict, creating_load_balancer=True)
-            self._prepare_graph_pools(driver, listeners, pools)
+
+            has_tls_sni_policies = any(
+                li.get('l7policies') and driver_utils.uses_tls_sni_policy_path(
+                    driver, li['protocol'])
+                for li in listeners)
+            if has_tls_sni_policies:
+                self._prepare_graph_pools(driver, listeners, pools)
 
             flavor_dict = self._apply_flavor_to_lb_dict(lock_session, driver,
                                                         lb_dict)
@@ -682,6 +688,8 @@ class LoadBalancersController(base.BaseController):
                 # loadbalancer object.
                 lock_session.expire_all()
 
+                if not has_tls_sni_policies:
+                    self._prepare_graph_pools(driver, listeners, pools)
                 db_pools, db_lists = self._graph_create(
                     lock_session, db_lb, listeners, pools)
 
