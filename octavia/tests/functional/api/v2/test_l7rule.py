@@ -686,6 +686,97 @@ class TestL7Rule(base.BaseAPITest):
             l7rule_prov_status=constants.PENDING_CREATE,
             l7rule_op_status=constants.OFFLINE)
 
+    @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
+    def test_full_header_rule_create_and_update(self, rpc):
+        lb = self.create_load_balancer(
+            uuidutils.generate_uuid(), provider='amphora')['loadbalancer']
+        lb_id = lb['id']
+        self.set_lb_status(lb_id)
+        listener = self.create_listener('HTTP', 80, lb_id)['listener']
+        self.set_lb_status(lb_id)
+        policy = self.create_l7policy(listener['id'], 'REJECT')['l7policy']
+        self.set_lb_status(lb_id)
+
+        key = 'X-' + 'a' * 253
+        oversized_key = key + 'a'
+        value = 'one, ' + 'x' * 4091
+        rpc.return_value.cast.reset_mock()
+        self.create_l7rule(policy['id'], 'HTTP_HEADER_EXACT', 'EQUAL_TO',
+                           value, key=key, status=501)
+        self.conf.config(group='api_settings',
+                         enabled_http_header_exact_providers=['amphora'])
+        self.create_l7rule(policy['id'], 'HTTP_HEADER_EXACT', 'EQUAL_TO',
+                           value, key=oversized_key, status=400)
+        self.create_l7rule(policy['id'], 'HEADER', 'EQUAL_TO',
+                           'one', key=oversized_key, status=400)
+        self.create_l7rule(policy['id'], 'HEADER', 'EQUAL_TO',
+                           'x' * 256, key='X-Version', status=400)
+        self.create_l7rule(policy['id'], 'HTTP_HEADER_EXACT', 'REGEX',
+                           value, key=key, status=400)
+        self.create_l7rule(policy['id'], 'HTTP_HEADER_EXACT', 'EQUAL_TO',
+                           ' one', key=key, status=400)
+        rpc.return_value.cast.assert_not_called()
+        rules_path = self.L7RULES_PATH.format(l7policy_id=policy['id'])
+        self.assertEqual([], self.get(rules_path).json['rules'])
+        rule = self.create_l7rule(policy['id'], 'HTTP_HEADER_EXACT',
+                                  'EQUAL_TO', value, key=key)['rule']
+        self.assertEqual(key, rule['key'])
+        self.assertEqual(value, rule['value'])
+        path = self.L7RULE_PATH.format(l7policy_id=policy['id'],
+                                       l7rule_id=rule['id'])
+        self.set_lb_status(lb_id)
+        rpc.return_value.cast.reset_mock()
+        self.put(path, {'rule': {'key': oversized_key}}, status=400)
+        self.put(path, {'rule': {'type': 'HEADER'}}, status=400)
+        rpc.return_value.cast.assert_not_called()
+        self.assertEqual(key, self.get(path).json['rule']['key'])
+        new_value = 'two,\t café'
+        self.put(path, {'rule': {'value': new_value}})
+        self.set_lb_status(lb_id)
+        self.assertEqual(new_value, self.get(path).json['rule']['value'])
+        self.conf.config(group='api_settings',
+                         enabled_http_header_exact_providers=[])
+        self.put(path, {'rule': {'value': 'one, other'}}, status=501)
+        policy_path = self.L7POLICY_PATH.format(l7policy_id=policy['id'])
+        listener_path = self.LISTENER_PATH.format(listener_id=listener['id'])
+        lb_path = self.LB_PATH.format(lb_id=lb_id)
+        parents = (
+            (policy_path, 'l7policy'),
+            (listener_path, 'listener'),
+            (lb_path, 'loadbalancer'),
+        )
+        for parent_path, tag in parents:
+            with self.subTest(parent=tag):
+                self.put(parent_path, {tag: {'admin_state_up': False}})
+                self.set_lb_status(lb_id)
+                rpc.return_value.cast.reset_mock()
+                self.put(parent_path, {tag: {'admin_state_up': True}},
+                         status=501)
+                rpc.return_value.cast.assert_not_called()
+                self.assertFalse(
+                    self.get(parent_path).json[tag]['admin_state_up'])
+                self.conf.config(
+                    group='api_settings',
+                    enabled_http_header_exact_providers=['amphora'])
+                reopened = self.put(parent_path,
+                                    {tag: {'admin_state_up': True}}).json[tag]
+                self.assertTrue(reopened['admin_state_up'])
+                self.set_lb_status(lb_id)
+                self.conf.config(
+                    group='api_settings',
+                    enabled_http_header_exact_providers=[])
+        self.put(path, {'rule': {'admin_state_up': False}})
+        self.set_lb_status(lb_id)
+        self.put(path, {'rule': {'admin_state_up': True}}, status=501)
+        self.create_l7rule(policy['id'], 'HEADER', 'EQUAL_TO',
+                           'one', key='X-Version')
+        self.set_lb_status(lb_id)
+        self.put(policy_path, {'l7policy': {'admin_state_up': False}})
+        self.set_lb_status(lb_id)
+        reopened = self.put(policy_path, {
+            'l7policy': {'admin_state_up': True}}).json['l7policy']
+        self.assertTrue(reopened['admin_state_up'])
+
     def test_create_cookie_rule(self):
         api_l7rule = self.create_l7rule(
             self.l7policy_id, constants.L7RULE_TYPE_COOKIE,

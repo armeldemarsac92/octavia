@@ -52,6 +52,9 @@ def gateway_capabilities(driver):
                     False) is True):
         capabilities.append(
             constants.GATEWAY_CAPABILITY_REQUEST_HEADER_OPERATIONS)
+    if (driver.name in api_settings.enabled_http_header_exact_providers and
+            getattr(driver, 'supports_http_header_exact', False) is True):
+        capabilities.append(constants.GATEWAY_CAPABILITY_HTTP_HEADER_EXACT)
     if (driver.name in api_settings.enabled_backend_h2c_providers and
             getattr(driver, 'supports_backend_h2c', False) is True):
         capabilities.append(constants.GATEWAY_CAPABILITY_BACKEND_H2C)
@@ -116,8 +119,26 @@ def require_tls_sni_rule_comparison(driver, compare_type):
         require_tls_sni_suffix(driver)
 
 
-def validate_l7rule_context(driver, rule_type, protocol):
-    if rule_type == constants.L7RULE_TYPE_TLS_SNI:
+def require_http_header_exact(driver):
+    if (constants.GATEWAY_CAPABILITY_HTTP_HEADER_EXACT not in
+            gateway_capabilities(driver)):
+        raise exceptions.ProviderUnsupportedOptionError(
+            prov=driver.name, user_msg=_(
+                'Full-value exact HTTP header matching is unavailable '
+                'for this provider.'))
+
+
+def validate_l7rule_context(driver, rule_type, protocol, *,
+                            admit_http_header_exact=True):
+    if rule_type == constants.L7RULE_TYPE_HTTP_HEADER_EXACT:
+        if protocol not in (constants.PROTOCOL_HTTP,
+                            constants.PROTOCOL_TERMINATED_HTTPS):
+            raise exceptions.L7RuleValidation(error=_(
+                'HTTP_HEADER_EXACT requires an HTTP or TERMINATED_HTTPS '
+                'listener.'))
+        if admit_http_header_exact:
+            require_http_header_exact(driver)
+    elif rule_type == constants.L7RULE_TYPE_TLS_SNI:
         if protocol != constants.PROTOCOL_TCP:
             raise exceptions.L7RuleValidation(error=_(
                 'TLS_SNI requires a TCP listener.'))

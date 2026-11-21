@@ -126,6 +126,20 @@ position breaking ties.
    {"rule": {"type": "TLS_SNI", "compare_type": "ENDS_WITH",
              "value": "*.example.test"}}
 
+With ``http_header_exact_v1`` enabled, use ``HTTP_HEADER_EXACT`` with
+``EQUAL_TO`` on HTTP or TERMINATED_HTTPS listeners. The key is an HTTP
+field name of up to 255 ASCII characters, compared case-insensitively. The
+value is a nonempty literal of up to 4096 characters, compared
+case-sensitively against a full field occurrence. Internal whitespace and
+commas are preserved.
+An otherwise valid request for this rule type returns HTTP 501 when the
+capability is unavailable.
+
+.. code-block:: json
+
+   {"rule": {"type": "HTTP_HEADER_EXACT", "compare_type": "EQUAL_TO",
+             "key": "Version", "value": "one, other"}}
+
 .. rest_status_code:: success ../http-status.yaml
 
    - 201

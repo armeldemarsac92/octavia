@@ -120,6 +120,8 @@ bind {{ lb_vip_address }}:{{ listener.protocol_port }} {{
     {% elif l7rule.type == constants.L7RULE_TYPE_FILE_TYPE %}
         acl {{ l7rule.id }} path_end {{ l7rule_compare_type_macro(
             constants, l7rule.compare_type, l7rule.type) }} -- {{ l7rule.value }}
+    {% elif l7rule.type == constants.L7RULE_TYPE_HTTP_HEADER_EXACT %}
+        acl {{ l7rule.id }} req.fhdr({{ l7rule.key|safe }}) -m bin {{ l7rule.value }}
     {% elif l7rule.type == constants.L7RULE_TYPE_HEADER %}
         acl {{ l7rule.id }} req.hdr({{ l7rule.key }}) {{
             l7rule_compare_type_macro(

@@ -18,6 +18,10 @@ from octavia.api.common import types
 from octavia.common import constants
 
 
+RULE_KEY_LENGTH = constants.MAX_L7RULE_KEY_LENGTH
+RULE_VALUE_LENGTH = constants.MAX_L7RULE_HEADER_VALUE_LENGTH
+
+
 class BaseL7Type(types.BaseType):
     _type_to_db_map = {'admin_state_up': 'enabled'}
     _child_map = {}
@@ -63,9 +67,9 @@ class L7RulePOST(BaseL7Type):
     compare_type = wtypes.wsattr(
         wtypes.Enum(str, *constants.SUPPORTED_L7RULE_COMPARE_TYPES),
         mandatory=True)
-    key = wtypes.wsattr(wtypes.StringType(max_length=255,
+    key = wtypes.wsattr(wtypes.StringType(max_length=RULE_KEY_LENGTH,
                                           pattern=r'^[^\r\n]*$'))
-    value = wtypes.wsattr(wtypes.StringType(max_length=255,
+    value = wtypes.wsattr(wtypes.StringType(max_length=RULE_VALUE_LENGTH,
                                             pattern=r'^[^\r\n]*$'),
                           mandatory=True)
     invert = wtypes.wsattr(bool, default=False)
@@ -87,9 +91,9 @@ class L7RulePUT(BaseL7Type):
     compare_type = wtypes.wsattr(
         wtypes.Enum(str,
                     *constants.SUPPORTED_L7RULE_COMPARE_TYPES))
-    key = wtypes.wsattr(wtypes.StringType(max_length=255,
+    key = wtypes.wsattr(wtypes.StringType(max_length=RULE_KEY_LENGTH,
                                           pattern=r'^[^\r\n]*$'))
-    value = wtypes.wsattr(wtypes.StringType(max_length=255,
+    value = wtypes.wsattr(wtypes.StringType(max_length=RULE_VALUE_LENGTH,
                                             pattern=r'^[^\r\n]*$'))
     invert = wtypes.wsattr(bool)
     admin_state_up = wtypes.wsattr(bool)
@@ -108,8 +112,9 @@ class L7RuleSingleCreate(BaseL7Type):
     compare_type = wtypes.wsattr(
         wtypes.Enum(str, *constants.SUPPORTED_L7RULE_COMPARE_TYPES),
         mandatory=True)
-    key = wtypes.wsattr(wtypes.StringType(max_length=255))
-    value = wtypes.wsattr(wtypes.StringType(max_length=255), mandatory=True)
+    key = wtypes.wsattr(wtypes.StringType(max_length=RULE_KEY_LENGTH))
+    value = wtypes.wsattr(wtypes.StringType(max_length=RULE_VALUE_LENGTH),
+                          mandatory=True)
     invert = wtypes.wsattr(bool, default=False)
     admin_state_up = wtypes.wsattr(bool, default=True)
     tags = wtypes.wsattr(wtypes.ArrayType(wtypes.StringType(max_length=255)))

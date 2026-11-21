@@ -107,6 +107,47 @@ and reactivation of stored operations. Patched workers keep rendering
 live configurations while operators clear or retire those policies.
 
 
+Full-value exact request header matching
+----------------------------------------
+
+An L7 rule of type ``HTTP_HEADER_EXACT`` uses comparison ``EQUAL_TO`` on an
+HTTP or terminated HTTPS listener. Its ``key`` is a case-insensitive HTTP
+field name of up to 255 ASCII characters. Its ``value`` is a case-sensitive
+literal of up to 4096 characters. Internal spaces, tabs and commas are
+part of the value. Surrounding HTTP whitespace is excluded from the field
+content. When a request carries repeated fields with the same name, an
+exact match on any one occurrence satisfies the rule. The stock
+``HEADER`` rule continues to compare individual comma-separated values.
+
+The regional opt-in defaults to empty. Apply database migration
+``e9c83aa47e21`` and upgrade the API and workers before enabling it. Verify
+that existing, new and replacement Amphorae accept the generated
+``req.fhdr`` and binary ACL configuration. Local testing used HAProxy
+3.0.19.
+
+Set the exact provider names on every regional API replica and reload the
+configuration.
+
+.. code-block:: ini
+
+   [api_settings]
+   enabled_http_header_exact_providers = amphora
+
+The provider's ``gateway_capabilities`` endpoint then includes
+``http_header_exact_v1``. Removing a provider name prevents creation,
+match changes and re-enabling of these rules. Reopening a policy,
+listener or load balancer that would activate an enabled exact rule
+requires the same enrollment. Operators can keep serving existing rules,
+disable them or delete them. Drain them before downgrading the workers.
+
+Amphora compares the UTF-8 bytes of the configured value with the request
+field content. A MySQL-compatible database connection must support
+``utf8mb4`` for four-byte characters. HAProxy rejects field names over
+255 bytes before evaluating rules. The API value character limit applies
+independently of the byte limits imposed by the HTTP transport, HAProxy
+request buffers and the total size of the request headers.
+
+
 TLS passthrough by SNI
 ----------------------
 
