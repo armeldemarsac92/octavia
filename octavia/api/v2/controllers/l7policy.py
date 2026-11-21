@@ -39,6 +39,20 @@ CONF = cfg.CONF
 LOG = logging.getLogger(__name__)
 
 
+def validate_policy_request_headers(policy, protocol, driver, old_policy=None):
+    if 'request_header_operations' not in policy:
+        return
+    operations = policy['request_header_operations']
+    clearing = (not operations and old_policy is not None and
+                old_policy.request_header_operations is not None and
+                getattr(driver, 'supports_request_header_operations',
+                        False) is True)
+    if not clearing:
+        driver_utils.require_request_header_operations(driver)
+    if operations:
+        validate.validate_request_header_protocol(protocol)
+
+
 class L7PolicyController(base.BaseController):
     RBAC_TYPE = constants.RBAC_L7POLICY
 
@@ -173,6 +187,8 @@ class L7PolicyController(base.BaseController):
                 load_balancer_id, listener_id)
             driver_utils.require_gateway_policy_action(
                 driver, l7policy_dict['action'], listener.protocol)
+            validate_policy_request_headers(
+                l7policy_dict, listener.protocol, driver)
 
             self._test_lb_and_listener_statuses(
                 lock_session, lb_id=load_balancer_id,
@@ -270,8 +286,15 @@ class L7PolicyController(base.BaseController):
                 l7policy_dict.get('position', db_l7policy.position) !=
                 db_l7policy.position)
             if activates_policy or routing_changed.intersection(l7policy_dict):
+                retained_operations = None
+                if 'request_header_operations' not in l7policy_dict:
+                    retained_operations = db_l7policy.request_header_operations
                 driver_utils.require_gateway_policy_action(
-                    driver, action, listener.protocol)
+                    driver, action, listener.protocol,
+                    request_header_operations=retained_operations)
+            validate_policy_request_headers(
+                l7policy_dict, listener.protocol, driver,
+                old_policy=db_l7policy)
 
             # Prepare the data for the driver data model
             provider_l7policy_dict = (

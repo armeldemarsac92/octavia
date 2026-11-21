@@ -37,14 +37,21 @@ CONF = cfg.CONF
 
 
 def gateway_capabilities(driver):
-    if driver.name not in CONF.api_settings.enabled_gateway_action_providers:
-        return []
-
+    api_settings = CONF.api_settings
     capabilities = []
-    if getattr(driver, 'supports_fixed_http_responses', False) is True:
-        capabilities.append(constants.GATEWAY_CAPABILITY_FIXED_HTTP_RESPONSES)
-    if getattr(driver, 'supports_weighted_targets', False) is True:
-        capabilities.append(constants.GATEWAY_CAPABILITY_WEIGHTED_HTTP_TARGETS)
+    if driver.name in api_settings.enabled_gateway_action_providers:
+        if getattr(driver, 'supports_fixed_http_responses', False) is True:
+            capabilities.append(
+                constants.GATEWAY_CAPABILITY_FIXED_HTTP_RESPONSES)
+        if getattr(driver, 'supports_weighted_targets', False) is True:
+            capabilities.append(
+                constants.GATEWAY_CAPABILITY_WEIGHTED_HTTP_TARGETS)
+    header_providers = api_settings.enabled_request_header_operation_providers
+    if (driver.name in header_providers and
+            getattr(driver, 'supports_request_header_operations',
+                    False) is True):
+        capabilities.append(
+            constants.GATEWAY_CAPABILITY_REQUEST_HEADER_OPERATIONS)
     return capabilities
 
 
@@ -65,13 +72,26 @@ def require_weighted_targets(driver):
                 'provider.'))
 
 
-def require_gateway_policy_action(driver, action, protocol):
+def require_request_header_operations(driver):
+    if (constants.GATEWAY_CAPABILITY_REQUEST_HEADER_OPERATIONS not in
+            gateway_capabilities(driver)):
+        raise exceptions.ProviderUnsupportedOptionError(
+            prov=driver.name, user_msg=_(
+                'L7 policy request header operations are unavailable for '
+                'this provider.'))
+
+
+def require_gateway_policy_action(driver, action, protocol, *,
+                                  request_header_operations=None):
     if action == constants.L7POLICY_ACTION_FIXED_RESPONSE:
         validate.validate_fixed_http_protocol(protocol)
         require_fixed_http_responses(driver)
     elif action == constants.L7POLICY_ACTION_WEIGHTED_TARGETS:
         validate.validate_weighted_l7policy_protocol(protocol)
         require_weighted_targets(driver)
+    if request_header_operations:
+        require_request_header_operations(driver)
+        validate.validate_request_header_protocol(protocol)
 
 
 def call_provider(provider, driver_method, *args, **kwargs):
@@ -567,6 +587,8 @@ def db_l7policy_to_provider_l7policy(db_l7policy):
         del new_l7policy_dict['l7rules']
         new_l7rules = db_l7rules_to_provider_l7rules(db_l7policy.l7rules)
         new_l7policy_dict['rules'] = new_l7rules
+    if not new_l7policy_dict.get('request_header_operations'):
+        new_l7policy_dict.pop('request_header_operations', None)
     if new_l7policy_dict.get('fixed_response') is None:
         new_l7policy_dict.pop('fixed_response', None)
     return driver_dm.L7Policy.from_dict(new_l7policy_dict)
@@ -576,6 +598,8 @@ def l7policy_dict_to_provider_dict(l7policy_dict):
     new_l7policy_dict = _base_to_provider_dict(l7policy_dict,
                                                include_project_id=True)
     new_l7policy_dict['l7policy_id'] = new_l7policy_dict.pop('id')
+    if new_l7policy_dict.get('request_header_operations') is None:
+        new_l7policy_dict.pop('request_header_operations', None)
     # Remove the DB back references
     if 'listener' in new_l7policy_dict:
         del new_l7policy_dict['listener']

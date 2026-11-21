@@ -77,3 +77,31 @@ default or enabled extended policies also requires opt-in. Before downgrading
 a worker or replacing an Amphora with an incompatible image, clear listener
 defaults and convert or delete the affected L7 policies. Wait for those
 operations to finish.
+
+
+Request header operations in L7 policies
+---------------------------------------
+
+Request header operations are enabled separately for each provider name.
+Keep ``[api_settings] enabled_request_header_operation_providers`` empty
+during upgrades. Apply the request header operations database migration
+and install matched Hibiscus builds of Octavia and octavia-lib on the
+region's API and workers. Verify that the current, new and replacement Amphorae
+for that provider run HAProxy 2.2 or later.
+
+Set the exact enabled provider names on every Octavia API replica in the
+region and reload the service configuration.
+
+.. code-block:: ini
+
+   [api_settings]
+   enabled_request_header_operation_providers = amphora
+
+An authenticated GET on the provider's ``gateway_capabilities`` endpoint
+then returns ``request_header_operations_v1``. Existing
+``enabled_gateway_action_providers`` settings continue to control fixed
+responses and weighted targets.
+
+Removing a provider from the request header option prevents new operations
+and reactivation of stored operations. Patched workers keep rendering
+live configurations while operators clear or retire those policies.
