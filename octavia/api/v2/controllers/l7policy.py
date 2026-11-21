@@ -33,6 +33,7 @@ from octavia.common import data_models
 from octavia.common import exceptions
 from octavia.common import validate
 from octavia.db import prepare as db_prepare
+from octavia.i18n import _
 
 
 CONF = cfg.CONF
@@ -119,6 +120,11 @@ class L7PolicyController(base.BaseController):
             raise exceptions.ImmutableObject(resource='Load Balancer',
                                              id=lb_id)
 
+    def _validate_redirect_pool_protocol(self, session, listener, pool_id):
+        pool = self.repositories.l7policy.get_redirect_pool_for_update(
+            session, listener, pool_id)
+        self._validate_protocol(listener.protocol, pool.protocol)
+
     def _validate_create_l7policy(self, lock_session, l7policy_dict):
         try:
             # Set the default HTTP redirect code here so it's explicit
@@ -161,13 +167,10 @@ class L7PolicyController(base.BaseController):
                 raise exceptions.ListenerNoChildren(
                     protocol=lib_consts.PROTOCOL_PROMETHEUS)
 
-            # Make sure any pool specified by redirect_pool_id exists
-            if l7policy.redirect_pool_id:
-                db_pool = self._get_db_pool(
-                    context.session,
-                    l7policy.redirect_pool_id
-                )
-                self._validate_protocol(listener.protocol, db_pool.protocol)
+            if l7policy.rules:
+                raise exceptions.ValidationException(detail=_(
+                    'Create the policy first, then use POST '
+                    '/v2/lbaas/l7policies/{id}/rules.'))
 
             # Load the driver early as it also provides validation
             driver = driver_factory.get_driver(provider)
@@ -193,6 +196,14 @@ class L7PolicyController(base.BaseController):
             self._test_lb_and_listener_statuses(
                 lock_session, lb_id=load_balancer_id,
                 listener_ids=[listener_id])
+            pool_id = l7policy_dict.get('redirect_pool_id')
+            if driver_utils.uses_tls_sni_policy_path(
+                    driver, listener.protocol):
+                self.repositories.l7policy.validate_tcp_redirect_pool(
+                    lock_session, listener, pool_id)
+            elif pool_id:
+                self._validate_redirect_pool_protocol(
+                    lock_session, listener, pool_id)
             db_l7policy = self._validate_create_l7policy(
                 lock_session, l7policy_dict)
 
@@ -268,18 +279,22 @@ class L7PolicyController(base.BaseController):
                 context.session,
                 db_l7policy.listener_id
             )
-            # Make sure any specified redirect_pool_id exists
-            if l7policy_dict.get('redirect_pool_id'):
-                db_pool = self._get_db_pool(
-                    context.session,
-                    l7policy_dict['redirect_pool_id']
-                )
-                self._validate_protocol(listener.protocol, db_pool.protocol)
-
             # Load the driver early as it also provides validation
             driver = driver_factory.get_driver(provider)
             action = l7policy_dict.get('action', db_l7policy.action)
             routing_changed = {'action', 'fixed_response', 'targets'}
+            tcp_policy = driver_utils.uses_tls_sni_policy_path(
+                driver, listener.protocol)
+            pool_id = l7policy_dict.get('redirect_pool_id')
+            if tcp_policy:
+                if l7policy.redirect_pool_id is None:
+                    raise exceptions.ValidationException(detail=_(
+                        'A TCP listener policy requires a redirect pool.'))
+                if pool_id:
+                    routing_changed.add('redirect_pool_id')
+            elif pool_id:
+                self._validate_redirect_pool_protocol(
+                    lock_session, listener, pool_id)
             enabled = l7policy_dict.get('enabled', db_l7policy.enabled)
             activates_policy = enabled and (
                 not db_l7policy.enabled or
@@ -292,6 +307,11 @@ class L7PolicyController(base.BaseController):
                 driver_utils.require_gateway_policy_action(
                     driver, action, listener.protocol,
                     request_header_operations=retained_operations)
+                if tcp_policy:
+                    target = l7policy_dict.get(
+                        'redirect_pool_id', db_l7policy.redirect_pool_id)
+                    self.repositories.l7policy.validate_tcp_redirect_pool(
+                        lock_session, listener, target)
             validate_policy_request_headers(
                 l7policy_dict, listener.protocol, driver,
                 old_policy=db_l7policy)

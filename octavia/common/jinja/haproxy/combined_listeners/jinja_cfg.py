@@ -450,9 +450,22 @@ class JinjaTemplater:
                     break
 
         available_pool_ids = {pool['id'] for pool in pools if pool['enabled']}
+        if listener.protocol == constants.PROTOCOL_TCP:
+            policy_gen = (policy for policy in policy_gen
+                          if self._is_routable_sni_policy(
+                              policy, available_pool_ids))
+        else:
+            policy_gen = (policy for policy in policy_gen if not any(
+                rule.enabled and rule.type == constants.L7RULE_TYPE_TLS_SNI
+                for rule in policy.l7rules))
         l7policies = [self._transform_l7policy(
             policy, feature_compatibility, tls_enabled, tls_certs,
             available_pool_ids) for policy in policy_gen]
+        if listener.protocol == constants.PROTOCOL_TCP and l7policies:
+            ret_value['inspect_tls_sni'] = True
+            if not ret_value['timeout_tcp_inspect']:
+                ret_value['timeout_tcp_inspect'] = (
+                    constants.DEFAULT_TLS_SNI_INSPECT_TIMEOUT)
         ret_value['l7policies'] = l7policies
         operations_by_pool = {}
         for policy in l7policies:
@@ -628,6 +641,25 @@ class JinjaTemplater:
             return None
         return value
 
+    @staticmethod
+    def _active_l7rules(policy):
+        return [rule for rule in policy.l7rules if rule.enabled and
+                rule.provisioning_status not in (constants.PENDING_DELETE,
+                                                 constants.DELETED)]
+
+    def _is_routable_sni_policy(self, policy, available_pool_ids):
+        pool = policy.redirect_pool
+        if (not policy.enabled or
+                policy.provisioning_status == constants.DELETED or
+                policy.action != constants.L7POLICY_ACTION_REDIRECT_TO_POOL or
+                policy.request_header_operations or
+                not pool or pool.id not in available_pool_ids or
+                pool.protocol != constants.PROTOCOL_TCP or pool.tls_enabled or
+                pool.provisioning_status == constants.DELETED):
+            return False
+        rules = self._active_l7rules(policy)
+        return bool(rules) and all(validate.is_tls_sni_rule(r) for r in rules)
+
     def _transform_l7policy(self, l7policy, feature_compatibility,
                             listener_tls_enabled, tls_certs=None,
                             available_pool_ids=()):
@@ -663,10 +695,8 @@ class JinjaTemplater:
             ret_value['redirect_http_code'] = l7policy.redirect_http_code
         else:
             ret_value['redirect_http_code'] = None
-        rule_gen = (rule for rule in l7policy.l7rules if rule.enabled and
-                    rule.provisioning_status != constants.PENDING_DELETE)
-        l7rules = [self._transform_l7rule(x, feature_compatibility)
-                   for x in rule_gen]
+        l7rules = [self._transform_l7rule(rule, feature_compatibility)
+                   for rule in self._active_l7rules(l7policy)]
         ret_value['l7rules'] = l7rules
         if l7policy.enabled and l7rules:
             if l7policy.action == constants.L7POLICY_ACTION_FIXED_RESPONSE:

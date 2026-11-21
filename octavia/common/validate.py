@@ -126,13 +126,48 @@ def regex(regex):
     return True
 
 
+DNS_LABEL_RE = re.compile(
+    r'[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?')
+
+
+def is_exact_sni_name(value):
+    if not value or len(value) > 253 or not all(
+            DNS_LABEL_RE.fullmatch(label) for label in value.split('.')):
+        return False
+    try:
+        ipaddress.ip_address(value)
+    except ValueError:
+        return True
+    return False
+
+
+def is_tls_sni_rule(rule):
+    return (rule.type == constants.L7RULE_TYPE_TLS_SNI and
+            rule.compare_type == constants.L7RULE_COMPARE_TYPE_EQUAL_TO and
+            rule.key in (None, wtypes.Unset) and not rule.invert and
+            is_exact_sni_name(rule.value))
+
+
+def validate_tcp_redirect_pool_protocol(protocol, tls_enabled):
+    if protocol != constants.PROTOCOL_TCP or tls_enabled:
+        raise exceptions.ValidationException(detail=_(
+            'TCP listener policies require a TCP pool with '
+            'tls_enabled false.'))
+
+
 # Note that we can evaluate this outside the context of any L7 Policy because
 # L7 rules must be internally consistent.
 def l7rule_data(l7rule):
     """Raises an error if the l7rule given is invalid in some way."""
     if not l7rule.value:
         raise exceptions.InvalidL7Rule(msg=_('L7 rule type requires a value'))
-    if l7rule.type == constants.L7RULE_TYPE_HEADER:
+    if l7rule.type == constants.L7RULE_TYPE_TLS_SNI:
+        if not is_tls_sni_rule(l7rule):
+            raise exceptions.InvalidL7Rule(msg=_(
+                'TLS_SNI requires EQUAL_TO and an exact DNS hostname '
+                'without a key or inversion.'))
+
+    elif l7rule.type == constants.L7RULE_TYPE_HEADER:
         if not l7rule.key:
             raise exceptions.InvalidL7Rule(msg='L7 rule type requires a key')
         header_name(l7rule.key, what='key')

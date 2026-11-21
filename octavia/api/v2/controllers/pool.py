@@ -546,6 +546,20 @@ class PoolsController(base.BaseController):
                 listener_ids=self._get_affected_listener_ids(db_pool))
 
             self._validate_h2c_update(context.session, id, pool, driver)
+            if (driver_utils.uses_tls_sni_policy_path(
+                    driver, db_pool.protocol) and
+                    (pool.tls_enabled is True or pool.admin_state_up is True)):
+                current = self.repositories.pool.get_transport_for_update(
+                    context.session, id)
+                reopening = pool.admin_state_up is True and not current.enabled
+                if ((pool.tls_enabled is True or reopening) and
+                        self.repositories.l7policy.get_tcp_policy_using_pool(
+                            context.session, id)):
+                    if pool.tls_enabled is True:
+                        raise exceptions.ValidationException(detail=_(
+                            'A TCP listener policy requires TLS passthrough '
+                            'to its pool.'))
+                    driver_utils.require_tls_sni_passthrough(driver)
 
             # Prepare the data for the driver data model
             pool_dict = pool.to_dict(render_unsets=False)
@@ -607,12 +621,14 @@ class PoolsController(base.BaseController):
             self._test_lb_and_listener_statuses(
                 context.session, lb_id=db_pool.load_balancer_id,
                 listener_ids=self._get_affected_listener_ids(db_pool))
-            weighted_policy_id = (
-                self.repositories.l7policy.get_weighted_policy_using_pool(
+            policy_repo = self.repositories.l7policy
+            policy_id = (policy_repo.get_weighted_policy_using_pool(
+                context.session, db_pool.id) or
+                policy_repo.get_tcp_policy_using_pool(
                     context.session, db_pool.id))
-            if weighted_policy_id:
+            if policy_id:
                 raise exceptions.PoolInUseByL7Policy(
-                    id=db_pool.id, l7policy_id=weighted_policy_id)
+                    id=db_pool.id, l7policy_id=policy_id)
             self.repositories.pool.update(
                 context.session, db_pool.id,
                 provisioning_status=constants.PENDING_DELETE)

@@ -43,7 +43,7 @@ CONF = cfg.CONF
 LOG = logging.getLogger(__name__)
 
 
-def validate_http_policy_options_on_create(
+def validate_policy_options_on_create(
         driver, listener, *, creating_load_balancer=False):
     protocol = listener['protocol']
     default_response = listener.get('default_http_response')
@@ -53,10 +53,20 @@ def validate_http_policy_options_on_create(
     if default_response is not None:
         driver_utils.require_fixed_http_responses(driver)
 
+    tcp_policy = driver_utils.uses_tls_sni_policy_path(driver, protocol)
     for policy in listener.get('l7policies') or []:
         action = policy.get('action')
-        if (action not in (constants.L7POLICY_ACTION_FIXED_RESPONSE,
-                           constants.L7POLICY_ACTION_WEIGHTED_TARGETS) and
+        for rule in policy.get('rules') or []:
+            driver_utils.validate_l7rule_context(
+                driver, rule['type'], protocol)
+            if tcp_policy:
+                try:
+                    validate.l7rule_data(data_models.L7Rule.from_dict(rule))
+                except exceptions.InvalidL7Rule as e:
+                    raise exceptions.L7RuleValidation(error=e) from e
+        if (not tcp_policy and
+                action not in (constants.L7POLICY_ACTION_FIXED_RESPONSE,
+                               constants.L7POLICY_ACTION_WEIGHTED_TARGETS) and
                 policy.get('fixed_response') is None and
                 policy.get('targets') is None and
                 'request_header_operations' not in policy):
@@ -436,7 +446,7 @@ class ListenersController(base.BaseController):
 
             listener_dict = db_prepare.create_listener(
                 listener.to_dict(render_unsets=True), None)
-            validate_http_policy_options_on_create(driver, listener_dict)
+            validate_policy_options_on_create(driver, listener_dict)
 
             if listener_dict['default_pool_id']:
                 if (listener_dict.get('protocol') ==
@@ -711,7 +721,7 @@ class ListenersController(base.BaseController):
             if reopening:
                 policy_repo = self.repositories.l7policy
                 policies = policy_repo.get_enabled_gateway_policies(
-                    context.session, id)
+                    context.session, id, db_listener.protocol)
                 for action, headers in policies:
                     driver_utils.require_gateway_policy_action(
                         driver, action, db_listener.protocol,
