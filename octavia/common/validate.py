@@ -325,6 +325,56 @@ def weighted_l7policy_targets(targets):
     return normalized
 
 
+_HEADER_NAME_RE = re.compile(r"[!#$%&'*+\-.^_\x60|~0-9A-Za-z]{1,256}")
+_HEADER_VALUE_CONTROL_RE = re.compile(r'[\x00-\x08\x0a-\x1f\x7f\ud800-\udfff]')
+
+
+def request_header_operations(operations):
+    if not isinstance(operations, list) or len(operations) > 48:
+        raise exceptions.InvalidL7PolicyArgs(
+            msg=_('request_header_operations must be an array of up to '
+                  '48 entries.'))
+
+    names = set()
+    normalized = []
+    for item in operations:
+        operation = item.get('operation') if isinstance(item, dict) else None
+        if (operation not in ('SET', 'ADD', 'REMOVE') or
+                item.keys() != ({'operation', 'name'} if operation == 'REMOVE'
+                                else {'operation', 'name', 'value'})):
+            raise exceptions.InvalidL7PolicyArgs(
+                msg=_('Each header operation requires SET, ADD or REMOVE, '
+                      'a name, and a value for SET and ADD only.'))
+        name = item['name']
+        if not isinstance(name, str) or not _HEADER_NAME_RE.fullmatch(name):
+            raise exceptions.InvalidL7PolicyArgs(
+                msg=_('Invalid request header name.'))
+        name = name.lower()
+        if name in names:
+            raise exceptions.InvalidL7PolicyArgs(
+                msg=_('Request header operation names must be unique '
+                      'regardless of case.'))
+        names.add(name)
+        result = {'operation': operation, 'name': name}
+        if operation != 'REMOVE':
+            value = item['value']
+            if (not isinstance(value, str) or len(value) > 4096 or
+                    _HEADER_VALUE_CONTROL_RE.search(value)):
+                raise exceptions.InvalidL7PolicyArgs(
+                    msg=_('Invalid request header value.'))
+            result['value'] = value
+        normalized.append(result)
+    return normalized
+
+
+def validate_request_header_protocol(protocol):
+    if protocol not in (constants.PROTOCOL_HTTP,
+                        constants.PROTOCOL_TERMINATED_HTTPS):
+        raise exceptions.ValidationException(
+            detail=_('Request header operations require an HTTP or '
+                     'TERMINATED_HTTPS listener.'))
+
+
 def sanitize_l7policy_api_args(l7policy, create=False, old_policy=None):
     """Validate and make consistent L7Policy API arguments.
 
@@ -447,6 +497,17 @@ def sanitize_l7policy_api_args(l7policy, create=False, old_policy=None):
         l7policy.pop('redirect_pool', None)
         if not l7policy.get('redirect_http_code'):
             l7policy.update({'redirect_http_code': 302})
+
+    field = 'request_header_operations'
+    if field in l7policy:
+        l7policy[field] = request_header_operations(l7policy[field])
+    operations = l7policy.get(
+        field, getattr(old_policy, field, None))
+    if (operations and l7policy.get('action', old_action) not in (
+            constants.L7POLICY_ACTION_REDIRECT_TO_POOL,
+            constants.L7POLICY_ACTION_WEIGHTED_TARGETS)):
+        raise exceptions.InvalidL7PolicyArgs(
+            msg=_('Request header operations require a forwarding action.'))
 
     # If we are creating, we need an action at this point
     if create and 'action' not in l7policy.keys():

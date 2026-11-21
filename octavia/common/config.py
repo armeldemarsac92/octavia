@@ -94,6 +94,11 @@ api_opts = [
                        'support the corresponding action. Enable only after '
                        'all relevant components and Amphora images have '
                        'been upgraded.')),
+    cfg.ListOpt('enabled_request_header_operation_providers', default=[],
+                help=_('Provider driver names whose fleets support L7 request '
+                       'header operations. Enable only after the Octavia '
+                       'services, driver and Amphora images support these '
+                       'operations.')),
     cfg.IntOpt('udp_connect_min_interval_health_monitor',
                default=3,
                help=_("The minimum health monitor delay interval for the "

@@ -1837,6 +1837,9 @@ class L7PolicyRepository(BaseRepository):
 
     def _validate_l7policy_pool_data(self, session, l7policy):
         """Does validations on a given L7 policy."""
+        if l7policy.request_header_operations:
+            listener = session.get(models.Listener, l7policy.listener_id)
+            validate.validate_request_header_protocol(listener.protocol)
         if l7policy.action == consts.L7POLICY_ACTION_FIXED_RESPONSE:
             listener = session.get(models.Listener, l7policy.listener_id)
             validate.validate_fixed_http_protocol(listener.protocol)
@@ -1935,18 +1938,19 @@ class L7PolicyRepository(BaseRepository):
         data_model_list = [model.to_data_model() for model in model_list]
         return data_model_list, links
 
-    def get_enabled_gateway_actions(self, session, listener_id):
+    def get_enabled_gateway_policies(self, session, listener_id):
         """Read current extended actions under the listener write lock."""
         model = self.model_class
-        return {action for action, in (
-            session.query(model.action)
+        return (
+            session.query(model.action, model.request_header_operations)
             .filter_by(listener_id=listener_id, enabled=True)
             .filter(model.action.in_((
                 consts.L7POLICY_ACTION_FIXED_RESPONSE,
-                consts.L7POLICY_ACTION_WEIGHTED_TARGETS)))
+                consts.L7POLICY_ACTION_WEIGHTED_TARGETS)) |
+                model.request_header_operations.isnot(None))
             .filter(model.provisioning_status.notin_((
                 consts.PENDING_DELETE, consts.DELETED)))
-            .with_for_update().all())}
+            .with_for_update().all())
 
     def get_for_update(self, session, id, show_deleted=True):
         """Load the current policy and its targets for a write transaction."""

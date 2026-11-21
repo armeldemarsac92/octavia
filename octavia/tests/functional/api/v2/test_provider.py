@@ -69,6 +69,20 @@ class TestGatewayCapabilities(base.BaseAPITest):
             {'gateway_capabilities': ['fixed_http_responses_v1',
                                       'weighted_http_targets_v1']},
             self.get(self.capabilities_path()).json)
+        self.conf.config(
+            group='api_settings',
+            enabled_request_header_operation_providers=[
+                'amphora', 'noop_driver'])
+        self.assertEqual(
+            {'gateway_capabilities': ['fixed_http_responses_v1',
+                                      'weighted_http_targets_v1',
+                                      'request_header_operations_v1']},
+            self.get(self.capabilities_path()).json)
+        self.conf.config(group='api_settings',
+                         enabled_gateway_action_providers=[])
+        self.assertEqual(
+            {'gateway_capabilities': ['request_header_operations_v1']},
+            self.get(self.capabilities_path()).json)
         self.assertEqual(empty,
                          self.get(self.capabilities_path('octavia')).json)
         self.assertEqual(empty,

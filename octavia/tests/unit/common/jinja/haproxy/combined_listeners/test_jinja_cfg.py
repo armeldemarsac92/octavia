@@ -1492,6 +1492,35 @@ class TestHaproxyCfg(base.TestCase):
             f'use_backend {backend_prefix}{listener_id}-later if later_rule',
         ], routes)
 
+    def test_request_headers_use_selected_policy_in_shared_backend(self):
+        amp = sample_configs_combined.sample_amphora_tuple()
+        listener = sample_configs_combined.sample_listener_tuple(l7=True)
+        ordinary = listener.l7policies[0]
+        modified = ordinary._replace(
+            id='modified',
+            l7rules=[sample_configs_combined.sample_l7rule_tuple(
+                'modified-rule', value='/specific')],
+            request_header_operations=[
+                {'operation': 'SET', 'name': 'x-color', 'value': '%[path]'},
+                {'operation': 'ADD', 'name': 'x-extra', 'value': ''},
+                {'operation': 'REMOVE', 'name': 'x-old'},
+            ])
+        listener = listener._replace(l7policies=[modified, ordinary])
+        rendered = self.jinja_cfg.build_config(
+            amp, [listener], None, haproxy_versions=['3', '0', '19'],
+            amp_details=None)
+        frontend, backends = rendered.split('\nbackend ', 1)
+        self.assertIn(
+            'str(modified) if !{ var(txn.octavia_l7_policy) -m found } '
+            'modified-rule', frontend)
+        self.assertNotIn('set-header "x-color"', frontend)
+        guard = 'if { var(txn.octavia_l7_policy) -m str modified }'
+        for action in ('set-header "x-color" "%%[path]"',
+                       'add-header "x-extra" "%[str()]"',
+                       'del-header "x-old"'):
+            self.assertIn(f'http-request {action} {guard}', backends)
+        self.assertEqual(3, backends.count(guard))
+
     def test_weighted_policy_keeps_unavailable_targets_in_its_range(self):
         amp = sample_configs_combined.sample_amphora_tuple()
         listener = sample_configs_combined.sample_listener_tuple(l7=True)

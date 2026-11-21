@@ -56,6 +56,135 @@ class TestL7Policy(base.BaseAPITest):
         self.pool_id = self.pool.get('pool').get('id')
         self.set_lb_status(self.lb_id)
 
+    @mock.patch.object(noop_driver.NoopProviderDriver,
+                       'supports_request_header_operations', True)
+    def test_request_header_operations_read_replace_and_clear(self):
+        field = 'request_header_operations'
+        operations = [
+            {'operation': 'SET', 'name': 'x-tenant', 'value': 'blue'},
+            {'operation': 'ADD', 'name': 'x-extra', 'value': ''},
+            {'operation': 'REMOVE', 'name': 'x-old'}]
+        self.create_l7policy(
+            self.listener_id, 'REDIRECT_TO_POOL',
+            redirect_pool_id=self.pool_id, status=501,
+            **{field: operations})
+        self.conf.config(
+            group='api_settings',
+            enabled_request_header_operation_providers=['noop_driver'])
+        policy = self.create_l7policy(
+            self.listener_id, 'REDIRECT_TO_POOL',
+            redirect_pool_id=self.pool_id,
+            **{field: operations})['l7policy']
+        path = self.L7POLICY_PATH.format(l7policy_id=policy['id'])
+        self.assertEqual(operations, self.get(path).json['l7policy'][field])
+        listing = self.get(self.L7POLICIES_PATH, params={'fields': field})
+        self.assertEqual([{field: operations}], listing.json['l7policies'])
+        self.get(self.L7POLICIES_PATH, params={
+            'sort': field, 'marker': policy['id']}, status=400)
+        self.get(self.L7POLICIES_PATH, params={field: 'value'}, status=400)
+        self.set_lb_status(self.lb_id)
+        renamed = self.put(path, {'l7policy': {'name': 'same filter'}})
+        self.assertEqual(operations, renamed.json['l7policy'][field])
+        self.set_lb_status(self.lb_id)
+        self.put(path, {'l7policy': {field: [
+            {'operation': 'SET', 'name': 'X-Tenant', 'value': 'blue'},
+            {'operation': 'REMOVE', 'name': 'x-tenant'}]}}, status=400)
+        self.put(path, {'l7policy': {'action': 'REJECT'}}, status=400)
+        self.put(path, {'l7policy': {field: None}}, status=400)
+        self.assertEqual(operations, self.get(path).json['l7policy'][field])
+        replaced = self.put(path, {'l7policy': {field: operations[:1]}})
+        self.assertEqual(operations[:1], replaced.json['l7policy'][field])
+        self.set_lb_status(self.lb_id)
+        self.conf.config(group='api_settings',
+                         enabled_request_header_operation_providers=[])
+        self.put(path, {'l7policy': {field: operations}}, status=501)
+        response = self.put(path, {'l7policy': {
+            'action': 'REJECT', field: []}})
+        self.assertEqual([], response.json['l7policy'][field])
+        self.assertEqual([], self.get(path).json['l7policy'][field])
+        self.set_lb_status(self.lb_id)
+        self.put(path, {'l7policy': {field: []}})
+
+    def test_request_header_operations_require_driver_support(self):
+        self.conf.config(
+            group='api_settings',
+            enabled_request_header_operation_providers=['noop_driver'])
+        self.create_l7policy(
+            self.listener_id, 'REDIRECT_TO_POOL',
+            redirect_pool_id=self.pool_id, status=501,
+            request_header_operations=[
+                {'operation': 'REMOVE', 'name': 'x-old'}])
+
+    @mock.patch.object(noop_driver.NoopProviderDriver,
+                       'supports_request_header_operations', True)
+    def test_nested_policy_returns_request_header_operations(self):
+        self.conf.config(
+            group='api_settings', enabled_gateway_action_providers=[],
+            enabled_request_header_operation_providers=['noop_driver'])
+        operations = [{'operation': 'REMOVE', 'name': 'X-Old'}]
+        response = self.post(self.LBS_PATH, {'loadbalancer': {
+            'project_id': self.project_id,
+            'vip_subnet_id': uuidutils.generate_uuid(),
+            'listeners': [{
+                'protocol': 'HTTP', 'protocol_port': 80,
+                'l7policies': [{
+                    'action': 'REDIRECT_TO_POOL',
+                    'redirect_pool': {'name': 'echo', 'protocol': 'HTTP',
+                                      'lb_algorithm': 'ROUND_ROBIN'},
+                    'request_header_operations': operations,
+                }],
+            }],
+        }}).json['loadbalancer']
+        policy = response['listeners'][0]['l7policies'][0]
+        self.assertEqual([{'operation': 'REMOVE', 'name': 'x-old'}],
+                         policy['request_header_operations'])
+
+    @mock.patch.object(noop_driver.NoopProviderDriver,
+                       'supports_request_header_operations', True)
+    def test_stored_header_policy_reactivation_requires_opt_in(self):
+        field = 'request_header_operations'
+        header_fleets = ['noop_driver']
+        self.conf.config(
+            group='api_settings',
+            enabled_request_header_operation_providers=header_fleets)
+        operations = [{'operation': 'SET', 'name': 'x-color', 'value': 'blue'}]
+        policy_id = self.create_l7policy(
+            self.listener_id, 'REDIRECT_TO_POOL',
+            redirect_pool_id=self.pool_id,
+            **{field: operations})['l7policy']['id']
+        self.set_lb_status(self.lb_id)
+        rule_id = self.create_l7rule(
+            policy_id, 'PATH', 'EQUAL_TO', '/shop')['rule']['id']
+        self.set_lb_status(self.lb_id)
+        self.conf.config(group='api_settings',
+                         enabled_request_header_operation_providers=[])
+        rule_path = self.L7RULE_PATH.format(
+            l7policy_id=policy_id, l7rule_id=rule_id)
+        self.create_l7rule(policy_id, 'PATH', 'EQUAL_TO', '/orders',
+                           status=501)
+        self.put(rule_path, {'rule': {'value': '/orders'}}, status=501)
+        self.put(rule_path, {'rule': {'admin_state_up': False}})
+        self.set_lb_status(self.lb_id)
+        self.put(rule_path, {'rule': {'admin_state_up': True}}, status=501)
+        listener_path = self.LISTENER_PATH.format(listener_id=self.listener_id)
+        self.put(listener_path, {'listener': {'admin_state_up': False}})
+        self.set_lb_status(self.lb_id)
+        self.put(listener_path, {'listener': {'admin_state_up': True}},
+                 status=501)
+        policy_path = self.L7POLICY_PATH.format(l7policy_id=policy_id)
+        self.put(policy_path, {'l7policy': {'admin_state_up': False}})
+        self.set_lb_status(self.lb_id)
+        self.put(policy_path, {'l7policy': {'admin_state_up': True}},
+                 status=501)
+        self.put(policy_path, {'l7policy': {
+            'admin_state_up': True, field: []}})
+        self.set_lb_status(self.lb_id)
+        self.put(listener_path, {'listener': {'admin_state_up': True}})
+        self.set_lb_status(self.lb_id)
+        self.put(rule_path, {'rule': {'admin_state_up': True}})
+        self.set_lb_status(self.lb_id)
+        self.delete(policy_path)
+
     def test_get(self):
         api_l7policy = self.create_l7policy(
             self.listener_id,
@@ -877,7 +1006,14 @@ class TestL7Policy(base.BaseAPITest):
                                  'fixed_response': fixed}]},
                 {'l7policies': [{'action': 'WEIGHTED_TARGETS',
                                  'targets': [{'weight': 1,
-                                              'fixed_response': fixed}]}]}):
+                                              'fixed_response': fixed}]}]},
+                {'l7policies': [{
+                    'action': 'REDIRECT_TO_POOL',
+                    'redirect_pool': {'name': 'echo', 'protocol': 'HTTP',
+                                      'lb_algorithm': 'ROUND_ROBIN'},
+                    'request_header_operations': [
+                        {'operation': 'REMOVE', 'name': 'x-old'}],
+                }]}):
             with self.subTest(fields=fields):
                 self.post(self.LBS_PATH, {'loadbalancer': {
                     'project_id': self.project_id,

@@ -181,7 +181,9 @@ class L7RuleController(base.BaseController):
                 context.session)
             if l7rule_dict['enabled']:
                 driver_utils.require_gateway_policy_action(
-                    driver, db_l7policy.action, db_l7policy.listener.protocol)
+                    driver, db_l7policy.action, db_l7policy.listener.protocol,
+                    request_header_operations=(
+                        db_l7policy.request_header_operations))
 
             db_l7rule = self._validate_create_l7rule(context.session,
                                                      l7rule_dict)
@@ -266,7 +268,9 @@ class L7RuleController(base.BaseController):
                         l7rule_dict[field] != getattr(db_l7rule, field)
                         for field in match_fields)):
                 driver_utils.require_gateway_policy_action(
-                    driver, db_l7policy.action, db_l7policy.listener.protocol)
+                    driver, db_l7policy.action, db_l7policy.listener.protocol,
+                    request_header_operations=(
+                        db_l7policy.request_header_operations))
             l7rule_dict['id'] = id
             provider_l7rule_dict = (
                 driver_utils.l7rule_dict_to_provider_dict(l7rule_dict))
