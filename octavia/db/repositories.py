@@ -1821,12 +1821,14 @@ class L7RuleRepository(BaseRepository):
             if v is not None:
                 l7rule_dict.update({k: v})
         # Clear out the 'key' attribute for rule types that don't use it.
-        if ('type' in l7rule_dict.keys() and
-            l7rule_dict['type'] in (consts.L7RULE_TYPE_HOST_NAME,
-                                    consts.L7RULE_TYPE_PATH,
-                                    consts.L7RULE_TYPE_FILE_TYPE)):
+        rule_type = l7rule_dict['type']
+        if (rule_type in (consts.L7RULE_TYPE_HOST_NAME,
+                          consts.L7RULE_TYPE_PATH,
+                          consts.L7RULE_TYPE_FILE_TYPE) or
+                (rule_type == consts.L7RULE_TYPE_HTTP_METHOD and
+                 model_kwargs.get('key') is None)):
             l7rule_dict['key'] = None
-            model_kwargs.update({'key': None})
+            model_kwargs['key'] = None
         validate.l7rule_data(self.model_class(**l7rule_dict))
         l7rule_db.update(model_kwargs)
 
