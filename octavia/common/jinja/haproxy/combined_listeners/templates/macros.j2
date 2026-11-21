@@ -303,7 +303,9 @@ frontend {{ listener.id }}
         {% else %}
             {% set alpn_opt = "" %}
         {% endif %}
-        {% if pool.health_monitor.type == constants.HEALTH_MONITOR_HTTPS %}
+        {% if pool.backend_tls_hostname %}
+            {% set monitor_ssl_opt = " check-ssl check-sni %s"|format(pool.backend_tls_hostname) %}
+        {% elif pool.health_monitor.type == constants.HEALTH_MONITOR_HTTPS %}
             {% set monitor_ssl_opt = " check-ssl verify none" %}
         {% else %}
             {% set monitor_ssl_opt = "" %}
@@ -345,7 +347,12 @@ frontend {{ listener.id }}
     {% endif %}
     {% if pool.tls_enabled %}
         {% set def_opt_prefix = " ssl" %}
-        {% set def_sni_opt = " sni ssl_fc_sni" %}
+        {% if pool.backend_tls_hostname %}
+            {% set def_sni_opt = " sni str(%s) verifyhost-strict %s"|format(
+                pool.backend_tls_hostname, pool.backend_tls_hostname) %}
+        {% else %}
+            {% set def_sni_opt = " sni ssl_fc_sni" %}
+        {% endif %}
     {% else %}
         {% set def_opt_prefix = "" %}
         {% set def_sni_opt = "" %}
@@ -360,7 +367,7 @@ frontend {{ listener.id }}
         {% set def_verify_opt = " verify required" %}
         {% if pool.crl %}
             {% set crl_opt = " crl-file %s"|format(pool.crl) %}
-        {% else %}
+        {% elif not pool.backend_tls_hostname %}
             {% set def_verify_opt = "" %}
         {% endif %}
     {% elif pool.tls_enabled %}

@@ -48,6 +48,7 @@ Response Parameters
    - admin_state_up: admin_state_up
    - alpn_protocols: alpn_protocols-pool
    - backend_h2c: backend-h2c
+   - backend_tls_hostname: backend-tls-hostname
    - ca_tls_container_ref: ca_tls_container_ref
    - created_at: created_at
    - crl_container_ref: crl_container_ref
@@ -174,6 +175,7 @@ Request
    - admin_state_up: admin_state_up-default-optional
    - alpn_protocols: alpn_protocols-pool-optional
    - backend_h2c: backend-h2c
+   - backend_tls_hostname: backend-tls-hostname
    - ca_tls_container_ref: ca_tls_container_ref-optional
    - crl_container_ref: crl_container_ref-optional
    - description: description-optional
@@ -253,6 +255,7 @@ Response Parameters
    - admin_state_up: admin_state_up
    - alpn_protocols: alpn_protocols-pool
    - backend_h2c: backend-h2c
+   - backend_tls_hostname: backend-tls-hostname
    - ca_tls_container_ref: ca_tls_container_ref
    - created_at: created_at
    - crl_container_ref: crl_container_ref
@@ -328,6 +331,7 @@ Response Parameters
    - admin_state_up: admin_state_up
    - alpn_protocols: alpn_protocols-pool
    - backend_h2c: backend-h2c
+   - backend_tls_hostname: backend-tls-hostname
    - ca_tls_container_ref: ca_tls_container_ref
    - created_at: created_at
    - crl_container_ref: crl_container_ref
@@ -393,6 +397,7 @@ Request
    - admin_state_up: admin_state_up-default-optional
    - alpn_protocols: alpn_protocols-pool-optional
    - backend_h2c: backend-h2c
+   - backend_tls_hostname: backend-tls-hostname
    - ca_tls_container_ref: ca_tls_container_ref-optional
    - crl_container_ref: crl_container_ref-optional
    - description: description-optional
@@ -426,6 +431,7 @@ Response Parameters
    - admin_state_up: admin_state_up
    - alpn_protocols: alpn_protocols-pool
    - backend_h2c: backend-h2c
+   - backend_tls_hostname: backend-tls-hostname
    - ca_tls_container_ref: ca_tls_container_ref
    - created_at: created_at
    - crl_container_ref: crl_container_ref

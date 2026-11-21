@@ -959,7 +959,9 @@ class PoolRepository(BaseRepository):
         # pool read may be from an older REPEATABLE READ snapshot.
         pool = self.model_class
         row = (session.query(pool.protocol, pool.backend_h2c, pool.tls_enabled,
-                             pool.enabled)
+                             pool.enabled, pool.backend_tls_hostname,
+                             pool.ca_tls_certificate_id,
+                             pool.crl_container_id)
                .filter(pool.id == pool_id,
                        pool.provisioning_status != consts.DELETED)
                .with_for_update().one_or_none())

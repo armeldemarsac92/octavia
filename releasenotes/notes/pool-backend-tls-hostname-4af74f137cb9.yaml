@@ -1,0 +1,12 @@
+---
+features:
+  - |
+    HTTP pools can set ``backend_tls_hostname`` to send a fixed backend TLS
+    SNI and authenticate against a DNS subject alternative name in the backend
+    certificate, using an explicit pool CA reference. The regional provider
+    advertises ``backend_tls_hostname_v1`` when an operator opts in.
+upgrade:
+  - |
+    Enable ``enabled_backend_tls_hostname_providers`` after upgrading the
+    database, octavia-lib, Octavia services and the regional Amphora fleet
+    with the strict DNS HAProxy build described in the image element.

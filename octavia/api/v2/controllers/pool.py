@@ -54,6 +54,24 @@ def _validate_backend_h2c(driver, protocol, tls_enabled, *, enrolling):
                 'for this provider.'))
 
 
+def _validate_backend_tls_hostname(driver, protocol, hostname, tls_enabled,
+                                   ca_ref, *, enrolling):
+    if not validate.is_exact_sni_name(hostname):
+        raise exceptions.ValidationException(detail=_(
+            'backend_tls_hostname must be a literal DNS hostname.'))
+    if (protocol != constants.PROTOCOL_HTTP or tls_enabled is not True or
+            not ca_ref):
+        raise exceptions.ValidationException(detail=_(
+            'backend_tls_hostname requires an HTTP pool with tls_enabled '
+            'true and a CA certificate reference.'))
+    if (enrolling and constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME
+            not in driver_utils.gateway_capabilities(driver)):
+        raise exceptions.ProviderUnsupportedOptionError(
+            prov=driver.name, user_msg=_(
+                'Backend TLS hostname authentication is unavailable '
+                'for this provider.'))
+
+
 class PoolsController(base.BaseController):
     RBAC_TYPE = constants.RBAC_POOL
 
@@ -137,14 +155,21 @@ class PoolsController(base.BaseController):
         if pool_dict.get('backend_h2c', False) is None:
             raise exceptions.ValidationException(
                 detail=_('backend_h2c must be true or false.'))
-        if pool_dict.get('backend_h2c'):
+        hostname = pool_dict.get('backend_tls_hostname')
+        if pool_dict.get('backend_h2c') or hostname is not None:
             if driver is None:
                 # Fully populated load balancer creation uses this path too.
                 provider = self._get_db_lb(
                     lock_session, pool_dict['load_balancer_id']).provider
                 driver = driver_factory.get_driver(provider)
+        if pool_dict.get('backend_h2c'):
             _validate_backend_h2c(driver, pool_dict['protocol'],
                                   pool_dict['tls_enabled'], enrolling=True)
+        if hostname is not None:
+            _validate_backend_tls_hostname(
+                driver, pool_dict['protocol'], hostname,
+                pool_dict['tls_enabled'],
+                pool_dict.get('ca_tls_certificate_id'), enrolling=True)
 
         # Make sure we have a client CA if they specify a CRL
         if (pool_dict.get('crl_container_id') and
@@ -410,29 +435,40 @@ class PoolsController(base.BaseController):
         db_pool.members = new_members
         return db_pool
 
-    def _validate_h2c_update(self, session, pool_id, pool, driver):
+    def _validate_backend_transport_update(self, pool, current, driver):
         if pool.backend_h2c is None:
             raise exceptions.ValidationException(
                 detail=_('backend_h2c must be true or false.'))
-        if (pool.backend_h2c is wtypes.Unset and
-                pool.tls_enabled is wtypes.Unset and
-                pool.admin_state_up is not True):
-            return
-        current = self.repositories.pool.get_transport_for_update(
-            session, pool_id)
-        enabled = (current.backend_h2c if pool.backend_h2c is wtypes.Unset
-                   else pool.backend_h2c)
-        if enabled:
-            tls = (current.tls_enabled if pool.tls_enabled is wtypes.Unset
-                   else pool.tls_enabled)
-            enrolling = (pool.backend_h2c is True or
-                         (pool.admin_state_up is True and not current.enabled))
+        h2c = (current.backend_h2c if pool.backend_h2c is wtypes.Unset
+               else pool.backend_h2c)
+        tls = (current.tls_enabled if pool.tls_enabled is wtypes.Unset
+               else pool.tls_enabled)
+        reopening = pool.admin_state_up is True and not current.enabled
+        if h2c:
             _validate_backend_h2c(driver, current.protocol, tls,
-                                  enrolling=enrolling)
+                                  enrolling=pool.backend_h2c is True or
+                                  reopening)
 
-    def _validate_pool_PUT(self, pool, db_pool):
+        hostname = pool.backend_tls_hostname
+        if hostname is wtypes.Unset:
+            hostname = current.backend_tls_hostname
+        if hostname is None:
+            if current.backend_tls_hostname and (current.enabled or reopening):
+                raise exceptions.ValidationException(detail=_(
+                    'Disable the pool before removing backend TLS hostname '
+                    'authentication.'))
+            return
 
-        if db_pool.protocol in (constants.PROTOCOL_UDP,
+        ca_ref = (current.ca_tls_certificate_id
+                  if pool.ca_tls_container_ref is wtypes.Unset
+                  else pool.ca_tls_container_ref)
+        _validate_backend_tls_hostname(
+            driver, current.protocol, hostname, tls, ca_ref,
+            enrolling=hostname != current.backend_tls_hostname or reopening)
+
+    def _validate_pool_PUT(self, pool, current):
+
+        if current.protocol in (constants.PROTOCOL_UDP,
                                 lib_consts.PROTOCOL_SCTP):
             self._validate_pool_request_for_udp_sctp(pool)
         else:
@@ -453,12 +489,12 @@ class PoolsController(base.BaseController):
                 pool.crl_container_ref != wtypes.Unset):
             crl_ref = pool.crl_container_ref
         # If we got Unset and a CRL exists in the DB, use the DB crl_ref
-        elif (db_pool.crl_container_id and
+        elif (current.crl_container_id and
               pool.crl_container_ref == wtypes.Unset):
-            crl_ref = db_pool.crl_container_id
+            crl_ref = current.crl_container_id
 
         ca_ref = None
-        db_ca_ref = db_pool.ca_tls_certificate_id
+        db_ca_ref = current.ca_tls_certificate_id
         if pool.ca_tls_container_ref != wtypes.Unset:
             if not pool.ca_tls_container_ref and db_ca_ref and crl_ref:
                 raise exceptions.ValidationException(detail=_(
@@ -482,7 +518,13 @@ class PoolsController(base.BaseController):
             self._validate_tls_refs([pool.tls_container_ref])
 
         # Validate the client CA cert and optional client CRL
-        if ca_ref:
+        # Recheck unchanged CA material on activation. A protected pool
+        # can still be disabled if its credentials have become unavailable.
+        if ca_ref and (not current.backend_tls_hostname or
+                       pool.backend_tls_hostname not in (wtypes.Unset, None) or
+                       pool.ca_tls_container_ref is not wtypes.Unset or
+                       pool.crl_container_ref is not wtypes.Unset or
+                       (pool.admin_state_up is True and not current.enabled)):
             self._validate_client_ca_and_crl_refs(ca_ref, crl_ref)
 
         # Check TLS cipher prohibit list
@@ -531,8 +573,6 @@ class PoolsController(base.BaseController):
                 pool.session_persistence.type = (
                     db_pool.session_persistence.type)
 
-            self._validate_pool_PUT(pool, db_pool)
-
             # Load the driver early as it also provides validation
             driver = driver_factory.get_driver(provider)
 
@@ -540,13 +580,14 @@ class PoolsController(base.BaseController):
                 context.session, lb_id=db_pool.load_balancer_id,
                 listener_ids=self._get_affected_listener_ids(db_pool))
 
-            self._validate_h2c_update(context.session, id, pool, driver)
+            current = self.repositories.pool.get_transport_for_update(
+                context.session, id)
+            self._validate_backend_transport_update(pool, current, driver)
+            self._validate_pool_PUT(pool, current)
             if (driver_utils.uses_tls_sni_policy_path(
                     driver, db_pool.protocol) and
                     (pool.tls_enabled is True or pool.admin_state_up is True)):
                 policy_repo = self.repositories.l7policy
-                current = self.repositories.pool.get_transport_for_update(
-                    context.session, id)
                 reopening = pool.admin_state_up is True and not current.enabled
                 if ((pool.tls_enabled is True or reopening) and
                         policy_repo.get_tcp_policy_using_pool(
@@ -563,6 +604,7 @@ class PoolsController(base.BaseController):
             # Prepare the data for the driver data model
             pool_dict = pool.to_dict(render_unsets=False)
             pool_dict['id'] = id
+            pool_dict['project_id'] = project_id
             provider_pool_dict = (
                 driver_utils.pool_dict_to_provider_dict(pool_dict))
 

@@ -298,6 +298,21 @@ class TestAmphoraDriver(base.TestRpc):
         mock_cast.assert_called_with({}, 'update_pool', **payload)
 
     @mock.patch('oslo_messaging.RPCClient.cast')
+    def test_pool_update_backend_tls_hostname(self, mock_cast):
+        hostname = 'backend.example.test'
+        old_pool = driver_dm.Pool(
+            pool_id=self.sample_data.pool1_id, ca_tls_container_data='CA DATA')
+        update = driver_dm.Pool(
+            pool_id=self.sample_data.pool1_id, backend_tls_hostname=hostname,
+            ca_tls_container_ref='CA REF', ca_tls_container_data='CA DATA')
+        self.amp_driver.pool_update(old_pool, update)
+        mock_cast.assert_called_once_with(
+            {}, 'update_pool',
+            original_pool={'pool_id': self.sample_data.pool1_id},
+            pool_updates={'backend_tls_hostname': hostname,
+                          'ca_tls_certificate_id': 'CA REF'})
+
+    @mock.patch('oslo_messaging.RPCClient.cast')
     def test_pool_update_name(self, mock_cast):
         old_provider_pool = driver_dm.Pool(
             pool_id=self.sample_data.pool1_id)

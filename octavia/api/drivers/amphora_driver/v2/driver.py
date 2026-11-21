@@ -69,6 +69,7 @@ class AmphoraProviderDriver(driver_base.ProviderDriver):
     supports_http_header_exact = True
     supports_http_method_match = True
     supports_backend_h2c = True
+    supports_backend_tls_hostname = True
     supports_tls_sni_passthrough = True
     supports_tls_sni_suffix = True
 
@@ -279,7 +280,10 @@ class AmphoraProviderDriver(driver_base.ProviderDriver):
             self._validate_pool_algorithm(new_pool)
         pool_dict = self._pool_convert_to_dict(new_pool)
         pool_dict.pop('pool_id')
-        payload = {consts.ORIGINAL_POOL: old_pool.to_dict(),
+        original_pool = old_pool.to_dict(
+            tls_container_data=False, ca_tls_container_data=False,
+            crl_container_data=False)
+        payload = {consts.ORIGINAL_POOL: original_pool,
                    consts.POOL_UPDATES: pool_dict}
         self.client.cast({}, 'update_pool', **payload)
 

@@ -116,7 +116,7 @@ class HaproxyAmphoraLoadBalancerDriver(
         self._populate_amphora_api_version(amphora, timeout_dict)
 
     def update_amphora_listeners(self, loadbalancer, amphora,
-                                 timeout_dict=None):
+                                 timeout_dict=None, *, amp_details=None):
         """Update the amphora with a new configuration.
 
         :param loadbalancer: The load balancer to update
@@ -127,6 +127,7 @@ class HaproxyAmphoraLoadBalancerDriver(
                              amphora. May contain: req_conn_timeout,
                              req_read_timeout, conn_max_retries,
                              conn_retry_interval
+        :param amp_details: Amphora details, if already read for preflight.
         :returns: None
 
         Updates the configuration of the listeners on a single amphora.
@@ -194,8 +195,9 @@ class HaproxyAmphoraLoadBalancerDriver(
         if has_tcp:
             if listeners_to_update:
                 # Generate HaProxy configuration from listener object
-                amp_details = self.clients[amphora.api_version].get_details(
-                    amphora)
+                if amp_details is None:
+                    client = self.clients[amphora.api_version]
+                    amp_details = client.get_details(amphora)
                 config = self.jinja_combo.build_config(
                     host_amphora=amphora, listeners=listeners_to_update,
                     tls_certs=certs,
@@ -230,9 +232,34 @@ class HaproxyAmphoraLoadBalancerDriver(
                     amp, listener.id)
 
     def update(self, loadbalancer):
-        for amphora in loadbalancer.amphorae:
-            if amphora.status != consts.DELETED:
+        amphorae = [amphora for amphora in loadbalancer.amphorae
+                    if amphora.status != consts.DELETED]
+        protected = loadbalancer.enabled and any(
+            pool.enabled and
+            pool.provisioning_status != consts.PENDING_DELETE and
+            getattr(pool, 'backend_tls_hostname', None) is not None
+            for listener in loadbalancer.listeners if listener.enabled
+            for pool in listener.pools)
+        if not protected:
+            for amphora in amphorae:
                 self.update_amphora_listeners(loadbalancer, amphora)
+            return
+
+        # Verify both Amphorae of a pair before changing either configuration.
+        details = {}
+        capability = consts.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME
+        for amphora in amphorae:
+            self._populate_amphora_api_version(amphora)
+            client = self.clients[amphora.api_version]
+            amp_details = client.get_details(amphora)
+            if amp_details.get(capability) is not True:
+                raise driver_except.AmpVersionUnsupported(
+                    version='HAProxy requires strict backend DNS '
+                            'authentication support')
+            details[amphora.id] = amp_details
+        for amphora in amphorae:
+            self.update_amphora_listeners(
+                loadbalancer, amphora, amp_details=details[amphora.id])
 
     def upload_cert_amp(self, amp, pem):
         LOG.debug("Amphora %s updating cert in REST driver "
@@ -513,6 +540,8 @@ class HaproxyAmphoraLoadBalancerDriver(
 
     def _process_pool_certs(self, listener, pool, amphora, obj_id):
         pool_cert_dict = {}
+        if getattr(pool, 'backend_tls_hostname', None) and not pool.enabled:
+            return pool_cert_dict
 
         # Handle the client cert(s) and key
         if pool.tls_certificate_id:

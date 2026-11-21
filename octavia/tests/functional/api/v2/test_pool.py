@@ -2743,6 +2743,78 @@ class TestPool(base.BaseAPITest):
         selected, = result['pools']
         self.assertIs(True, selected['backend_h2c'])
 
+    @mock.patch.object(noop_driver.NoopProviderDriver,
+                       'supports_backend_tls_hostname', True, create=True)
+    def test_backend_tls_hostname_enrollment_and_drain(self):
+        hostname = 'backend.example.test'
+        ca_ref = uuidutils.generate_uuid()
+        self.cert_manager_mock().get_secret.return_value = (
+            sample_certs.X509_CA_CERT)
+        args = (self.lb_id, constants.PROTOCOL_HTTP,
+                constants.LB_ALGORITHM_ROUND_ROBIN)
+        options = {'backend_tls_hostname': hostname, 'tls_enabled': True,
+                   'ca_tls_container_ref': ca_ref}
+        self.create_pool(*args, **options, status=501)
+        self.conf.config(
+            group='api_settings',
+            enabled_backend_tls_hostname_providers=['noop_driver'])
+        self.create_pool(*args, backend_tls_hostname=hostname, status=400)
+        self.create_pool(*args, **dict(options, backend_h2c=True), status=400)
+        self.create_pool(*args, **dict(options, backend_tls_hostname='str(x)'),
+                         status=400)
+        pool = self.create_pool(*args, **options)['pool']
+        self.assertEqual(hostname, pool['backend_tls_hostname'])
+        self.assertNotIn('ca_tls_container_data', pool)
+
+        path = self.POOL_PATH.format(pool_id=pool['id'])
+        self.set_lb_status(self.lb_id)
+        self.put(path, {'pool': {'tls_enabled': False}}, status=400)
+        self.put(path, {'pool': {'ca_tls_container_ref': None}}, status=400)
+        self.put(path, {'pool': {'backend_tls_hostname': None}}, status=400)
+        update = self.put(path, {'pool': {
+            'ca_tls_container_ref': uuidutils.generate_uuid()}}).json['pool']
+        self.assertEqual(hostname, update['backend_tls_hostname'])
+        self.assertNotEqual(ca_ref, update['ca_tls_container_ref'])
+        self.set_lb_status(self.lb_id)
+
+        self.conf.config(group='api_settings',
+                         enabled_backend_tls_hostname_providers=[])
+        self.assertEqual(hostname,
+                         self.get(path).json['pool']['backend_tls_hostname'])
+        self.put(path, {'pool': {'admin_state_up': False}})
+        self.set_lb_status(self.lb_id)
+        self.put(path, {'pool': {'admin_state_up': True}}, status=501)
+        self.put(path, {'pool': {'backend_tls_hostname': None,
+                                 'admin_state_up': True}}, status=400)
+        update = self.put(path, {'pool': {
+            'backend_tls_hostname': None, 'tls_enabled': False,
+            'ca_tls_container_ref': None}}).json['pool']
+        self.assertIsNone(update['backend_tls_hostname'])
+        self.assertFalse(update['admin_state_up'])
+
+    @mock.patch.object(noop_driver.NoopProviderDriver,
+                       'supports_backend_tls_hostname', True, create=True)
+    def test_backend_tls_hostname_nested_pool(self):
+        hostname = 'backend.example.test'
+        self.cert_manager_mock().get_secret.return_value = (
+            sample_certs.X509_CA_CERT)
+        pool = {'name': 'https-backend', 'protocol': constants.PROTOCOL_HTTP,
+                'lb_algorithm': constants.LB_ALGORITHM_ROUND_ROBIN,
+                'tls_enabled': True,
+                'ca_tls_container_ref': uuidutils.generate_uuid(),
+                'backend_tls_hostname': hostname}
+        body = {'loadbalancer': {
+            'vip_subnet_id': uuidutils.generate_uuid(),
+            'project_id': self.project_id,
+            'listeners': [{'name': 'http', 'protocol': constants.PROTOCOL_HTTP,
+                           'protocol_port': 80, 'default_pool': pool}]}}
+        self.conf.config(
+            group='api_settings',
+            enabled_backend_tls_hostname_providers=['noop_driver'])
+        result = self.post(self.LBS_PATH, body).json['loadbalancer']
+        selected, = result['pools']
+        self.assertEqual(hostname, selected['backend_tls_hostname'])
+
     def test_create_with_alpn(self):
         alpn_protocols = [lib_constants.ALPN_PROTOCOL_HTTP_2,
                           lib_constants.ALPN_PROTOCOL_HTTP_1_1]

@@ -896,6 +896,32 @@ class TestHaproxyCfg(base.TestCase):
             self.assertIn('proto h2', line)
             self.assertIn('check-proto h1', line)
 
+    def test_backend_tls_hostname_requires_capable_amphora(self):
+        hostname = 'backend.example.test'
+        listener = sample_configs_combined.sample_listener_tuple()
+        values = dict(listener.pools[0]._asdict(), tls_enabled=True,
+                      backend_tls_hostname=hostname,
+                      ca_tls_certificate_id='ca-certificate')
+        pool = SimpleNamespace(**values)
+        listeners = [listener._replace(default_pool=pool, pools=[pool])]
+        args = (sample_configs_combined.sample_amphora_tuple(), listeners)
+        certs = {pool.id: {'ca_cert': '/path/to/backend-ca.pem'}}
+        self.assertRaises(driver_except.AmpVersionUnsupported,
+                          self.jinja_cfg.render_loadbalancer_obj,
+                          *args, tls_certs=certs)
+        amp_details = {constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME: True}
+        self.assertRaises(exceptions.ValidationException,
+                          self.jinja_cfg.render_loadbalancer_obj,
+                          *args, amp_details=amp_details)
+        config = self.jinja_cfg.render_loadbalancer_obj(
+            *args, tls_certs=certs, amp_details=amp_details)
+        self.assertIn(f'check-ssl check-sni {hostname}', config)
+        self.assertIn('ca-file /path/to/backend-ca.pem verify required',
+                      config)
+        self.assertIn(f'sni str({hostname}) verifyhost-strict {hostname}',
+                      config)
+        self.assertNotIn('verify none', config)
+
     def test_render_template_https_real_monitor(self):
         fe = ("frontend sample_listener_id_1\n"
               "    maxconn {maxconn}\n"
