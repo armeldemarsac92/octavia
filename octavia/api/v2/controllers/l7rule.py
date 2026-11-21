@@ -193,6 +193,8 @@ class L7RuleController(base.BaseController):
                     request_header_operations=(
                         db_l7policy.request_header_operations))
             if tcp_policy:
+                driver_utils.require_tls_sni_rule_comparison(
+                    driver, l7rule.compare_type)
                 self.repositories.l7policy.validate_tcp_redirect_pool(
                     context.session, db_l7policy.listener,
                     db_l7policy.redirect_pool_id)
@@ -289,6 +291,10 @@ class L7RuleController(base.BaseController):
                     request_header_operations=(
                         db_l7policy.request_header_operations))
                 if tcp_policy:
+                    compare_type = l7rule_dict.get(
+                        'compare_type', db_l7rule.compare_type)
+                    driver_utils.require_tls_sni_rule_comparison(
+                        driver, compare_type)
                     self.repositories.l7policy.validate_tcp_redirect_pool(
                         context.session, db_l7policy.listener,
                         db_l7policy.redirect_pool_id)

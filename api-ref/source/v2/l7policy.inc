@@ -115,9 +115,12 @@ L7 policies with ``action`` of ``REDIRECT_TO_URL`` will return the default HTTP
 L7 policies with ``action`` of ``REJECT`` will return a ``Forbidden (403)``
 response code to the requester.
 
-.. note::
-    Pools of type ``SCTP``, ``TCP`` or ``UDP`` cannot be used in L7
-    policies at this time.
+For TCP listeners, the Amphora provider supports ``REDIRECT_TO_POOL``
+policies with ``TLS_SNI`` rules when the provider advertises
+``tls_sni_passthrough_v1``. The redirect pool must use TCP with
+``tls_enabled`` set to ``false``. Wildcard SNI rules additionally require
+``tls_sni_suffix_v1``. SCTP and UDP pools are unsupported as L7 policy
+targets.
 
 .. rest_status_code:: success ../http-status.yaml
 

@@ -1406,6 +1406,34 @@ class TestHaproxyCfg(base.TestCase):
                     'default_backend sample_pool_id_1:sample_listener_id_1',
                     config)
 
+    def test_render_tcp_sni_policy_specificity_and_position(self):
+        samples = sample_configs_combined
+        pool = samples.sample_pool_tuple(proto='TCP', persistence=False)
+        broad = samples.sample_l7rule_tuple(
+            'broad', type='TLS_SNI', compare_type='ENDS_WITH',
+            value='*.example.test')
+        narrow = broad._replace(id='narrow', value='*.a.example.test')
+        first = narrow._replace(id='first')
+        conjoined = broad._replace(id='conjoined')
+        exact = broad._replace(id='exact', compare_type='EQUAL_TO',
+                               value='one.a.example.test')
+        policies = [
+            samples.sample_l7policy_tuple(rules[-1].id)._replace(
+                redirect_pool=pool, l7rules=rules)
+            for rules in ([broad], [first], [conjoined, narrow], [exact])]
+        listener = samples.sample_listener_tuple(
+            proto='TCP', persistence=False)._replace(
+                pools=[pool], l7policies=policies)
+
+        config = self.jinja_cfg.render_loadbalancer_obj(
+            samples.sample_amphora_tuple(), [listener], {})
+
+        self.assertIn('acl broad req.ssl_sni -i -m end .example.test', config)
+        self.assertEqual(
+            ['exact', 'first', 'conjoined narrow', 'broad'],
+            [line.split(' if ')[1] for line in config.splitlines()
+             if line.strip().startswith('use_backend ')])
+
     def test_render_template_l7policies(self):
         fe = ("frontend sample_listener_id_1\n"
               "    maxconn {maxconn}\n"

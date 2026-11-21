@@ -2185,6 +2185,72 @@ class TestL7Policy(base.BaseAPITest):
         self.delete(policy_path)
 
     @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
+    def test_tls_sni_suffix_admission_and_opt_out(self, rpc):
+        lb = self.create_load_balancer(
+            uuidutils.generate_uuid(), provider='amphora')['loadbalancer']
+        lb_id = lb['id']
+        self.set_lb_status(lb_id)
+        listener = self.create_listener('TCP', 443, lb_id)['listener']
+        self.set_lb_status(lb_id)
+        pool = self.create_pool(lb_id, 'TCP', 'ROUND_ROBIN')['pool']
+        self.set_lb_status(lb_id)
+        self.conf.config(group='api_settings',
+                         enabled_tls_sni_providers=['amphora'])
+        policy = self.create_l7policy(
+            listener['id'], 'REDIRECT_TO_POOL',
+            redirect_pool_id=pool['id'])['l7policy']
+        self.set_lb_status(lb_id)
+
+        rpc.return_value.cast.reset_mock()
+        self.create_l7rule(policy['id'], 'TLS_SNI', 'ENDS_WITH',
+                           '*.example.test', status=501)
+        rpc.return_value.cast.assert_not_called()
+        self.conf.config(group='api_settings',
+                         enabled_tls_sni_suffix_providers=['amphora'])
+        for value, options in (
+                ('example.test', {}),
+                ('*.foo.*.test', {}),
+                ('*.192.0.2.1', {}),
+                ('*.example.test', {'key': 'hostname'}),
+                ('*.example.test', {'invert': True})):
+            with self.subTest(value=value, options=options):
+                self.create_l7rule(policy['id'], 'TLS_SNI', 'ENDS_WITH',
+                                   value, status=400, **options)
+        rpc.return_value.cast.assert_not_called()
+        rule = self.create_l7rule(policy['id'], 'TLS_SNI', 'ENDS_WITH',
+                                  '*.Example.test')['rule']
+        self.set_lb_status(lb_id)
+        self.assertEqual('*.Example.test', rule['value'])
+        path = self.L7RULE_PATH.format(l7policy_id=policy['id'],
+                                       l7rule_id=rule['id'])
+
+        self.conf.config(group='api_settings',
+                         enabled_tls_sni_suffix_providers=[])
+        self.put(path, {'rule': {'value': '*.new.example.test'}}, status=501)
+        self.assertEqual('*.Example.test',
+                         self.get(path).json['rule']['value'])
+        lb_path = self.LB_PATH.format(lb_id=lb_id)
+        listener_path = self.LISTENER_PATH.format(listener_id=listener['id'])
+        pool_path = self.POOL_PATH.format(pool_id=pool['id'])
+        policy_path = self.L7POLICY_PATH.format(l7policy_id=policy['id'])
+        for resource, resource_path in (
+                ('loadbalancer', lb_path), ('listener', listener_path),
+                ('pool', pool_path), ('l7policy', policy_path),
+                ('rule', path)):
+            with self.subTest(resource=resource):
+                self.put(resource_path, {resource: {'admin_state_up': False}})
+                self.set_lb_status(lb_id)
+                self.put(resource_path, {resource: {'admin_state_up': True}},
+                         status=501)
+                self.assertFalse(
+                    self.get(resource_path).json[resource]['admin_state_up'])
+        self.delete(path)
+        self.set_lb_status(lb_id)
+        exact = self.create_l7rule(policy['id'], 'TLS_SNI', 'EQUAL_TO',
+                                   'a.example.test')['rule']
+        self.assertEqual('EQUAL_TO', exact['compare_type'])
+
+    @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
     def test_tls_sni_nested_create(self, rpc):
         project_id = uuidutils.generate_uuid()
         pool = {'name': 'passthrough', 'protocol': 'TCP',
@@ -2219,3 +2285,15 @@ class TestL7Policy(base.BaseAPITest):
         self.assertEqual('TLS_SNI', saved_policy['rules'][0]['type'])
         self.assertEqual(load_balancer['pools'][0]['id'],
                          saved_policy['redirect_pool_id'])
+
+        rule.update(compare_type='ENDS_WITH', value='*.example.test')
+        with mock.patch(create_vip) as vip:
+            self.post(self.LBS_PATH, body, status=501)
+            vip.assert_not_called()
+        self.conf.config(group='api_settings',
+                         enabled_tls_sni_suffix_providers=['amphora'])
+        load_balancer = self.post(self.LBS_PATH, body).json['loadbalancer']
+        saved_policy = load_balancer['listeners'][0]['l7policies'][0]
+        self.assertEqual('ENDS_WITH',
+                         saved_policy['rules'][0]['compare_type'])
+        self.assertEqual('*.example.test', saved_policy['rules'][0]['value'])

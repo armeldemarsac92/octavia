@@ -142,10 +142,16 @@ def is_exact_sni_name(value):
 
 
 def is_tls_sni_rule(rule):
-    return (rule.type == constants.L7RULE_TYPE_TLS_SNI and
-            rule.compare_type == constants.L7RULE_COMPARE_TYPE_EQUAL_TO and
-            rule.key in (None, wtypes.Unset) and not rule.invert and
-            is_exact_sni_name(rule.value))
+    if (rule.type != constants.L7RULE_TYPE_TLS_SNI or
+            rule.key not in (None, wtypes.Unset) or rule.invert):
+        return False
+    if rule.compare_type == constants.L7RULE_COMPARE_TYPE_EQUAL_TO:
+        return is_exact_sni_name(rule.value)
+    if rule.compare_type == constants.L7RULE_COMPARE_TYPE_ENDS_WITH:
+        value = rule.value
+        return (bool(value) and len(value) <= 253 and
+                value.startswith('*.') and is_exact_sni_name(value[2:]))
+    return False
 
 
 def validate_tcp_redirect_pool_protocol(protocol, tls_enabled):
@@ -164,8 +170,9 @@ def l7rule_data(l7rule):
     if l7rule.type == constants.L7RULE_TYPE_TLS_SNI:
         if not is_tls_sni_rule(l7rule):
             raise exceptions.InvalidL7Rule(msg=_(
-                'TLS_SNI requires EQUAL_TO and an exact DNS hostname '
-                'without a key or inversion.'))
+                'TLS_SNI requires EQUAL_TO with an exact DNS hostname or '
+                'ENDS_WITH with a DNS wildcard like *.example.test. '
+                'Keys and inversion are unsupported.'))
 
     elif l7rule.type == constants.L7RULE_TYPE_HEADER:
         if not l7rule.key:

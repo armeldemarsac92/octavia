@@ -819,6 +819,10 @@ class LoadBalancersController(base.BaseController):
                     self.repositories.l7policy.has_active_tcp_sni_policy(
                         context.session, id)):
                 driver_utils.require_tls_sni_passthrough(driver)
+                if self.repositories.l7policy.has_active_tcp_sni_policy(
+                        context.session, id,
+                        compare_type=constants.L7RULE_COMPARE_TYPE_ENDS_WITH):
+                    driver_utils.require_tls_sni_suffix(driver)
 
             # Prepare the data for the driver data model
             lb_dict = load_balancer.to_dict(render_unsets=False)

@@ -308,6 +308,10 @@ class L7PolicyController(base.BaseController):
                     driver, action, listener.protocol,
                     request_header_operations=retained_operations)
                 if tcp_policy:
+                    policy_repo = self.repositories.l7policy
+                    if policy_repo.has_enabled_tls_sni_suffix_rule(
+                            lock_session, policy_id=id):
+                        driver_utils.require_tls_sni_suffix(driver)
                     target = l7policy_dict.get(
                         'redirect_pool_id', db_l7policy.redirect_pool_id)
                     self.repositories.l7policy.validate_tcp_redirect_pool(
