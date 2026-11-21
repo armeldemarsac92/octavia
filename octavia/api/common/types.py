@@ -284,6 +284,19 @@ class WeightedL7PolicyTargets(wtypes.UserType):
             raise ValueError(str(e)) from e
 
 
+class RequestHeaderOperations(wtypes.UserType):
+    # A tagged list with strict JSON types and a per-operation value field.
+    basetype = object
+    name = 'request_header_operations'
+
+    @staticmethod
+    def validate(value):
+        try:
+            return validate.request_header_operations(value)
+        except exceptions.InvalidL7PolicyArgs as e:
+            raise ValueError(str(e)) from e
+
+
 class IdOnlyType(BaseType):
     id = wtypes.wsattr(wtypes.UuidType(), mandatory=True)
 

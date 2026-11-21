@@ -58,11 +58,13 @@ def validate_http_policy_options_on_create(
         if (action not in (constants.L7POLICY_ACTION_FIXED_RESPONSE,
                            constants.L7POLICY_ACTION_WEIGHTED_TARGETS) and
                 policy.get('fixed_response') is None and
-                policy.get('targets') is None):
+                policy.get('targets') is None and
+                'request_header_operations' not in policy):
             continue
         checked = validate.sanitize_l7policy_api_args(
             policy.copy(), create=True)
         l7policy.validate_policy_provider(checked['action'], protocol, driver)
+        l7policy.validate_policy_request_headers(checked, protocol, driver)
         if action != constants.L7POLICY_ACTION_WEIGHTED_TARGETS:
             continue
         if not creating_load_balancer:

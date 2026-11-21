@@ -718,7 +718,7 @@ class L7Policy(BaseDataModel):
                  operating_status=None, project_id=None, created_at=None,
                  updated_at=None, redirect_prefix=None, tags=None,
                  redirect_http_code=None, fixed_response=None,
-                 targets=None):
+                 targets=None, request_header_operations=None):
         self.id = id
         self.name = name
         self.description = description
@@ -740,6 +740,7 @@ class L7Policy(BaseDataModel):
         self.tags = tags
         self.redirect_http_code = redirect_http_code
         self.fixed_response = fixed_response
+        self.request_header_operations = request_header_operations
         self.targets = targets or []
 
     def _conditionally_remove_pool_links(self, pool):

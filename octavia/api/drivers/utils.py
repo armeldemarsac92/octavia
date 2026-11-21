@@ -44,6 +44,9 @@ def gateway_capabilities(driver):
         capabilities.append(constants.GATEWAY_CAPABILITY_FIXED_HTTP_RESPONSES)
     if getattr(driver, 'supports_weighted_targets', False) is True:
         capabilities.append(constants.GATEWAY_CAPABILITY_WEIGHTED_HTTP_TARGETS)
+    if getattr(driver, 'supports_request_header_operations', False) is True:
+        capabilities.append(
+            constants.GATEWAY_CAPABILITY_REQUEST_HEADER_OPERATIONS)
     return capabilities
 
 
@@ -62,6 +65,15 @@ def require_weighted_targets(driver):
             prov=driver.name, user_msg=_(
                 'Weighted L7 policy targets are unavailable for this '
                 'provider.'))
+
+
+def require_request_header_operations(driver):
+    if (constants.GATEWAY_CAPABILITY_REQUEST_HEADER_OPERATIONS not in
+            gateway_capabilities(driver)):
+        raise exceptions.ProviderUnsupportedOptionError(
+            prov=driver.name, user_msg=_(
+                'L7 policy request header operations are unavailable for '
+                'this provider.'))
 
 
 def call_provider(provider, driver_method, *args, **kwargs):
@@ -557,6 +569,8 @@ def db_l7policy_to_provider_l7policy(db_l7policy):
         del new_l7policy_dict['l7rules']
         new_l7rules = db_l7rules_to_provider_l7rules(db_l7policy.l7rules)
         new_l7policy_dict['rules'] = new_l7rules
+    if not new_l7policy_dict.get('request_header_operations'):
+        new_l7policy_dict.pop('request_header_operations', None)
     if new_l7policy_dict.get('fixed_response') is None:
         new_l7policy_dict.pop('fixed_response', None)
     return driver_dm.L7Policy.from_dict(new_l7policy_dict)
@@ -566,6 +580,8 @@ def l7policy_dict_to_provider_dict(l7policy_dict):
     new_l7policy_dict = _base_to_provider_dict(l7policy_dict,
                                                include_project_id=True)
     new_l7policy_dict['l7policy_id'] = new_l7policy_dict.pop('id')
+    if new_l7policy_dict.get('request_header_operations') is None:
+        new_l7policy_dict.pop('request_header_operations', None)
     # Remove the DB back references
     if 'listener' in new_l7policy_dict:
         del new_l7policy_dict['listener']

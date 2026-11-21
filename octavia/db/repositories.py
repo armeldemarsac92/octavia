@@ -1818,6 +1818,9 @@ class L7PolicyRepository(BaseRepository):
 
     def _validate_l7policy_pool_data(self, session, l7policy):
         """Does validations on a given L7 policy."""
+        if l7policy.request_header_operations:
+            listener = session.get(models.Listener, l7policy.listener_id)
+            validate.validate_request_header_protocol(listener.protocol)
         if l7policy.action == consts.L7POLICY_ACTION_FIXED_RESPONSE:
             listener = session.get(models.Listener, l7policy.listener_id)
             validate.validate_fixed_http_protocol(listener.protocol)

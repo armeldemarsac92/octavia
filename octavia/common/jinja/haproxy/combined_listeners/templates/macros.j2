@@ -168,19 +168,19 @@ backend {{ fixed_response_backend_name(constants, listener, response_id) }}
 {% endmacro %}
 
 
-{% macro weighted_policy_match_macro(l7policy) -%}
-    { var(txn.octavia_l7_policy) -m str {{ l7policy.id }} }
+{% macro selected_policy_match_macro(policy_id) -%}
+    { var(txn.octavia_l7_policy) -m str {{ policy_id }} }
 {%- endmacro %}
 
 
-{% macro weighted_policy_draw_macro(constants, l7policy) %}
+{% macro select_switching_policy_macro(constants, l7policy) %}
     {% if l7policy.weighted_targets is defined or
           l7policy.fixed_http_status_code is defined or
           (l7policy.action == constants.L7POLICY_ACTION_REDIRECT_TO_POOL and
-           l7policy.redirect_pool.enabled) %}
+           l7policy.redirect_pool and l7policy.redirect_pool.enabled) %}
     http-request set-var(txn.octavia_l7_policy) str({{ l7policy.id }}) if !{ var(txn.octavia_l7_policy) -m found }{{ l7rule_list_macro(l7policy) }}
         {% if l7policy.weighted_targets is defined %}
-    http-request set-var(txn.octavia_weighted_draw) rand({{ l7policy.total_weight }}) if {{ weighted_policy_match_macro(l7policy) }}
+    http-request set-var(txn.octavia_weighted_draw) rand({{ l7policy.total_weight }}) if {{ selected_policy_match_macro(l7policy.id) }}
         {% endif %}
     {% endif %}
 {% endmacro %}
@@ -209,7 +209,7 @@ backend {{ fixed_response_backend_name(constants, listener, response_id) }}
             {% else %}
                 {% set backend = fixed_response_backend_name(constants, listener, 'weighted-' ~ target.status_code) %}
             {% endif %}
-    use_backend {{ backend }} if {{ weighted_policy_match_macro(l7policy) }} { var(txn.octavia_weighted_draw) -m int {{ target.first }}:{{ target.last }} }
+    use_backend {{ backend }} if {{ selected_policy_match_macro(l7policy.id) }} { var(txn.octavia_weighted_draw) -m int {{ target.first }}:{{ target.last }} }
         {% endfor %}
     {% elif l7policy.action == constants.L7POLICY_ACTION_REDIRECT_PREFIX %}
     redirect {{- redirect_http_code_opt }} prefix {{ l7policy.redirect_prefix }} if{{ l7rule_list_macro(l7policy) }}
@@ -235,18 +235,20 @@ frontend {{ listener.id }}
     {% endfor %}
     mode {{ listener.protocol_mode }}
     {% set policies = listener.l7policies|selectattr('enabled')|selectattr('l7rules')|list %}
-    {% if listener.weighted_response_codes is defined %}
+    {% set select_policy = listener.weighted_response_codes is defined or
+                           listener.request_header_operations_by_pool is defined %}
+    {% if select_policy %}
         {# Match the first eligible switching policy before sampling. Only a
            weighted winner draws, and txn variables are reset per request. #}
         {% for l7policy in policies %}
             {{- l7policy_rules_macro(constants, l7policy) -}}
         {% endfor %}
         {% for l7policy in policies %}
-            {{- weighted_policy_draw_macro(constants, l7policy) -}}
+            {{- select_switching_policy_macro(constants, l7policy) -}}
         {% endfor %}
     {% endif %}
     {% for l7policy in policies %}
-        {% if listener.weighted_response_codes is not defined %}
+        {% if not select_policy %}
             {{- l7policy_rules_macro(constants, l7policy) -}}
         {% endif %}
         {{- l7policy_macro(constants, l7policy, listener) -}}
@@ -406,6 +408,11 @@ backend {{ pool.id }}:{{ listener.id }}
                constants.PROTOCOL_HTTP.lower()))%}
     http-reuse safe
     {% endif %}
+    {% for policy_id, operations in listener.get('request_header_operations_by_pool', {}).get(pool.id, []) %}
+        {% for operation in operations %}
+    http-request {{ operation|safe }} if {{ selected_policy_match_macro(policy_id) }}
+        {% endfor %}
+    {% endfor %}
     balance {{ pool.lb_algorithm }}
     {% if pool.session_persistence %}
         {% if (pool.session_persistence.type ==

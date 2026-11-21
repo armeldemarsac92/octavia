@@ -89,7 +89,8 @@ api_opts = [
                help=_('Default provider driver.')),
     cfg.ListOpt('enabled_gateway_action_providers', default=[],
                 help=_('Provider driver names whose fleets are compatible '
-                       'with fixed HTTP responses and weighted HTTP targets. '
+                       'with fixed HTTP responses, weighted HTTP targets and '
+                       'L7 policy request header operations. '
                        'Each name must also be enabled and the driver must '
                        'support the corresponding action. Enable only after '
                        'all relevant components and Amphora images have '

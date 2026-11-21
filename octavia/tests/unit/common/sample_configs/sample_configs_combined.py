@@ -1089,7 +1089,8 @@ def sample_l7policy_tuple(id,
                                          'l7rules, enabled,'
                                          'redirect_http_code,'
                                          'provisioning_status, '
-                                         'fixed_response, targets')
+                                         'fixed_response, targets, '
+                                         'request_header_operations')
     l7rules = []
     if sample_policy == 1:
         action = constants.L7POLICY_ACTION_REDIRECT_TO_POOL
@@ -1139,7 +1140,7 @@ def sample_l7policy_tuple(id,
                        constants.L7POLICY_ACTION_REDIRECT_PREFIX] and
             redirect_http_code) else None,
         provisioning_status=provisioning_status, fixed_response=None,
-        targets=None)
+        targets=None, request_header_operations=None)
 
 
 def sample_l7rule_tuple(id,

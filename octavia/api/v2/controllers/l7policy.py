@@ -39,6 +39,20 @@ CONF = cfg.CONF
 LOG = logging.getLogger(__name__)
 
 
+def validate_policy_request_headers(policy, protocol, driver, old_policy=None):
+    if 'request_header_operations' not in policy:
+        return
+    operations = policy['request_header_operations']
+    clearing = (not operations and old_policy is not None and
+                old_policy.request_header_operations is not None and
+                getattr(driver, 'supports_request_header_operations',
+                        False) is True)
+    if not clearing:
+        driver_utils.require_request_header_operations(driver)
+    if operations:
+        validate.validate_request_header_protocol(protocol)
+
+
 def validate_policy_provider(action, protocol, driver):
     if action == constants.L7POLICY_ACTION_FIXED_RESPONSE:
         validate.validate_fixed_http_protocol(protocol)
@@ -180,8 +194,10 @@ class L7PolicyController(base.BaseController):
             l7policy_dict = db_prepare.create_l7policy(
                 l7policy.to_dict(render_unsets=True),
                 load_balancer_id, listener_id)
-            validate_policy_provider(l7policy_dict['action'],
-                                     listener.protocol, driver)
+            validate_policy_provider(
+                l7policy_dict['action'], listener.protocol, driver)
+            validate_policy_request_headers(
+                l7policy_dict, listener.protocol, driver)
 
             self._test_lb_and_listener_statuses(
                 lock_session, lb_id=load_balancer_id,
@@ -275,6 +291,9 @@ class L7PolicyController(base.BaseController):
             if {'action', 'fixed_response', 'targets'}.intersection(
                     l7policy_dict):
                 validate_policy_provider(action, listener.protocol, driver)
+            validate_policy_request_headers(
+                l7policy_dict, listener.protocol, driver,
+                old_policy=db_l7policy)
 
             # Prepare the data for the driver data model
             provider_l7policy_dict = (

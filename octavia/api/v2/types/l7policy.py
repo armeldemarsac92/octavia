@@ -24,6 +24,12 @@ class BaseL7PolicyType(types.BaseType):
     _type_to_db_map = {'admin_state_up': 'enabled'}
     _child_map = {}
 
+    def to_dict(self, render_unsets=False):
+        data = super().to_dict(render_unsets=render_unsets)
+        if self.request_header_operations is wtypes.Unset:
+            data.pop('request_header_operations', None)
+        return data
+
 
 class L7PolicyResponse(BaseL7PolicyType):
     """Defines which attributes are to be shown on any response."""
@@ -40,6 +46,7 @@ class L7PolicyResponse(BaseL7PolicyType):
     redirect_url = wtypes.wsattr(wtypes.StringType())
     fixed_response = wtypes.wsattr(types.FixedHTTPResponse)
     targets = wtypes.wsattr(types.WeightedL7PolicyTargets())
+    request_header_operations = wtypes.wsattr(types.RequestHeaderOperations())
     redirect_prefix = wtypes.wsattr(wtypes.StringType())
     position = wtypes.wsattr(wtypes.IntegerType())
     rules = wtypes.wsattr([types.IdOnlyType])
@@ -56,6 +63,8 @@ class L7PolicyResponse(BaseL7PolicyType):
                 **db_obj.fixed_response)
         else:
             result.fixed_response = wtypes.Unset
+        if db_obj.request_header_operations is None:
+            result.request_header_operations = wtypes.Unset
         if not db_obj.targets:
             result.targets = wtypes.Unset
 
@@ -104,6 +113,7 @@ class L7PolicyPOST(BaseL7PolicyType):
     redirect_url = wtypes.wsattr(types.URLType())
     fixed_response = wtypes.wsattr(types.FixedHTTPResponse)
     targets = wtypes.wsattr(types.WeightedL7PolicyTargets())
+    request_header_operations = wtypes.wsattr(types.RequestHeaderOperations())
     redirect_prefix = wtypes.wsattr(types.URLType())
     position = wtypes.wsattr(wtypes.IntegerType(
         minimum=constants.MIN_POLICY_POSITION,
@@ -131,6 +141,7 @@ class L7PolicyPUT(BaseL7PolicyType):
     redirect_url = wtypes.wsattr(types.URLType())
     fixed_response = wtypes.wsattr(types.FixedHTTPResponse)
     targets = wtypes.wsattr(types.WeightedL7PolicyTargets())
+    request_header_operations = wtypes.wsattr(types.RequestHeaderOperations())
     redirect_prefix = wtypes.wsattr(types.URLType())
     position = wtypes.wsattr(wtypes.IntegerType(
         minimum=constants.MIN_POLICY_POSITION,
@@ -156,6 +167,7 @@ class L7PolicySingleCreate(BaseL7PolicyType):
     redirect_url = wtypes.wsattr(types.URLType())
     fixed_response = wtypes.wsattr(types.FixedHTTPResponse)
     targets = wtypes.wsattr(types.WeightedL7PolicyTargets())
+    request_header_operations = wtypes.wsattr(types.RequestHeaderOperations())
     redirect_prefix = wtypes.wsattr(types.URLType())
     position = wtypes.wsattr(wtypes.IntegerType(
         minimum=constants.MIN_POLICY_POSITION,
