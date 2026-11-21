@@ -189,6 +189,27 @@ class TestHaproxyAmphoraLoadBalancerDriverTest(base.TestCase):
         (self.driver.clients[API_VERSION].delete_listener.
          assert_called_once_with)(mock_amphora, self.lb.id)
 
+    def test_protected_pool_preflights_every_amphora(self):
+        capability = constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME
+        amphorae = [
+            data_models.Amphora(id='amp-one', status=constants.ACTIVE),
+            data_models.Amphora(id='amp-two', status=constants.ACTIVE)]
+        for amphora in amphorae:
+            amphora.api_version = API_VERSION
+        pool = data_models.Pool(id='pool-one', enabled=True,
+                                backend_tls_hostname='backend.example.test')
+        listener = mock.Mock(enabled=True, pools=[pool])
+        loadbalancer = mock.Mock(enabled=True, listeners=[listener],
+                                 amphorae=amphorae)
+        details = self.driver.clients[API_VERSION].get_details
+        details.side_effect = [{capability: True}, {}]
+        with mock.patch.object(self.driver, 'update_amphora_listeners') as arm:
+            self.assertRaises(driver_except.AmpVersionUnsupported,
+                              self.driver.update, loadbalancer)
+            arm.assert_not_called()
+        self.assertEqual([mock.call(amp) for amp in amphorae],
+                         details.call_args_list)
+
     @mock.patch('octavia.amphorae.drivers.haproxy.rest_api_driver.'
                 'HaproxyAmphoraLoadBalancerDriver._process_secret')
     @mock.patch('octavia.common.tls_utils.cert_parser.load_certificates_data')

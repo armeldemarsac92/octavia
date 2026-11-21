@@ -1,0 +1,40 @@
+--- a/include/haproxy/server-t.h
++++ b/include/haproxy/server-t.h
+@@ -193,0 +194 @@
++#define SRV_SSL_O_STRICT_DNS     0x800  /* Verify the static DNS ID using SAN only */
+--- a/src/cfgparse-ssl.c
++++ b/src/cfgparse-ssl.c
+@@ -2032,0 +2033,9 @@
++}
++
++/* parse the "verifyhost-strict" server keyword */
++static int srv_parse_verifyhost_strict(char **args, int *cur_arg, struct proxy *px, struct server *newsrv, char **err)
++{
++	int ret = srv_parse_verifyhost(args, cur_arg, px, newsrv, err);
++	if (!ret)
++		newsrv->ssl_ctx.options |= SRV_SSL_O_STRICT_DNS;
++	return ret;
+@@ -2312,0 +2322 @@
++	{ "verifyhost-strict",       srv_parse_verifyhost_strict,  1, 1, 1 }, /* require a matching DNS SAN */
+--- a/src/ssl_sock.c
++++ b/src/ssl_sock.c
+@@ -5161,2 +5161,17 @@
+-	SSL_CTX_set_verify(ctx, verify,
+-	                   (srv->ssl_ctx.verify_host || (verify & SSL_VERIFY_PEER)) ? ssl_sock_srv_verifycbk : NULL);
++	if (srv->ssl_ctx.options & SRV_SSL_O_STRICT_DNS) {
++		X509_VERIFY_PARAM *param = SSL_CTX_get0_param(ctx);
++
++		if (!(verify & SSL_VERIFY_PEER) || !srv->ssl_ctx.verify_host ||
++		    !X509_VERIFY_PARAM_set1_host(param, srv->ssl_ctx.verify_host, 0)) {
++			ha_alert("verifyhost-strict requires peer verification and a DNS name.\n");
++			cfgerr++;
++		}
++		X509_VERIFY_PARAM_set_hostflags(param,
++		                               X509_CHECK_FLAG_NEVER_CHECK_SUBJECT |
++		                               X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
++		SSL_CTX_set_verify(ctx, verify, NULL);
++	}
++	else {
++		SSL_CTX_set_verify(ctx, verify,
++		                   (srv->ssl_ctx.verify_host || (verify & SSL_VERIFY_PEER)) ? ssl_sock_srv_verifycbk : NULL);
++	}

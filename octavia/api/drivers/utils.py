@@ -68,6 +68,12 @@ def gateway_capabilities(driver):
     if (driver.name in api_settings.enabled_backend_h2c_providers and
             getattr(driver, 'supports_backend_h2c', False) is True):
         capabilities.append(constants.GATEWAY_CAPABILITY_BACKEND_H2C)
+    tls_hostname_providers = (
+        api_settings.enabled_backend_tls_hostname_providers)
+    if (driver.name in tls_hostname_providers and
+            getattr(driver, 'supports_backend_tls_hostname', False) is True):
+        capabilities.append(
+            constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME)
     if (driver.name in api_settings.enabled_tls_sni_providers and
             getattr(driver, 'supports_tls_sni_passthrough', False) is True):
         capabilities.append(constants.GATEWAY_CAPABILITY_TLS_SNI)
@@ -483,6 +489,8 @@ def listener_dict_to_provider_dict(listener_dict, for_delete=False):
     if ('default_pool' in new_listener_dict and
             new_listener_dict['default_pool']):
         pool = new_listener_dict.pop('default_pool')
+        if pool.get('backend_tls_hostname') is None:
+            pool.pop('backend_tls_hostname', None)
         new_listener_dict['default_pool'] = pool_dict_to_provider_dict(
             pool, for_delete=for_delete)
     provider_l7policies = []
@@ -512,7 +520,10 @@ def db_pools_to_provider_pools(db_pools, for_delete=False):
 
 
 def db_pool_to_provider_pool(db_pool, for_delete=False):
-    new_pool_dict = pool_dict_to_provider_dict(db_pool.to_dict(recurse=True),
+    pool_dict = db_pool.to_dict(recurse=True)
+    if pool_dict.get('backend_tls_hostname') is None:
+        pool_dict.pop('backend_tls_hostname', None)
+    new_pool_dict = pool_dict_to_provider_dict(pool_dict,
                                                for_delete=for_delete)
     if not new_pool_dict.get('backend_h2c'):
         new_pool_dict.pop('backend_h2c', None)
@@ -550,6 +561,9 @@ def pool_dict_to_provider_dict(pool_dict, for_delete=False):
             'crl_container_id')
 
     pool_obj = data_models.Pool(**pool_dict)
+    if pool_obj.backend_tls_hostname and pool_obj.enabled is False:
+        # A disabled protected pool can drain even if a secret was removed.
+        for_delete = True
     if (pool_obj.tls_certificate_id or pool_obj.ca_tls_certificate_id or
             pool_obj.crl_container_id):
         cert_manager = stevedore_driver.DriverManager(
