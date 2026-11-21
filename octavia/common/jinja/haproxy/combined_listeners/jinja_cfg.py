@@ -529,6 +529,8 @@ class JinjaTemplater:
         if (pool.tls_certificate_id and pool_tls_certs and
                 pool_tls_certs.get('client_cert')):
             ret_value['client_cert'] = pool_tls_certs.get('client_cert')
+        if getattr(pool, 'backend_h2c', False) is True:
+            ret_value['backend_h2c'] = True
         if pool.tls_enabled is True:
             if pool.tls_ciphers is not None:
                 if not validate.VALID_CIPHER_RE.match(pool.tls_ciphers):

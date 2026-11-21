@@ -88,6 +88,15 @@ class TestGatewayCapabilities(base.BaseAPITest):
         self.assertEqual(empty,
                          self.get(self.capabilities_path('noop_driver')).json)
 
+    def test_backend_h2c_is_independently_enrolled(self):
+        self.conf.config(group='api_settings',
+                         enabled_backend_h2c_providers=['amphora',
+                                                        'noop_driver'])
+        self.assertEqual({'gateway_capabilities': ['backend_h2c_v1']},
+                         self.get(self.capabilities_path()).json)
+        self.assertEqual({'gateway_capabilities': []},
+                         self.get(self.capabilities_path('noop_driver')).json)
+
     def test_unknown_provider(self):
         self.get(self.capabilities_path('bogus'), status=400)
 

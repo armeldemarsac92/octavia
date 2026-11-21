@@ -52,6 +52,9 @@ def gateway_capabilities(driver):
                     False) is True):
         capabilities.append(
             constants.GATEWAY_CAPABILITY_REQUEST_HEADER_OPERATIONS)
+    if (driver.name in api_settings.enabled_backend_h2c_providers and
+            getattr(driver, 'supports_backend_h2c', False) is True):
+        capabilities.append(constants.GATEWAY_CAPABILITY_BACKEND_H2C)
     return capabilities
 
 
@@ -419,6 +422,8 @@ def db_pools_to_provider_pools(db_pools, for_delete=False):
 def db_pool_to_provider_pool(db_pool, for_delete=False):
     new_pool_dict = pool_dict_to_provider_dict(db_pool.to_dict(recurse=True),
                                                for_delete=for_delete)
+    if not new_pool_dict.get('backend_h2c'):
+        new_pool_dict.pop('backend_h2c', None)
     # Replace the sub-dicts with objects
     if 'health_monitor' in new_pool_dict:
         del new_pool_dict['health_monitor']

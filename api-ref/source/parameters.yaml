@@ -226,6 +226,14 @@ alpn_protocols-pool-optional:
   min_version: 2.24
   required: false
   type: array
+backend-h2c:
+  description: |
+    Whether cleartext HTTP pool members receive HTTP/2 with prior knowledge.
+    Defaults to false. Enabling this setting requires the regional provider
+    capability ``backend_h2c_v1`` and ``tls_enabled`` set to false.
+  in: body
+  required: false
+  type: boolean
 amphora-id:
   description: |
     The associated amphora ID.
