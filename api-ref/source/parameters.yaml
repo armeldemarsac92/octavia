@@ -231,6 +231,8 @@ backend-h2c:
     Whether cleartext HTTP pool members receive HTTP/2 with prior knowledge.
     Defaults to false. Enabling this setting requires the regional provider
     capability ``backend_h2c_v1`` and ``tls_enabled`` set to false.
+    HTTP and HTTPS health monitors with an explicit HTTP/1.0 or HTTP/1.1
+    version use that protocol for their probes, including on a separate port.
   in: body
   required: false
   type: boolean
