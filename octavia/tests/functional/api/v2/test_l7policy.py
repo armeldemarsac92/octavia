@@ -14,11 +14,13 @@
 
 from unittest import mock
 
+from octavia_lib.api.drivers import exceptions as lib_exceptions
 from octavia_lib.common import constants as lib_consts
 from oslo_config import cfg
 from oslo_config import fixture as oslo_fixture
 from oslo_utils import uuidutils
 
+from octavia.api.drivers.noop_driver import driver as noop_driver
 from octavia.common import constants
 import octavia.common.context
 from octavia.common import data_models
@@ -35,6 +37,10 @@ class TestL7Policy(base.BaseAPITest):
 
     def setUp(self):
         super().setUp()
+        # A few tests use mock provider capabilities to isolate API behavior.
+        self.conf.config(group='api_settings',
+                         enabled_gateway_action_providers=[
+                             'noop_driver', 'noop_driver-alt'])
         self.lb = self.create_load_balancer(uuidutils.generate_uuid())
         self.lb_id = self.lb.get('loadbalancer').get('id')
         self.project_id = self.lb.get('loadbalancer').get('project_id')
@@ -428,6 +434,19 @@ class TestL7Policy(base.BaseAPITest):
         self.assertIn((api_l7p_c.get('id'), api_l7p_c.get('action')),
                       policy_id_actions)
 
+    @mock.patch.object(noop_driver.NoopProviderDriver,
+                       'supports_weighted_targets', True, create=True)
+    def test_weighted_targets_list_projection_and_query_fields(self):
+        targets = [{'weight': 1, 'fixed_response': {'status_code': 500}}]
+        self.create_l7policy(self.listener_id, 'WEIGHTED_TARGETS',
+                             targets=targets)
+        result = self.get(self.L7POLICIES_PATH, params={'fields': 'targets'})
+        self.assertEqual([{'targets': targets}], result.json['l7policies'])
+        for query in ({'sort': 'targets'}, {'sort_key': 'targets.weight'},
+                      {'targets': 'value'}):
+            with self.subTest(query=query):
+                self.get(self.L7POLICIES_PATH, params=query, status=400)
+
     def test_get_all_sorted(self):
         self.create_l7policy(
             self.listener_id, constants.L7POLICY_ACTION_REJECT,
@@ -728,6 +747,416 @@ class TestL7Policy(base.BaseAPITest):
 
         self.conf.config(group='api_settings', auth_strategy=auth_strategy)
         self.assertEqual(self.NOT_AUTHORIZED_BODY, api_l7policy)
+
+    @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
+    def test_amphora_gateway_actions_require_opt_in(self, get_client):
+        lb = self.create_load_balancer(
+            uuidutils.generate_uuid(), provider='amphora')['loadbalancer']
+        self.set_lb_status(lb['id'])
+        listener = self.create_listener('HTTP', 80, lb['id'])['listener']
+        self.set_lb_status(lb['id'])
+        policy = self.create_l7policy(
+            listener['id'], 'REJECT')['l7policy']
+        self.set_lb_status(lb['id'])
+        policy_path = self.L7POLICY_PATH.format(l7policy_id=policy['id'])
+        response = {'status_code': 500}
+        get_client.return_value.cast.reset_mock()
+        for action, fields in (
+                ('FIXED_RESPONSE', {'fixed_response': response}),
+                ('WEIGHTED_TARGETS', {
+                    'targets': [{'weight': 1, 'fixed_response': response}]})):
+            with self.subTest(action=action):
+                self.create_l7policy(listener['id'], action,
+                                     status=501, **fields)
+                self.put(policy_path, {'l7policy': {'action': action,
+                                                    **fields}}, status=501)
+        get_client.return_value.cast.assert_not_called()
+        self.assertEqual('REJECT',
+                         self.get(policy_path).json['l7policy']['action'])
+
+    @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
+    def test_amphora_stored_actions_can_be_removed_after_disabling(self, _rpc):
+        self.conf.config(group='api_settings',
+                         enabled_gateway_action_providers=['amphora'])
+        lb = self.create_load_balancer(
+            uuidutils.generate_uuid(), provider='amphora')['loadbalancer']
+        self.set_lb_status(lb['id'])
+        listener = self.create_listener('HTTP', 80, lb['id'])['listener']
+        self.set_lb_status(lb['id'])
+        response = {'status_code': 500}
+        targets = [{'weight': 1, 'fixed_response': response}]
+        fixed = self.create_l7policy(listener['id'], 'FIXED_RESPONSE',
+                                     fixed_response=response)['l7policy']
+        self.set_lb_status(lb['id'])
+        weighted = self.create_l7policy(listener['id'], 'WEIGHTED_TARGETS',
+                                        targets=targets)['l7policy']
+        self.set_lb_status(lb['id'])
+        self.conf.config(group='api_settings',
+                         enabled_gateway_action_providers=[])
+        fixed_path = self.L7POLICY_PATH.format(l7policy_id=fixed['id'])
+        weighted_path = self.L7POLICY_PATH.format(l7policy_id=weighted['id'])
+        self.put(fixed_path, {'l7policy': {
+            'fixed_response': {'status_code': 404}}}, status=501)
+        self.put(weighted_path, {'l7policy': {
+            'targets': [{'weight': 2, 'fixed_response': response}]}},
+            status=501)
+        retained = self.put(weighted_path, {
+            'l7policy': {'name': 'retained'}}).json['l7policy']
+        self.assertEqual(targets, retained['targets'])
+        self.set_lb_status(lb['id'])
+        cleared = self.put(fixed_path, {'l7policy': {
+            'action': 'REJECT', 'fixed_response': None}}).json['l7policy']
+        self.assertEqual('REJECT', cleared['action'])
+        self.assertIsNone(cleared.get('fixed_response'))
+        self.set_lb_status(lb['id'])
+        self.delete(weighted_path)
+
+    @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
+    @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.'
+                'AmphoraProviderDriver.create_vip_port')
+    def test_nested_gateway_actions_require_opt_in_before_vip(
+            self, create_vip, rpc):
+        fixed = {'status_code': 500}
+        for fields in (
+                {'default_http_response': fixed},
+                {'l7policies': [{'action': 'FIXED_RESPONSE',
+                                 'fixed_response': fixed}]},
+                {'l7policies': [{'action': 'WEIGHTED_TARGETS',
+                                 'targets': [{'weight': 1,
+                                              'fixed_response': fixed}]}]}):
+            with self.subTest(fields=fields):
+                self.post(self.LBS_PATH, {'loadbalancer': {
+                    'project_id': self.project_id,
+                    'provider': 'amphora',
+                    'vip_subnet_id': uuidutils.generate_uuid(),
+                    'listeners': [{'protocol': 'HTTP', 'protocol_port': 80,
+                                   **fields}],
+                }}, status=501)
+        create_vip.assert_not_called()
+        rpc.return_value.cast.assert_not_called()
+
+    @mock.patch.object(noop_driver.NoopProviderDriver,
+                       'supports_fixed_http_responses', True)
+    def test_fixed_response_policy_update_and_restore_pool(self):
+        response = {'status_code': 500}
+        policy = self.create_l7policy(
+            self.listener_id, 'REDIRECT_TO_POOL',
+            redirect_pool_id=self.pool_id)['l7policy']
+        path = self.L7POLICY_PATH.format(l7policy_id=policy['id'])
+        self.set_lb_status(self.lb_id)
+        self.put(path, {'l7policy': {
+            'action': 'FIXED_RESPONSE', 'fixed_response': response}})
+        self.set_lb_status(self.lb_id)
+        self.put(path, {'l7policy': {'name': 'renamed'}})
+        policy = self.get(path).json['l7policy']
+        self.assertEqual('FIXED_RESPONSE', policy['action'])
+        self.assertEqual(response, policy['fixed_response'])
+        self.assertIsNone(policy['redirect_pool_id'])
+        self.set_lb_status(self.lb_id)
+        self.put(path, {'l7policy': {'fixed_response': None}}, status=400)
+        self.put(path, {'l7policy': {
+            'redirect_pool_id': self.pool_id, 'fixed_response': response}},
+            status=400)
+        for extra_fields in ({}, {'fixed_response': None},
+                             {'action': 'REDIRECT_TO_POOL'}):
+            with self.subTest(extra_fields=extra_fields):
+                self.put(path, {'l7policy': {
+                    'redirect_pool_id': self.pool_id, **extra_fields}})
+                policy = self.get(path).json['l7policy']
+                self.assertEqual('REDIRECT_TO_POOL', policy['action'])
+                self.assertIsNone(policy.get('fixed_response'))
+                self.assertEqual(self.pool_id, policy['redirect_pool_id'])
+                self.set_lb_status(self.lb_id)
+                self.put(path, {'l7policy': {
+                    'action': 'FIXED_RESPONSE', 'fixed_response': response}})
+                self.set_lb_status(self.lb_id)
+
+    def test_rejects_fixed_response_policy_with_conflicting_target(self):
+        self.create_l7policy(
+            self.listener_id, 'FIXED_RESPONSE', status=400,
+            fixed_response={'status_code': 500}, redirect_pool_id=self.pool_id)
+
+    def test_fixed_response_policy_rejected_by_unsupported_provider(self):
+        lb = self.create_load_balancer(
+            uuidutils.generate_uuid(), provider='noop_driver-alt')
+        lb_id = lb['loadbalancer']['id']
+        self.set_lb_status(lb_id)
+        listener = self.create_listener('HTTP', 80, lb_id)['listener']
+        self.set_lb_status(lb_id)
+        response = {'status_code': 500}
+        self.create_l7policy(listener['id'], 'FIXED_RESPONSE', status=501,
+                             fixed_response=response)
+        policy = self.create_l7policy(listener['id'], 'REJECT')['l7policy']
+        self.set_lb_status(lb_id)
+        path = self.L7POLICY_PATH.format(l7policy_id=policy['id'])
+        self.put(path, {'l7policy': {
+            'action': 'FIXED_RESPONSE', 'fixed_response': response}},
+            status=501)
+        self.assertEqual('REJECT', self.get(path).json['l7policy']['action'])
+
+    @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
+    def test_create_amphora_with_nested_local_http_responses(self, get_client):
+        self.conf.config(group='api_settings',
+                         enabled_gateway_action_providers=['amphora'])
+        listener_request = {
+            'protocol': 'HTTP',
+            'protocol_port': 80,
+            'default_http_response': {'status_code': 404},
+            'l7policies': [{
+                'action': 'FIXED_RESPONSE',
+                'fixed_response': {'status_code': 500},
+                'rules': [{'type': 'PATH', 'compare_type': 'EQUAL_TO',
+                           'value': '/missing'}],
+            }],
+        }
+        lb = self.create_load_balancer(
+            uuidutils.generate_uuid(), provider='amphora',
+            listeners=[listener_request])['loadbalancer']
+        listener = lb['listeners'][0]
+        policy = listener['l7policies'][0]
+        self.assertEqual({'status_code': 404},
+                         listener['default_http_response'])
+        self.assertEqual({'status_code': 500}, policy['fixed_response'])
+        rpc_call = get_client.return_value.cast.call_args
+        self.assertEqual('create_load_balancer', rpc_call.args[1])
+        self.assertEqual(lb['id'],
+                         rpc_call.kwargs['loadbalancer']['loadbalancer_id'])
+        path = self.L7POLICY_PATH.format(l7policy_id=policy['id'])
+        self.assertEqual({'status_code': 500},
+                         self.get(path).json['l7policy']['fixed_response'])
+
+    def test_nested_fixed_responses_validated_before_vip_creation(self):
+        default = {'default_http_response': {'status_code': 404}}
+        policy = {'l7policies': [{'action': 'FIXED_RESPONSE',
+                                  'fixed_response': {'status_code': 500}}]}
+        invalid_policy = {'l7policies': [{
+            'action': 'REJECT', 'fixed_response': {'status_code': 500}}]}
+        cases = [(default, 'HTTP', False, 501),
+                 (policy, 'HTTP', False, 501),
+                 (default, 'TCP', True, 400),
+                 (policy, 'TCP', True, 400),
+                 (invalid_policy, 'HTTP', True, 400)]
+        for fields, protocol, supported, status in cases:
+            with (
+                self.subTest(fields=fields, protocol=protocol),
+                mock.patch.object(noop_driver.NoopProviderDriver,
+                                  'supports_fixed_http_responses', supported),
+                mock.patch.object(noop_driver.NoopProviderDriver,
+                                  'create_vip_port') as create_vip,
+            ):
+                result = self.post(self.LBS_PATH, {'loadbalancer': {
+                    'project_id': self.project_id,
+                    'provider': 'noop_driver-alt',
+                    'vip_subnet_id': uuidutils.generate_uuid(),
+                    'listeners': [{'protocol': protocol, 'protocol_port': 80,
+                                   **fields}],
+                }}, status=status)
+                create_vip.assert_not_called()
+                if status == 501:
+                    self.assertIn('noop_driver-alt',
+                                  result.json['faultstring'])
+
+    @mock.patch.object(noop_driver.NoopProviderDriver,
+                       'supports_weighted_targets', True, create=True)
+    @mock.patch.object(noop_driver.NoopProviderDriver,
+                       'supports_fixed_http_responses', True)
+    def test_weighted_targets_create_replace_and_restore(self):
+        targets = [{'weight': 3, 'pool_id': self.pool_id},
+                   {'weight': 1, 'fixed_response': {'status_code': 500}}]
+        policy = self.create_l7policy(
+            self.listener_id, 'WEIGHTED_TARGETS', targets=targets)['l7policy']
+        policy_id = policy['id']
+        path = self.L7POLICY_PATH.format(l7policy_id=policy_id)
+        self.assertEqual(targets, policy['targets'])
+        self.assertEqual(targets, self.get(path).json['l7policy']['targets'])
+        listed = self.get(self.L7POLICIES_PATH).json['l7policies']
+        self.assertEqual(targets, next(
+            policy['targets'] for policy in listed
+            if policy['id'] == policy_id))
+
+        self.set_lb_status(self.lb_id)
+        policy = self.put(path, {'l7policy': {'name': 'edited'}}).json
+        self.assertEqual(targets, policy['l7policy']['targets'])
+        self.set_lb_status(self.lb_id)
+        replacement = [{'weight': 5, 'fixed_response': {'status_code': 404}},
+                       {'weight': 0, 'pool_id': self.pool_id}]
+        self.put(path, {'l7policy': {'targets': replacement}})
+        self.assertEqual(replacement,
+                         self.get(path).json['l7policy']['targets'])
+
+        self.set_lb_status(self.lb_id)
+        self.put(path, {'l7policy': {'redirect_pool_id': self.pool_id}})
+        policy = self.get(path).json['l7policy']
+        self.assertEqual('REDIRECT_TO_POOL', policy['action'])
+        self.assertNotIn('targets', policy)
+        self.assertEqual(self.pool_id, policy['redirect_pool_id'])
+
+        self.set_lb_status(self.lb_id)
+        self.put(path, {'l7policy': {
+            'action': 'WEIGHTED_TARGETS', 'targets': targets}})
+        self.set_lb_status(self.lb_id)
+        self.put(path, {'l7policy': {
+            'action': 'FIXED_RESPONSE',
+            'fixed_response': {'status_code': 500}}})
+        policy = self.get(path).json['l7policy']
+        self.assertEqual('FIXED_RESPONSE', policy['action'])
+        self.assertNotIn('targets', policy)
+        self.assertEqual({'status_code': 500}, policy['fixed_response'])
+
+    @mock.patch.object(noop_driver.NoopProviderDriver,
+                       'supports_weighted_targets', True, create=True)
+    def test_rejects_malformed_weighted_targets(self):
+        error = {'fixed_response': {'status_code': 500}}
+        for targets in (
+            None, [], {}, [None], [{'weight': 0, **error}],
+            [{'weight': True, **error}], [{'weight': 1.0, **error}],
+            [{'weight': '1', **error}], [{'weight': 1000001, **error}],
+            [{'weight': 1, **error}] * 17,
+            [{'weight': 1, 'pool_id': self.pool_id, **error}],
+            [{'weight': 1, 'pool_id': 'invalid'}],
+            [{'weight': 1, 'fixed_response': {'status_code': '500'}}],
+            [{'weight': 1, 'fixed_response': {'status_code': 418}}],
+        ):
+            with self.subTest(targets=targets):
+                self.create_l7policy(self.listener_id, 'WEIGHTED_TARGETS',
+                                     targets=targets, status=400)
+
+        targets = [{'weight': 1, **error}]
+        self.create_l7policy(self.listener_id, 'WEIGHTED_TARGETS',
+                             targets=targets, redirect_pool_id=self.pool_id,
+                             status=400)
+        self.create_l7policy(self.listener_id, 'WEIGHTED_TARGETS',
+                             targets=targets, **error, status=400)
+        self.create_l7policy(self.listener_id, 'REJECT', targets=targets,
+                             status=400)
+
+    @mock.patch.object(noop_driver.NoopProviderDriver,
+                       'supports_weighted_targets', True, create=True)
+    def test_weighted_targets_reject_incompatible_pool_on_create_and_update(
+            self):
+        tcp_pool = self.create_pool(
+            self.lb_id, 'TCP', constants.LB_ALGORITHM_ROUND_ROBIN)['pool']
+        self.set_lb_status(self.lb_id)
+        invalid_targets = [{'weight': 1, 'pool_id': tcp_pool['id']}]
+        self.create_l7policy(self.listener_id, 'WEIGHTED_TARGETS',
+                             targets=invalid_targets, status=400)
+        targets = [{'weight': 1, 'pool_id': self.pool_id}]
+        policy = self.create_l7policy(
+            self.listener_id, 'WEIGHTED_TARGETS', targets=targets)['l7policy']
+        self.set_lb_status(self.lb_id)
+        path = self.L7POLICY_PATH.format(l7policy_id=policy['id'])
+        with mock.patch.object(noop_driver.NoopProviderDriver,
+                               'l7policy_update') as update:
+            self.put(path, {'l7policy': {'targets': invalid_targets}},
+                     status=400)
+            update.assert_not_called()
+        self.put(path, {'l7policy': {'targets': None}}, status=400)
+        self.assertEqual(targets, self.get(path).json['l7policy']['targets'])
+
+    @mock.patch.object(noop_driver.NoopProviderDriver,
+                       'supports_weighted_targets', True, create=True)
+    def test_weighted_target_replacement_rolls_back_if_provider_rejects(self):
+        targets = [{'weight': 1, 'pool_id': self.pool_id}]
+        policy = self.create_l7policy(
+            self.listener_id, 'WEIGHTED_TARGETS', targets=targets)['l7policy']
+        self.set_lb_status(self.lb_id)
+        path = self.L7POLICY_PATH.format(l7policy_id=policy['id'])
+        replacement = [{'weight': 1, 'fixed_response': {'status_code': 500}}]
+        with mock.patch.object(noop_driver.NoopProviderDriver,
+                               'l7policy_update',
+                               side_effect=lib_exceptions.DriverError):
+            self.put(path, {'l7policy': {'targets': replacement}}, status=500)
+        self.assertEqual(targets, self.get(path).json['l7policy']['targets'])
+        self.put(path, {'l7policy': {'targets': replacement}})
+        self.assertEqual(replacement,
+                         self.get(path).json['l7policy']['targets'])
+
+    def test_weighted_targets_require_provider_support(self):
+        targets = [{'weight': 1, 'fixed_response': {'status_code': 500}}]
+        self.create_l7policy(self.listener_id, 'WEIGHTED_TARGETS',
+                             targets=targets, status=501)
+        policy = self.create_l7policy(self.listener_id, 'REJECT')['l7policy']
+        self.set_lb_status(self.lb_id)
+        path = self.L7POLICY_PATH.format(l7policy_id=policy['id'])
+        self.put(path, {'l7policy': {
+            'action': 'WEIGHTED_TARGETS', 'targets': targets}}, status=501)
+        self.assertEqual('REJECT', self.get(path).json['l7policy']['action'])
+
+    @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
+    def test_create_amphora_with_nested_fixed_weighted_targets(self, _client):
+        self.conf.config(group='api_settings',
+                         enabled_gateway_action_providers=['amphora'])
+        targets = [{'weight': 1, 'fixed_response': {'status_code': 500}}]
+        lb = self.create_load_balancer(
+            uuidutils.generate_uuid(), provider='amphora', listeners=[{
+                'protocol': 'HTTP', 'protocol_port': 80,
+                'l7policies': [{'action': 'WEIGHTED_TARGETS',
+                                'targets': targets}],
+            }])['loadbalancer']
+        policy = lb['listeners'][0]['l7policies'][0]
+        self.assertEqual(targets, policy['targets'])
+        path = self.L7POLICY_PATH.format(l7policy_id=policy['id'])
+        self.assertEqual(targets, self.get(path).json['l7policy']['targets'])
+
+    @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
+    def test_amphora_rpc_carries_current_and_replacement_weighted_targets(
+            self, get_client):
+        self.conf.config(group='api_settings',
+                         enabled_gateway_action_providers=['amphora'])
+        lb = self.create_load_balancer(
+            uuidutils.generate_uuid(), provider='amphora')['loadbalancer']
+        lb_id = lb['id']
+        self.set_lb_status(lb_id)
+        listener = self.create_listener('HTTP', 80, lb_id)['listener']
+        self.set_lb_status(lb_id)
+        pool = self.create_pool(lb_id, 'HTTP',
+                                constants.LB_ALGORITHM_ROUND_ROBIN)['pool']
+        self.set_lb_status(lb_id)
+        targets = [{'weight': 3, 'pool_id': pool['id']},
+                   {'weight': 1, 'fixed_response': {'status_code': 500}}]
+        policy = self.create_l7policy(
+            listener['id'], 'WEIGHTED_TARGETS', targets=targets)['l7policy']
+        created = get_client.return_value.cast.call_args
+        self.assertEqual('create_l7policy', created.args[1])
+        self.assertEqual(targets, created.kwargs['l7policy'].get('targets'))
+
+        self.set_lb_status(lb_id)
+        path = self.L7POLICY_PATH.format(l7policy_id=policy['id'])
+        replacement = [{'weight': 1, 'pool_id': pool['id']}]
+        self.put(path, {'l7policy': {'targets': replacement}})
+        updated = get_client.return_value.cast.call_args
+        self.assertEqual('update_l7policy', updated.args[1])
+        self.assertEqual(targets,
+                         updated.kwargs['original_l7policy']['targets'])
+        self.assertEqual(replacement,
+                         updated.kwargs['l7policy_updates']['targets'])
+
+    def test_nested_weighted_targets_checked_before_vip_allocation(self):
+        fixed = [{'weight': 1, 'fixed_response': {'status_code': 500}}]
+        pool = [{'weight': 1, 'pool_id': self.pool_id}]
+        for protocol, supported, targets, status in (
+                ('HTTP', False, fixed, 501),
+                ('TCP', True, fixed, 400),
+                ('HTTP', True, pool, 400)):
+            with (
+                self.subTest(protocol=protocol, targets=targets),
+                mock.patch.object(noop_driver.NoopProviderDriver,
+                                  'supports_weighted_targets', supported,
+                                  create=True),
+                mock.patch.object(noop_driver.NoopProviderDriver,
+                                  'create_vip_port') as create_vip,
+            ):
+                self.post(self.LBS_PATH, {'loadbalancer': {
+                    'project_id': self.project_id,
+                    'provider': 'noop_driver-alt',
+                    'vip_subnet_id': uuidutils.generate_uuid(),
+                    'listeners': [{
+                        'protocol': protocol, 'protocol_port': 80,
+                        'l7policies': [{'action': 'WEIGHTED_TARGETS',
+                                        'targets': targets}],
+                    }],
+                }}, status=status)
+                create_vip.assert_not_called()
 
     def test_create_redirect_to_pool(self):
         api_l7policy = self.create_l7policy(

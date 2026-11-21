@@ -54,6 +54,37 @@ class TestProvider(base.BaseAPITest):
         self.assertIn(noop_dict, providers_list)
 
 
+class TestGatewayCapabilities(base.BaseAPITest):
+
+    def capabilities_path(self, provider='amphora'):
+        return f'{self.PROVIDERS_PATH}/{provider}/gateway_capabilities'
+
+    def test_requires_opt_in_for_the_requested_compatible_provider(self):
+        empty = {'gateway_capabilities': []}
+        self.assertEqual(empty, self.get(self.capabilities_path()).json)
+        self.conf.config(group='api_settings',
+                         enabled_gateway_action_providers=[
+                             'amphora', 'noop_driver'])
+        self.assertEqual(
+            {'gateway_capabilities': ['fixed_http_responses_v1',
+                                      'weighted_http_targets_v1']},
+            self.get(self.capabilities_path()).json)
+        self.assertEqual(empty,
+                         self.get(self.capabilities_path('octavia')).json)
+        self.assertEqual(empty,
+                         self.get(self.capabilities_path('noop_driver')).json)
+
+    def test_unknown_provider(self):
+        self.get(self.capabilities_path('bogus'), status=400)
+
+    def test_requires_provider_read_role(self):
+        self.conf.config(group='api_settings', auth_strategy=constants.TESTING)
+        headers = {'X-Project-Id': self.project_id}
+        self.get(self.capabilities_path(), headers=headers, status=403)
+        headers['X-Roles'] = 'load-balancer_member,member'
+        self.get(self.capabilities_path(), headers=headers)
+
+
 class TestFlavorCapabilities(base.BaseAPITest):
 
     root_tag = 'flavor_capabilities'

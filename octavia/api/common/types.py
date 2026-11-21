@@ -14,12 +14,14 @@
 
 import ipaddress
 
+from octavia_lib.common import constants as lib_constants
 from wsme import exc as wsme_exc
 from wsme import types as wtypes
 
 from octavia.common import constants
 from octavia.common import exceptions
 from octavia.common import validate
+from octavia.i18n import _
 
 
 class IPAddressType(wtypes.UserType):
@@ -249,6 +251,37 @@ class BaseType(wtypes.Base, metaclass=BaseMeta):
                     continue
             wsme_dict[attr] = value
         return self.translate_dict_keys_to_db_obj(wsme_dict)
+
+
+class FixedHTTPStatusCode(wtypes.UserType):
+    # Preserve the JSON value's type so strings and floats cannot be coerced.
+    basetype = object
+    name = 'fixed_http_status_code'
+
+    @staticmethod
+    def validate(value):
+        if (type(value) is not int or
+                value not in lib_constants.SUPPORTED_FIXED_HTTP_STATUS_CODES):
+            raise ValueError(_('Status code must be 404 or 500.'))
+        return value
+
+
+class FixedHTTPResponse(BaseType):
+    status_code = wtypes.wsattr(FixedHTTPStatusCode(), mandatory=True)
+
+
+class WeightedL7PolicyTargets(wtypes.UserType):
+    # Preserve the original JSON types for strict validation.
+    basetype = object
+    name = 'weighted_l7policy_targets'
+
+    @staticmethod
+    def validate(value):
+        try:
+            return validate.weighted_l7policy_targets(value)
+        except (exceptions.InvalidL7PolicyArgs,
+                exceptions.ValidationException) as e:
+            raise ValueError(str(e)) from e
 
 
 class IdOnlyType(BaseType):

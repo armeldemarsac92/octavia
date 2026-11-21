@@ -736,7 +736,8 @@ def sample_listener_tuple(proto=None, monitor=True, alloc_default_pool=True,
                     'client_ca_tls_certificate, client_authentication, '
                     'client_crl_container_id, provisioning_status, '
                     'tls_ciphers, tls_versions, alpn_protocols, '
-                    'hsts_max_age, hsts_include_subdomains, hsts_preload'
+                    'hsts_max_age, hsts_include_subdomains, hsts_preload, '
+                    'default_http_response'
     )
     if l7:
         pools = [
@@ -869,6 +870,7 @@ def sample_listener_tuple(proto=None, monitor=True, alloc_default_pool=True,
         hsts_max_age=hsts_max_age,
         hsts_include_subdomains=hsts_include_subdomains,
         hsts_preload=hsts_preload,
+        default_http_response=None,
     )
     if recursive_nest:
         listener.load_balancer.listeners.append(listener)
@@ -1086,7 +1088,8 @@ def sample_l7policy_tuple(id,
                                          'redirect_url, redirect_prefix, '
                                          'l7rules, enabled,'
                                          'redirect_http_code,'
-                                         'provisioning_status')
+                                         'provisioning_status, '
+                                         'fixed_response, targets')
     l7rules = []
     if sample_policy == 1:
         action = constants.L7POLICY_ACTION_REDIRECT_TO_POOL
@@ -1135,7 +1138,8 @@ def sample_l7policy_tuple(id,
         if (action in [constants.L7POLICY_ACTION_REDIRECT_TO_URL,
                        constants.L7POLICY_ACTION_REDIRECT_PREFIX] and
             redirect_http_code) else None,
-        provisioning_status=provisioning_status)
+        provisioning_status=provisioning_status, fixed_response=None,
+        targets=None)
 
 
 def sample_l7rule_tuple(id,

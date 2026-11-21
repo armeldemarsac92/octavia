@@ -43,6 +43,39 @@ CONF = cfg.CONF
 LOG = logging.getLogger(__name__)
 
 
+def validate_http_policy_options_on_create(
+        driver, listener, *, creating_load_balancer=False):
+    protocol = listener['protocol']
+    default_response = listener.get('default_http_response')
+    validate.validate_default_http_response(
+        protocol, default_response,
+        listener.get('default_pool_id') or listener.get('default_pool'))
+    if default_response is not None:
+        driver_utils.require_fixed_http_responses(driver)
+
+    for policy in listener.get('l7policies') or []:
+        action = policy.get('action')
+        if (action not in (constants.L7POLICY_ACTION_FIXED_RESPONSE,
+                           constants.L7POLICY_ACTION_WEIGHTED_TARGETS) and
+                policy.get('fixed_response') is None and
+                policy.get('targets') is None):
+            continue
+        checked = validate.sanitize_l7policy_api_args(
+            policy.copy(), create=True)
+        l7policy.validate_policy_provider(checked['action'], protocol, driver)
+        if action != constants.L7POLICY_ACTION_WEIGHTED_TARGETS:
+            continue
+        if not creating_load_balancer:
+            raise exceptions.ValidationException(
+                detail=_('Create weighted targets from the L7 policy '
+                         'endpoint after creating the listener.'))
+        if any('pool_id' in target for target in checked['targets']):
+            raise exceptions.ValidationException(
+                detail=_('Create weighted pool targets from the L7 policy '
+                         'endpoint after creating the load balancer and '
+                         'pools.'))
+
+
 class ListenersController(base.BaseController):
     RBAC_TYPE = constants.RBAC_LISTENER
 
@@ -401,6 +434,7 @@ class ListenersController(base.BaseController):
 
             listener_dict = db_prepare.create_listener(
                 listener.to_dict(render_unsets=True), None)
+            validate_http_policy_options_on_create(driver, listener_dict)
 
             if listener_dict['default_pool_id']:
                 if (listener_dict.get('protocol') ==
@@ -653,11 +687,20 @@ class ListenersController(base.BaseController):
             # Load the driver early as it also provides validation
             driver = driver_factory.get_driver(provider)
 
+            listener_dict = listener.to_dict(render_unsets=False)
+            default_http_response = listener_dict.get(
+                'default_http_response', db_listener.default_http_response)
+            validate.validate_default_http_response(
+                db_listener.protocol, default_http_response,
+                listener_dict.get('default_pool_id',
+                                  db_listener.default_pool_id))
+            if listener_dict.get('default_http_response') is not None:
+                driver_utils.require_fixed_http_responses(driver)
+
             self._test_lb_and_listener_statuses(context.session,
                                                 load_balancer_id, id=id)
 
             # Prepare the data for the driver data model
-            listener_dict = listener.to_dict(render_unsets=False)
             listener_dict['id'] = id
 
             provider_listener_dict = (

@@ -99,10 +99,12 @@ class HAProxyQuery:
         list_results = results[2:].split('\n')
         csv_reader = csv.DictReader(list_results)
         stats_list = list(csv_reader)
-        # We don't want to report the internal prometheus proxy stats
-        # up to the control plane as it shouldn't be billed traffic
+        # Internal Prometheus proxies and local-response backends are not
+        # Octavia pools. Listener traffic is already counted by its frontend.
         return [stat for stat in stats_list
-                if "prometheus" not in stat['pxname']]
+                if "prometheus" not in stat['pxname'] and
+                not stat['pxname'].startswith(
+                    consts.HAPROXY_FIXED_RESPONSE_BACKEND_PREFIX)]
 
     def get_pool_status(self):
         """Get status for each server and the pool as a whole.

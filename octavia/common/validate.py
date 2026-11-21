@@ -22,7 +22,9 @@ Defined here so these can also be used at deeper levels than the API.
 import ipaddress
 import re
 import typing
+import uuid
 
+from octavia_lib.common import constants as lib_consts
 from oslo_config import cfg
 from rfc3986 import uri_reference
 from rfc3986 import validators
@@ -247,7 +249,83 @@ def validate_l7rule_ssl_types(l7rule):
         raise exceptions.InvalidL7Rule(msg=msg)
 
 
-def sanitize_l7policy_api_args(l7policy, create=False):
+def fixed_http_status_code(response):
+    if (not isinstance(response, dict) or
+            response.keys() != {'status_code'} or
+            type(response['status_code']) is not int or
+            response['status_code'] not in
+            lib_consts.SUPPORTED_FIXED_HTTP_STATUS_CODES):
+        raise exceptions.ValidationException(
+            detail='The HTTP response must specify status_code 404 or 500.')
+    return response['status_code']
+
+
+def validate_fixed_http_protocol(protocol):
+    if protocol not in (constants.PROTOCOL_HTTP,
+                        constants.PROTOCOL_TERMINATED_HTTPS):
+        raise exceptions.ValidationException(
+            detail='Local HTTP responses require an HTTP or '
+                   'TERMINATED_HTTPS listener.')
+
+
+def validate_default_http_response(protocol, response, default_pool):
+    if response is not None:
+        validate_fixed_http_protocol(protocol)
+        fixed_http_status_code(response)
+        if default_pool:
+            raise exceptions.ValidationException(
+                detail='default_http_response and a default pool are '
+                       'mutually exclusive.')
+
+
+def validate_weighted_l7policy_protocol(protocol):
+    if protocol not in (constants.PROTOCOL_HTTP,
+                        constants.PROTOCOL_TERMINATED_HTTPS):
+        raise exceptions.ValidationException(
+            detail=_('Weighted targets require an HTTP or '
+                     'TERMINATED_HTTPS listener.'))
+
+
+def weighted_l7policy_targets(targets):
+    if (not isinstance(targets, list) or
+            not 1 <= len(targets) <= constants.MAX_L7POLICY_TARGETS):
+        raise exceptions.InvalidL7PolicyArgs(
+            msg=_('targets must contain between 1 and 16 entries.'))
+
+    normalized = []
+    for target in targets:
+        if (not isinstance(target, dict) or
+                target.keys() not in ({'weight', 'pool_id'},
+                                      {'weight', 'fixed_response'})):
+            raise exceptions.InvalidL7PolicyArgs(
+                msg=_('Each target requires weight and exactly one of '
+                      'pool_id or fixed_response.'))
+
+        weight = target['weight']
+        if (type(weight) is not int or
+                not 0 <= weight <= constants.MAX_L7POLICY_TARGET_WEIGHT):
+            raise exceptions.InvalidL7PolicyArgs(
+                msg=_('Target weight must be an integer from 0 to 1000000.'))
+
+        if 'pool_id' in target:
+            try:
+                pool_id = str(uuid.UUID(target['pool_id']))
+            except (AttributeError, TypeError, ValueError) as e:
+                raise exceptions.InvalidL7PolicyArgs(
+                    msg=_('Target pool_id must be a UUID.')) from e
+            normalized.append({'weight': weight, 'pool_id': pool_id})
+        else:
+            status = fixed_http_status_code(target['fixed_response'])
+            normalized.append({'weight': weight,
+                               'fixed_response': {'status_code': status}})
+
+    if not any(target['weight'] for target in normalized):
+        raise exceptions.InvalidL7PolicyArgs(
+            msg=_('Total target weight must be positive.'))
+    return normalized
+
+
+def sanitize_l7policy_api_args(l7policy, create=False, old_policy=None):
     """Validate and make consistent L7Policy API arguments.
 
     This method is mainly meant to sanitize L7 Policy create and update
@@ -258,8 +336,58 @@ def sanitize_l7policy_api_args(l7policy, create=False):
 
     :param l7policy: The L7 Policy dictionary we are sanitizing / validating
     """
-    if 'action' in l7policy.keys():
-        if l7policy['action'] == constants.L7POLICY_ACTION_REJECT:
+    fixed_action = constants.L7POLICY_ACTION_FIXED_RESPONSE
+    weighted_action = constants.L7POLICY_ACTION_WEIGHTED_TARGETS
+    old_action = old_policy.action if old_policy is not None else None
+    action = l7policy.get('action')
+    redirect_targets = (
+        'redirect_pool_id', 'redirect_pool', 'redirect_url', 'redirect_prefix')
+    has_redirect_target = any(l7policy.get(target)
+                              for target in redirect_targets)
+    # Legacy partial updates can select a redirect action by target alone.
+    if ('action' not in l7policy and not has_redirect_target and
+            old_action in (fixed_action, weighted_action)):
+        action = old_action
+
+    if action == weighted_action:
+        if any(l7policy.get(field) is not None for field in (
+                *redirect_targets, 'redirect_http_code', 'fixed_response')):
+            raise exceptions.InvalidL7PolicyArgs(
+                msg=_('WEIGHTED_TARGETS is incompatible with redirect '
+                      'fields and fixed_response.'))
+        if 'targets' in l7policy or old_action != weighted_action:
+            l7policy['targets'] = weighted_l7policy_targets(
+                l7policy.get('targets'))
+    elif l7policy.get('targets') is not None:
+        raise exceptions.InvalidL7PolicyArgs(
+            msg=_('targets requires the WEIGHTED_TARGETS action.'))
+    elif old_action == weighted_action:
+        l7policy['targets'] = None
+    else:
+        l7policy.pop('targets', None)
+
+    if action == fixed_action:
+        response = l7policy.get(
+            'fixed_response',
+            old_policy.fixed_response if old_policy is not None else None)
+        fixed_http_status_code(response)
+        if any(l7policy.get(target) is not None
+               for target in (*redirect_targets, 'redirect_http_code')):
+            raise exceptions.InvalidL7PolicyArgs(
+                msg='FIXED_RESPONSE is incompatible with redirect targets '
+                    'and redirect_http_code.')
+    elif l7policy.get('fixed_response') is not None:
+        raise exceptions.InvalidL7PolicyArgs(
+            msg='fixed_response requires the FIXED_RESPONSE action.')
+    elif old_action == fixed_action:
+        l7policy['fixed_response'] = None
+
+    if 'action' in l7policy:
+        if action in (fixed_action, weighted_action):
+            l7policy.update(redirect_pool_id=None, redirect_url=None,
+                            redirect_prefix=None, redirect_http_code=None)
+            l7policy.pop('redirect_pool', None)
+        elif action == constants.L7POLICY_ACTION_REJECT:
             l7policy.update({'redirect_url': None})
             l7policy.update({'redirect_pool_id': None})
             l7policy.pop('redirect_pool', None)

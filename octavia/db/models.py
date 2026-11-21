@@ -359,6 +359,8 @@ class Pool(base_models.BASE, base_models.IdMixin, base_models.ProjectMixin,
                                           cascade_backrefs=False)
     l7policies = orm.relationship("L7Policy", uselist=True,
                                   back_populates="redirect_pool")
+    _l7policy_targets = orm.relationship(
+        "L7PolicyTarget", back_populates="pool", passive_deletes="all")
     _tags = orm.relationship(
         'Tags',
         single_parent=True,
@@ -384,7 +386,10 @@ class Pool(base_models.BASE, base_models.IdMixin, base_models.ProjectMixin,
     def listeners(self):
         _listeners = self._default_listeners[:]
         _l_ids = [li.id for li in _listeners]
-        l7_listeners = [p.listener for p in self.l7policies
+        l7policies = self.l7policies + [
+            target.l7policy for target in self._l7policy_targets
+            if target.l7policy is not None]
+        l7_listeners = [p.listener for p in l7policies
                         if len(p.l7rules) > 0 and p.enabled is True]
         for li in l7_listeners:
             if li.id not in _l_ids:
@@ -568,6 +573,7 @@ class Listener(base_models.BASE, base_models.IdMixin,
         sa.ForeignKey("load_balancer.id", name="fk_listener_load_balancer_id"),
         nullable=True)
     tls_certificate_id = sa.Column(sa.String(255), nullable=True)
+    default_http_response = sa.Column(sa.JSON(none_as_null=True))
     default_pool_id = sa.Column(
         sa.String(36),
         sa.ForeignKey("pool.id", name="fk_listener_pool_id"),
@@ -637,9 +643,9 @@ class Listener(base_models.BASE, base_models.IdMixin,
         if self.default_pool:
             _pools.append(self.default_pool)
             _p_ids.append(self.default_pool.id)
-        l7_pools = [p.redirect_pool for p in self.l7policies
-                    if p.redirect_pool is not None and len(p.l7rules) > 0 and
-                    p.enabled is True]
+        l7_pools = [pool for policy in self.l7policies
+                    if policy.l7rules and policy.enabled is True
+                    for pool in policy._pools]
         for p in l7_pools:
             if p.id not in _p_ids:
                 _pools.append(p)
@@ -821,12 +827,16 @@ class L7Policy(base_models.BASE, base_models.IdMixin, base_models.ProjectMixin,
         sa.String(255),
         nullable=True)
     redirect_http_code = sa.Column(sa.Integer, nullable=True)
+    fixed_response = sa.Column(sa.JSON(none_as_null=True))
     position = sa.Column(sa.Integer, nullable=False)
     enabled = sa.Column(sa.Boolean(), nullable=False)
     listener = orm.relationship("Listener", uselist=False,
                                 back_populates="l7policies")
     redirect_pool = orm.relationship("Pool", uselist=False,
                                      back_populates="l7policies")
+    _targets = orm.relationship(
+        "L7PolicyTarget", back_populates="l7policy",
+        order_by="L7PolicyTarget.position", cascade="all, delete-orphan")
     l7rules = orm.relationship("L7Rule", uselist=True, cascade="delete",
                                back_populates="l7policy")
     provisioning_status = sa.Column(
@@ -848,12 +858,71 @@ class L7Policy(base_models.BASE, base_models.IdMixin, base_models.ProjectMixin,
         overlaps='_tags'
     )
 
+    @property
+    def targets(self):
+        if self.action == constants.L7POLICY_ACTION_WEIGHTED_TARGETS:
+            return [target.as_target() for target in self._targets]
+        return []
+
+    @property
+    def _pools(self):
+        if self.redirect_pool is not None:
+            return [self.redirect_pool]
+        if self.action == constants.L7POLICY_ACTION_WEIGHTED_TARGETS:
+            return [target.pool for target in self._targets
+                    if target.pool is not None]
+        return []
+
+    def _replace_targets(self, targets, pools):
+        for position, target in enumerate(targets):
+            if position == len(self._targets):
+                self._targets.append(L7PolicyTarget(position=position))
+            row = self._targets[position]
+            row.weight = target['weight']
+            row.pool_id = target.get('pool_id')
+            row.pool = pools.get(row.pool_id)
+            response = target.get('fixed_response')
+            row.status_code = response['status_code'] if response else None
+        del self._targets[len(targets):]
+
     def __str__(self):
         return (f"L7Policy(id={self.id!r}, name={self.name!r}, "
                 f"project_id={self.project_id!r}, "
                 f"provisioning_status={self.provisioning_status!r}, "
                 f"action={self.action!r}, position={self.position!r}, "
                 f"enabled={self.enabled!r})")
+
+
+class L7PolicyTarget(base_models.BASE):
+
+    __tablename__ = "l7policy_target"
+    __table_args__ = (
+        sa.CheckConstraint(
+            "(pool_id IS NULL AND status_code IS NOT NULL) OR "
+            "(pool_id IS NOT NULL AND status_code IS NULL)",
+            name="ck_l7policy_target_destination"),
+    )
+
+    l7policy_id = sa.Column(
+        sa.String(36),
+        sa.ForeignKey("l7policy.id", name="fk_l7policy_target_l7policy_id",
+                      ondelete="CASCADE"),
+        primary_key=True)
+    position = sa.Column(sa.Integer, primary_key=True)
+    weight = sa.Column(sa.Integer, nullable=False)
+    pool_id = sa.Column(
+        sa.String(36),
+        sa.ForeignKey("pool.id", name="fk_l7policy_target_pool_id"),
+        index=True)
+    status_code = sa.Column(sa.Integer)
+    l7policy = orm.relationship("L7Policy", back_populates="_targets")
+    pool = orm.relationship("Pool", back_populates="_l7policy_targets")
+
+    def as_target(self):
+        if self.pool_id is not None:
+            return {'weight': self.weight, 'pool_id': self.pool_id}
+        return {'weight': self.weight,
+                'fixed_response': {'status_code': self.status_code}}
 
 
 class Quotas(base_models.BASE):

@@ -39,6 +39,15 @@ CONF = cfg.CONF
 LOG = logging.getLogger(__name__)
 
 
+def validate_policy_provider(action, protocol, driver):
+    if action == constants.L7POLICY_ACTION_FIXED_RESPONSE:
+        validate.validate_fixed_http_protocol(protocol)
+        driver_utils.require_fixed_http_responses(driver)
+    elif action == constants.L7POLICY_ACTION_WEIGHTED_TARGETS:
+        validate.validate_weighted_l7policy_protocol(protocol)
+        driver_utils.require_weighted_targets(driver)
+
+
 class L7PolicyController(base.BaseController):
     RBAC_TYPE = constants.RBAC_L7POLICY
 
@@ -171,6 +180,8 @@ class L7PolicyController(base.BaseController):
             l7policy_dict = db_prepare.create_l7policy(
                 l7policy.to_dict(render_unsets=True),
                 load_balancer_id, listener_id)
+            validate_policy_provider(l7policy_dict['action'],
+                                     listener.protocol, driver)
 
             self._test_lb_and_listener_statuses(
                 lock_session, lb_id=load_balancer_id,
@@ -234,14 +245,17 @@ class L7PolicyController(base.BaseController):
 
             self._auth_validate_action(context, project_id, constants.RBAC_PUT)
 
+            lock_session = context.session
+
+            self._test_lb_and_listener_statuses(lock_session,
+                                                lb_id=load_balancer_id,
+                                                listener_ids=[listener_id])
+
+            db_l7policy = self.repositories.l7policy.get_for_update(
+                lock_session, id, show_deleted=False)
+
             l7policy_dict = validate.sanitize_l7policy_api_args(
-                l7policy.to_dict(render_unsets=False))
-            # Reset renamed attributes
-            attr_val = l7policy_types.L7PolicyPUT._type_to_db_map.items()
-            for attr, val in attr_val:
-                if val in l7policy_dict:
-                    l7policy_dict[attr] = l7policy_dict.pop(val)
-            sanitized_l7policy = l7policy_types.L7PolicyPUT(**l7policy_dict)
+                l7policy.to_dict(render_unsets=False), old_policy=db_l7policy)
 
             listener = self._get_db_listener(
                 context.session,
@@ -257,22 +271,29 @@ class L7PolicyController(base.BaseController):
 
             # Load the driver early as it also provides validation
             driver = driver_factory.get_driver(provider)
-
-            lock_session = context.session
-
-            self._test_lb_and_listener_statuses(lock_session,
-                                                lb_id=load_balancer_id,
-                                                listener_ids=[listener_id])
+            action = l7policy_dict.get('action', db_l7policy.action)
+            if {'action', 'fixed_response', 'targets'}.intersection(
+                    l7policy_dict):
+                validate_policy_provider(action, listener.protocol, driver)
 
             # Prepare the data for the driver data model
-            l7policy_dict = sanitized_l7policy.to_dict(render_unsets=False)
-            l7policy_dict['id'] = id
             provider_l7policy_dict = (
-                driver_utils.l7policy_dict_to_provider_dict(l7policy_dict))
+                driver_utils.l7policy_dict_to_provider_dict(
+                    dict(l7policy_dict, id=id)))
 
             # Also prepare the baseline object data
             old_provider_l7policy = (
                 driver_utils.db_l7policy_to_provider_l7policy(db_l7policy))
+
+            update_values = dict(
+                l7policy_dict, provisioning_status=constants.PENDING_UPDATE)
+            is_weighted = constants.L7POLICY_ACTION_WEIGHTED_TARGETS in (
+                action, db_l7policy.action)
+            if is_weighted:
+                # Validate target pool references before sending them to a
+                # provider. The write rolls back if the provider rejects it.
+                self.repositories.l7policy.update(
+                    lock_session, id, **update_values)
 
             # Dispatch to the driver
             LOG.info("Sending update L7 Policy %s to provider %s",
@@ -282,11 +303,9 @@ class L7PolicyController(base.BaseController):
                 old_provider_l7policy,
                 driver_dm.L7Policy.from_dict(provider_l7policy_dict))
 
-            # Update the database to reflect what the driver just accepted
-            sanitized_l7policy.provisioning_status = constants.PENDING_UPDATE
-            db_l7policy_dict = sanitized_l7policy.to_dict(render_unsets=False)
-            self.repositories.l7policy.update(lock_session, id,
-                                              **db_l7policy_dict)
+            if not is_weighted:
+                self.repositories.l7policy.update(
+                    lock_session, id, **update_values)
 
         # Force SQL alchemy to query the DB, otherwise we get inconsistent
         # results

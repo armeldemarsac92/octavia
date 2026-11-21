@@ -118,6 +118,17 @@ class QueryTestCase(base.TestCase):
             self.q.get_pool_status()
         )
 
+    def test_pool_status_ignores_local_http_response_backends(self):
+        self.q._query = mock.Mock(return_value=(
+            "# pxname,svname,status\n"
+            "fixed-response-listener-id-default,BACKEND,UP\n"
+            "fixed-response-listener-id-weighted-503,BACKEND,UP\n"
+            "pool-id:listener-id,BACKEND,UP\n"))
+        self.assertEqual({'pool-id:listener-id': {
+            'pool_uuid': 'pool-id', 'listener_uuid': 'listener-id',
+            'status': constants.UP, 'members': {},
+        }}, self.q.get_pool_status())
+
     def test_show_info(self):
         query_mock = mock.Mock()
         self.q._query = query_mock

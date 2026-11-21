@@ -544,6 +544,12 @@ class PoolsController(base.BaseController):
             self._test_lb_and_listener_statuses(
                 context.session, lb_id=db_pool.load_balancer_id,
                 listener_ids=self._get_affected_listener_ids(db_pool))
+            weighted_policy_id = (
+                self.repositories.l7policy.get_weighted_policy_using_pool(
+                    context.session, db_pool.id))
+            if weighted_policy_id:
+                raise exceptions.PoolInUseByL7Policy(
+                    id=db_pool.id, l7policy_id=weighted_policy_id)
             self.repositories.pool.update(
                 context.session, db_pool.id,
                 provisioning_status=constants.PENDING_DELETE)

@@ -19,6 +19,7 @@ from oslo_config import cfg
 from oslo_config import fixture as oslo_fixture
 from oslo_utils import uuidutils
 
+from octavia.api.drivers.noop_driver import driver as noop_driver
 from octavia.common import constants
 import octavia.common.context
 from octavia.common import data_models
@@ -2162,6 +2163,30 @@ class TestPool(base.BaseAPITest):
         self.set_lb_status(self.lb_id)
         self.delete(self.POOL_PATH.format(
             pool_id=api_pool.get('id')), status=409)
+
+    @mock.patch.object(noop_driver.NoopProviderDriver,
+                       'supports_weighted_targets', True, create=True)
+    def test_delete_pool_with_zero_weight_target(self):
+        self.conf.config(group='api_settings',
+                         enabled_gateway_action_providers=['noop_driver'])
+        pool_id = self.create_pool(
+            self.lb_id, constants.PROTOCOL_HTTP,
+            constants.LB_ALGORITHM_ROUND_ROBIN)[self.root_tag]['id']
+        self.set_lb_status(self.lb_id)
+        policy = self.create_l7policy(
+            self.listener_id, constants.L7POLICY_ACTION_WEIGHTED_TARGETS,
+            targets=[{'weight': 1, 'fixed_response': {'status_code': 500}},
+                     {'weight': 0, 'pool_id': pool_id}])['l7policy']
+        self.set_lb_status(self.lb_id)
+
+        pool_path = self.POOL_PATH.format(pool_id=pool_id)
+        result = self.delete(pool_path, status=409)
+        self.assertIn(policy['id'], result.json['faultstring'])
+
+        policy_path = self.L7POLICY_PATH.format(l7policy_id=policy['id'])
+        self.put(policy_path, {'l7policy': {'action': 'REJECT'}})
+        self.set_lb_status(self.lb_id)
+        self.delete(pool_path)
 
     @mock.patch('octavia.api.drivers.utils.call_provider')
     def test_delete_with_bad_provider(self, mock_provider):

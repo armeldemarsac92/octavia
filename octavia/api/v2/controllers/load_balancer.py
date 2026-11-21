@@ -530,6 +530,9 @@ class LoadBalancersController(base.BaseController):
             # NoneType can be weird here, have to force type a second time
             listeners = lb_dict.pop('listeners', []) or []
             pools = lb_dict.pop('pools', []) or []
+            for listener_dict in listeners:
+                listener.validate_http_policy_options_on_create(
+                    driver, listener_dict, creating_load_balancer=True)
 
             flavor_dict = self._apply_flavor_to_lb_dict(lock_session, driver,
                                                         lb_dict)

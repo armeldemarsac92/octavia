@@ -21,7 +21,9 @@ from octavia_lib.common import constants as lib_consts
 from oslo_config import cfg
 from oslo_config import fixture as oslo_fixture
 
+from octavia.amphorae.driver_exceptions import exceptions as driver_except
 from octavia.common import constants
+from octavia.common import exceptions
 from octavia.common.jinja.haproxy.combined_listeners import jinja_cfg
 from octavia.tests.unit import base
 from octavia.tests.unit.common.sample_configs import sample_configs_combined
@@ -1404,6 +1406,162 @@ class TestHaproxyCfg(base.TestCase):
         self.assertEqual(sample_configs_combined.sample_base_expected_config(
             frontend=fe, backend=be), rendered_obj)
 
+    def test_haproxy_version_check_ignores_unrendered_fixed_responses(self):
+        amp = sample_configs_combined.sample_amphora_tuple()
+        listener = sample_configs_combined.sample_listener_tuple(l7=True)
+        policy = listener.l7policies[0]._replace(
+            action=constants.L7POLICY_ACTION_FIXED_RESPONSE,
+            redirect_pool=None, fixed_response={'status_code': 500})
+        listener = listener._replace(l7policies=[policy])
+        old_version = ['2', '1', '1']
+        with self.assertRaises(driver_except.AmpVersionUnsupported):
+            self.jinja_cfg.build_config(
+                amp, [listener], None, haproxy_versions=old_version,
+                amp_details=None)
+        rendered = self.jinja_cfg.build_config(
+            amp, [listener], None, haproxy_versions=['3', '0', '19'],
+            amp_details=None)
+        self.assertIn('http-request return status 500', rendered)
+
+        for unrendered_policy in (
+                policy._replace(provisioning_status=constants.PENDING_DELETE),
+                policy._replace(enabled=False),
+                policy._replace(l7rules=[policy.l7rules[0]._replace(
+                    provisioning_status=constants.PENDING_DELETE)])):
+            with self.subTest(policy=unrendered_policy):
+                rendered = self.jinja_cfg.build_config(
+                    amp, [listener._replace(l7policies=[unrendered_policy])],
+                    None, haproxy_versions=old_version, amp_details=None)
+                self.assertNotIn('http-request return status 500', rendered)
+
+    def test_weighted_policy_routes_nonzero_targets_in_policy_order(self):
+        amp = sample_configs_combined.sample_amphora_tuple()
+        listener = sample_configs_combined.sample_listener_tuple(l7=True)
+        listener_id = listener.id
+        first_pool, second_pool = listener.pools
+        policy = listener.l7policies[0]
+        rule = policy.l7rules[0]
+        earlier = policy._replace(
+            id='earlier', l7rules=[rule._replace(id='earlier_rule',
+                                                 value='/api/specific')])
+        weighted = policy._replace(
+            id='weighted', action=constants.L7POLICY_ACTION_WEIGHTED_TARGETS,
+            redirect_pool=None,
+            targets=[
+                {'weight': 1, 'pool_id': first_pool.id},
+                {'weight': 0, 'fixed_response': {'status_code': 404}},
+                {'weight': 2, 'pool_id': second_pool.id},
+                {'weight': 7, 'fixed_response': {'status_code': 500}},
+            ])
+        later = policy._replace(
+            id='later', action=constants.L7POLICY_ACTION_FIXED_RESPONSE,
+            l7rules=[rule._replace(id='later_rule')], redirect_pool=None,
+            fixed_response={'status_code': 404})
+        listener = listener._replace(l7policies=[earlier, weighted, later])
+
+        rendered = self.jinja_cfg.build_config(
+            amp, [listener], None, haproxy_versions=['3', '0', '19'],
+            amp_details=None)
+
+        self.assertEqual(1, rendered.count('rand(10)'))
+        self.assertIn(
+            'http-request set-var(txn.octavia_l7_policy) str(earlier) '
+            'if !{ var(txn.octavia_l7_policy) -m found } earlier_rule',
+            rendered)
+        self.assertIn(
+            'http-request set-var(txn.octavia_l7_policy) str(weighted) '
+            'if !{ var(txn.octavia_l7_policy) -m found } sample_l7rule_id_1',
+            rendered)
+        self.assertIn(
+            'rand(10) if { var(txn.octavia_l7_policy) -m str weighted }',
+            rendered)
+        backend_prefix = constants.HAPROXY_FIXED_RESPONSE_BACKEND_PREFIX
+        routes = [line.strip() for line in rendered.splitlines()
+                  if line.lstrip().startswith('use_backend ')]
+        self.assertEqual([
+            f'use_backend {second_pool.id}:{listener_id} if earlier_rule',
+            f'use_backend {first_pool.id}:{listener_id} '
+            'if { var(txn.octavia_l7_policy) -m str weighted } '
+            '{ var(txn.octavia_weighted_draw) -m int 0:0 }',
+            f'use_backend {second_pool.id}:{listener_id} '
+            'if { var(txn.octavia_l7_policy) -m str weighted } '
+            '{ var(txn.octavia_weighted_draw) -m int 1:2 }',
+            f'use_backend {backend_prefix}{listener_id}-weighted-500 '
+            'if { var(txn.octavia_l7_policy) -m str weighted } '
+            '{ var(txn.octavia_weighted_draw) -m int 3:9 }',
+            f'use_backend {backend_prefix}{listener_id}-later if later_rule',
+        ], routes)
+
+    def test_weighted_policy_keeps_unavailable_targets_in_its_range(self):
+        amp = sample_configs_combined.sample_amphora_tuple()
+        listener = sample_configs_combined.sample_listener_tuple(l7=True)
+        first_pool, second_pool = listener.pools
+        weighted = listener.l7policies[0]._replace(
+            action=constants.L7POLICY_ACTION_WEIGHTED_TARGETS,
+            redirect_pool=None,
+            targets=[
+                {'weight': 2, 'pool_id': first_pool.id},
+                {'weight': 3, 'pool_id': second_pool.id},
+            ])
+        listener = listener._replace(l7policies=[weighted], pools=[
+            first_pool._replace(enabled=False),
+            second_pool._replace(provisioning_status=constants.PENDING_DELETE),
+        ])
+
+        rendered = self.jinja_cfg.build_config(
+            amp, [listener], None, haproxy_versions=['3', '0', '19'],
+            amp_details=None)
+
+        backend = (f'{constants.HAPROXY_FIXED_RESPONSE_BACKEND_PREFIX}'
+                   f'{listener.id}-weighted-503')
+        self.assertIn('rand(5)', rendered)
+        self.assertIn(f'backend {backend}\n'
+                      '    mode http\n'
+                      '    http-request return status 503', rendered)
+        routes = [line.strip() for line in rendered.splitlines()
+                  if line.lstrip().startswith('use_backend ')]
+        self.assertEqual([
+            f'use_backend {backend} '
+            'if { var(txn.octavia_l7_policy) -m str sample_l7policy_id_1 } '
+            '{ var(txn.octavia_weighted_draw) -m int 0:1 }',
+            f'use_backend {backend} '
+            'if { var(txn.octavia_l7_policy) -m str sample_l7policy_id_1 } '
+            '{ var(txn.octavia_weighted_draw) -m int 2:4 }',
+        ], routes)
+
+    def test_weighted_policy_requires_supported_haproxy(self):
+        amp = sample_configs_combined.sample_amphora_tuple()
+        listener = sample_configs_combined.sample_listener_tuple(l7=True)
+        weighted = listener.l7policies[0]._replace(
+            action=constants.L7POLICY_ACTION_WEIGHTED_TARGETS,
+            redirect_pool=None,
+            targets=[{'weight': 1, 'fixed_response': {'status_code': 404}}])
+        old_version = ['2', '1', '1']
+        with self.assertRaises(driver_except.AmpVersionUnsupported):
+            self.jinja_cfg.build_config(
+                amp, [listener._replace(l7policies=[weighted])], None,
+                haproxy_versions=old_version, amp_details=None)
+
+        rendered = self.jinja_cfg.build_config(
+            amp, [listener._replace(l7policies=[
+                weighted._replace(enabled=False)])], None,
+            haproxy_versions=old_version, amp_details=None)
+        self.assertNotIn('rand(', rendered)
+
+    def test_weighted_policy_requires_representable_total_weight(self):
+        amp = sample_configs_combined.sample_amphora_tuple()
+        listener = sample_configs_combined.sample_listener_tuple(l7=True)
+        policy = listener.l7policies[0]._replace(
+            action=constants.L7POLICY_ACTION_WEIGHTED_TARGETS,
+            redirect_pool=None)
+        for weight in (0, 2**32 + 1):
+            weighted = policy._replace(targets=[
+                {'weight': weight, 'pool_id': listener.pools[0].id}])
+            with self.subTest(weight=weight), self.assertRaises(
+                    exceptions.InvalidL7PolicyArgs):
+                self.jinja_cfg.render_loadbalancer_obj(
+                    amp, [listener._replace(l7policies=[weighted])])
+
     def test_render_template_http_xff(self):
         be = ("backend sample_pool_id_1:sample_listener_id_1\n"
               "    mode http\n"
@@ -2191,7 +2349,7 @@ class TestHaproxyCfg(base.TestCase):
         mock_render_loadbalancer_obj.assert_called_once_with(
             mock_amp, mock_listeners, tls_certs=mock_tls_certs,
             socket_path=mock_socket_path, amp_details=None,
-            feature_compatibility=expected_fc)
+            feature_compatibility=expected_fc, haproxy_version="0.7.0")
 
         mock_render_loadbalancer_obj.reset_mock()
 
@@ -2206,7 +2364,7 @@ class TestHaproxyCfg(base.TestCase):
         mock_render_loadbalancer_obj.assert_called_once_with(
             mock_amp, mock_listeners, tls_certs=mock_tls_certs,
             socket_path=mock_socket_path, amp_details=None,
-            feature_compatibility=expected_fc)
+            feature_compatibility=expected_fc, haproxy_version="1.6.0")
 
         mock_render_loadbalancer_obj.reset_mock()
 
@@ -2222,7 +2380,7 @@ class TestHaproxyCfg(base.TestCase):
         mock_render_loadbalancer_obj.assert_called_once_with(
             mock_amp, mock_listeners, tls_certs=mock_tls_certs,
             socket_path=mock_socket_path, amp_details=None,
-            feature_compatibility=expected_fc)
+            feature_compatibility=expected_fc, haproxy_version="1.9.0")
 
         mock_render_loadbalancer_obj.reset_mock()
 
@@ -2239,7 +2397,7 @@ class TestHaproxyCfg(base.TestCase):
         mock_render_loadbalancer_obj.assert_called_once_with(
             mock_amp, mock_listeners, tls_certs=mock_tls_certs,
             socket_path=mock_socket_path, amp_details=None,
-            feature_compatibility=expected_fc)
+            feature_compatibility=expected_fc, haproxy_version="2.1.1")
 
         mock_render_loadbalancer_obj.reset_mock()
 
@@ -2257,7 +2415,7 @@ class TestHaproxyCfg(base.TestCase):
         mock_render_loadbalancer_obj.assert_called_once_with(
             mock_amp, mock_listeners, tls_certs=mock_tls_certs,
             socket_path=mock_socket_path, amp_details=None,
-            feature_compatibility=expected_fc)
+            feature_compatibility=expected_fc, haproxy_version="2.2.1")
 
         mock_render_loadbalancer_obj.reset_mock()
 
@@ -2268,7 +2426,7 @@ class TestHaproxyCfg(base.TestCase):
         mock_render_loadbalancer_obj.assert_called_once_with(
             mock_amp, mock_listeners, tls_certs=mock_tls_certs,
             socket_path=mock_socket_path, amp_details=None,
-            feature_compatibility=expected_fc)
+            feature_compatibility=expected_fc, haproxy_version="2.4.0")
 
         mock_render_loadbalancer_obj.reset_mock()
 
@@ -2279,7 +2437,7 @@ class TestHaproxyCfg(base.TestCase):
         mock_render_loadbalancer_obj.assert_called_once_with(
             mock_amp, mock_listeners, tls_certs=mock_tls_certs,
             socket_path=mock_socket_path, amp_details=None,
-            feature_compatibility=expected_fc)
+            feature_compatibility=expected_fc, haproxy_version="3.1.0")
 
     def test_transform_listener_tls_ciphers_injection_fallback(self):
         tainted = 'ECDHE-RSA-AES128-GCM-SHA256\ncheck'
