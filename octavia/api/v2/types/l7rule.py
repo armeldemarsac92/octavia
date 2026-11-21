@@ -18,7 +18,7 @@ from octavia.api.common import types
 from octavia.common import constants
 
 
-RULE_KEY_LENGTH = constants.MAX_L7RULE_HEADER_NAME_LENGTH
+RULE_KEY_LENGTH = constants.MAX_L7RULE_KEY_LENGTH
 RULE_VALUE_LENGTH = constants.MAX_L7RULE_HEADER_VALUE_LENGTH
 
 

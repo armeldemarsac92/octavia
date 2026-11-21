@@ -128,7 +128,7 @@ position breaking ties.
 
 With ``http_header_exact_v1`` enabled, use ``HTTP_HEADER_EXACT`` with
 ``EQUAL_TO`` on HTTP or TERMINATED_HTTPS listeners. The key is an HTTP
-field name of up to 256 characters, compared case-insensitively. The
+field name of up to 255 ASCII characters, compared case-insensitively. The
 value is a nonempty literal of up to 4096 characters, compared
 case-sensitively against a full field occurrence. Internal whitespace and
 commas are preserved.

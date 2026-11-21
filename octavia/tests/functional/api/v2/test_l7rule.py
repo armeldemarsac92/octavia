@@ -664,15 +664,18 @@ class TestL7Rule(base.BaseAPITest):
         policy = self.create_l7policy(listener['id'], 'REJECT')['l7policy']
         self.set_lb_status(lb_id)
 
-        key = 'X-' + 'a' * 254
+        key = 'X-' + 'a' * 253
+        oversized_key = key + 'a'
         value = 'one, ' + 'x' * 4091
         rpc.return_value.cast.reset_mock()
         self.create_l7rule(policy['id'], 'HTTP_HEADER_EXACT', 'EQUAL_TO',
                            value, key=key, status=501)
         self.conf.config(group='api_settings',
                          enabled_http_header_exact_providers=['amphora'])
+        self.create_l7rule(policy['id'], 'HTTP_HEADER_EXACT', 'EQUAL_TO',
+                           value, key=oversized_key, status=400)
         self.create_l7rule(policy['id'], 'HEADER', 'EQUAL_TO',
-                           'one', key=key, status=400)
+                           'one', key=oversized_key, status=400)
         self.create_l7rule(policy['id'], 'HEADER', 'EQUAL_TO',
                            'x' * 256, key='X-Version', status=400)
         self.create_l7rule(policy['id'], 'HTTP_HEADER_EXACT', 'REGEX',
@@ -680,6 +683,8 @@ class TestL7Rule(base.BaseAPITest):
         self.create_l7rule(policy['id'], 'HTTP_HEADER_EXACT', 'EQUAL_TO',
                            ' one', key=key, status=400)
         rpc.return_value.cast.assert_not_called()
+        rules_path = self.L7RULES_PATH.format(l7policy_id=policy['id'])
+        self.assertEqual([], self.get(rules_path).json['rules'])
         rule = self.create_l7rule(policy['id'], 'HTTP_HEADER_EXACT',
                                   'EQUAL_TO', value, key=key)['rule']
         self.assertEqual(key, rule['key'])
@@ -687,7 +692,11 @@ class TestL7Rule(base.BaseAPITest):
         path = self.L7RULE_PATH.format(l7policy_id=policy['id'],
                                        l7rule_id=rule['id'])
         self.set_lb_status(lb_id)
+        rpc.return_value.cast.reset_mock()
+        self.put(path, {'rule': {'key': oversized_key}}, status=400)
         self.put(path, {'rule': {'type': 'HEADER'}}, status=400)
+        rpc.return_value.cast.assert_not_called()
+        self.assertEqual(key, self.get(path).json['rule']['key'])
         new_value = 'two,\t café'
         self.put(path, {'rule': {'value': new_value}})
         self.set_lb_status(lb_id)

@@ -2314,8 +2314,12 @@ class TestL7Policy(base.BaseAPITest):
                          enabled_http_header_exact_providers=['amphora'])
         listener['protocol'] = 'TCP'
         self.post(self.LBS_PATH, body, status=400)
-        rpc.return_value.cast.assert_not_called()
         listener['protocol'] = 'HTTP'
+        original_key = rule['key']
+        rule['key'] = 'X-' + 'a' * 254
+        self.post(self.LBS_PATH, body, status=400)
+        rpc.return_value.cast.assert_not_called()
+        rule['key'] = original_key
         lb = self.post(self.LBS_PATH, body).json['loadbalancer']
         saved_rule = lb['listeners'][0]['l7policies'][0]['rules'][0]
         self.assertEqual(rule, {key: saved_rule[key] for key in rule})
