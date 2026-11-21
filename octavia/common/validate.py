@@ -196,6 +196,14 @@ def l7rule_data(l7rule):
                 'ENDS_WITH with a DNS wildcard like *.example.test. '
                 'Keys and inversion are unsupported.'))
 
+    elif l7rule.type == constants.L7RULE_TYPE_HTTP_METHOD:
+        if (l7rule.compare_type != constants.L7RULE_COMPARE_TYPE_EQUAL_TO or
+                l7rule.value not in constants.L7RULE_HTTP_METHODS or
+                l7rule.key not in (None, wtypes.Unset) or l7rule.invert):
+            raise exceptions.InvalidL7Rule(msg=_(
+                'HTTP_METHOD requires EQUAL_TO with a supported uppercase '
+                'HTTP method. Keys and inversion are unsupported.'))
+
     elif l7rule.type == constants.L7RULE_TYPE_HEADER:
         if not l7rule.key:
             raise exceptions.InvalidL7Rule(msg='L7 rule type requires a key')

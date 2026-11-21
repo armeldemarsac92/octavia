@@ -722,14 +722,11 @@ class ListenersController(base.BaseController):
                 driver_utils.require_fixed_http_responses(driver)
             if reopening:
                 policy_repo = self.repositories.l7policy
-                if (db_listener.protocol in (
+                if db_listener.protocol in (
                         constants.PROTOCOL_HTTP,
-                        constants.PROTOCOL_TERMINATED_HTTPS) and
-                        policy_repo.has_enabled_l7rule(
-                            context.session,
-                            constants.L7RULE_TYPE_HTTP_HEADER_EXACT,
-                            listener_id=id)):
-                    driver_utils.require_http_header_exact(driver)
+                        constants.PROTOCOL_TERMINATED_HTTPS):
+                    driver_utils.require_active_http_l7rule_capabilities(
+                        driver, policy_repo, context.session, listener_id=id)
                 policies = policy_repo.get_enabled_gateway_policies(
                     context.session, id, db_listener.protocol)
                 for action, headers in policies:

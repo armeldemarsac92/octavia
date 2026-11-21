@@ -777,6 +777,120 @@ class TestL7Rule(base.BaseAPITest):
             'l7policy': {'admin_state_up': True}}).json['l7policy']
         self.assertTrue(reopened['admin_state_up'])
 
+    @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
+    def test_convert_header_to_http_method(self, rpc):
+        self.conf.config(group='api_settings',
+                         enabled_http_method_match_providers=['amphora'])
+        lb = self.create_load_balancer(
+            uuidutils.generate_uuid(), provider='amphora')['loadbalancer']
+        lb_id = lb['id']
+        self.set_lb_status(lb_id)
+        listener = self.create_listener('HTTP', 80, lb_id)['listener']
+        self.set_lb_status(lb_id)
+        policy = self.create_l7policy(listener['id'], 'REJECT')['l7policy']
+        update = {'type': 'HTTP_METHOD', 'value': 'POST'}
+
+        for key_field in ({}, {'key': None}):
+            with self.subTest(key_field=key_field):
+                self.set_lb_status(lb_id)
+                rule = self.create_l7rule(policy['id'], 'HEADER', 'EQUAL_TO',
+                                          'one', key='Version')['rule']
+                path = self.L7RULE_PATH.format(l7policy_id=policy['id'],
+                                               l7rule_id=rule['id'])
+                self.set_lb_status(lb_id)
+                rpc.return_value.cast.reset_mock()
+                self.put(path, {'rule': dict(update, key='Version')},
+                         status=400)
+                rpc.return_value.cast.assert_not_called()
+                self.assertEqual('HEADER', self.get(path).json['rule']['type'])
+
+                self.put(path, {'rule': dict(update, **key_field)})
+                current = self.get(path).json['rule']
+                self.assertEqual(('HTTP_METHOD', 'POST', None),
+                                 (current['type'], current['value'],
+                                  current['key']))
+                rpc.return_value.cast.assert_called_once()
+                sent = rpc.return_value.cast.call_args.kwargs
+                self.assertEqual('Version',
+                                 sent[constants.ORIGINAL_L7RULE]['key'])
+                self.assertIsNone(sent[constants.L7RULE_UPDATES]['key'])
+
+    @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
+    def test_http_method_rule_updates_and_parent_reactivation(self, rpc):
+        lb = self.create_load_balancer(
+            uuidutils.generate_uuid(), provider='amphora')['loadbalancer']
+        lb_id = lb['id']
+        self.set_lb_status(lb_id)
+        listener = self.create_listener('HTTP', 80, lb_id)['listener']
+        self.set_lb_status(lb_id)
+        policy = self.create_l7policy(listener['id'], 'REJECT')['l7policy']
+        self.set_lb_status(lb_id)
+
+        rpc.return_value.cast.reset_mock()
+        self.create_l7rule(policy['id'], 'HTTP_METHOD', 'EQUAL_TO', 'GET',
+                           status=501)
+        self.conf.config(group='api_settings',
+                         enabled_http_method_match_providers=['amphora'])
+        self.create_l7rule(policy['id'], 'HTTP_METHOD', 'REGEX', 'GET',
+                           status=400)
+        for invalid_value in ('get', 'GET POST', 'PROPFIND'):
+            self.create_l7rule(policy['id'], 'HTTP_METHOD', 'EQUAL_TO',
+                               invalid_value, status=400)
+        self.create_l7rule(policy['id'], 'HTTP_METHOD', 'EQUAL_TO', 'GET',
+                           key='Method', status=400)
+        self.create_l7rule(policy['id'], 'HTTP_METHOD', 'EQUAL_TO', 'GET',
+                           invert=True, status=400)
+        rpc.return_value.cast.assert_not_called()
+        rules_path = self.L7RULES_PATH.format(l7policy_id=policy['id'])
+        self.assertEqual([], self.get(rules_path).json['rules'])
+
+        rule = self.create_l7rule(policy['id'], 'HTTP_METHOD', 'EQUAL_TO',
+                                  'GET')['rule']
+        self.assertIsNone(rule['key'])
+        self.assertFalse(rule['invert'])
+        path = self.L7RULE_PATH.format(l7policy_id=policy['id'],
+                                       l7rule_id=rule['id'])
+        self.set_lb_status(lb_id)
+        self.put(path, {'rule': {'value': 'POST'}})
+        self.set_lb_status(lb_id)
+        self.assertEqual('POST', self.get(path).json['rule']['value'])
+        self.conf.config(group='api_settings',
+                         enabled_http_method_match_providers=[])
+        self.put(path, {'rule': {'value': 'PATCH'}}, status=501)
+
+        parents = (
+            (self.L7POLICY_PATH.format(l7policy_id=policy['id']), 'l7policy'),
+            (self.LISTENER_PATH.format(listener_id=listener['id']),
+             'listener'),
+            (self.LB_PATH.format(lb_id=lb_id), 'loadbalancer'),
+        )
+        for parent_path, tag in parents:
+            with self.subTest(parent=tag):
+                self.put(parent_path, {tag: {'admin_state_up': False}})
+                self.set_lb_status(lb_id)
+                rpc.return_value.cast.reset_mock()
+                self.put(parent_path, {tag: {'admin_state_up': True}},
+                         status=501)
+                rpc.return_value.cast.assert_not_called()
+                self.assertFalse(
+                    self.get(parent_path).json[tag]['admin_state_up'])
+                self.conf.config(
+                    group='api_settings',
+                    enabled_http_method_match_providers=['amphora'])
+                self.put(parent_path, {tag: {'admin_state_up': True}})
+                self.set_lb_status(lb_id)
+                self.conf.config(
+                    group='api_settings',
+                    enabled_http_method_match_providers=[])
+
+        self.put(path, {'rule': {'admin_state_up': False}})
+        self.set_lb_status(lb_id)
+        self.put(path, {'rule': {'admin_state_up': True}}, status=501)
+        self.put(path, {'rule': {'type': 'PATH', 'value': '/catalog',
+                                 'admin_state_up': True}})
+        self.set_lb_status(lb_id)
+        self.assertEqual('PATH', self.get(path).json['rule']['type'])
+
     def test_create_cookie_rule(self):
         api_l7rule = self.create_l7rule(
             self.l7policy_id, constants.L7RULE_TYPE_COOKIE,

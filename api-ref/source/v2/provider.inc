@@ -218,6 +218,11 @@ terminated HTTPS listeners. This capability requires the provider name in
 ``[api_settings] enabled_http_header_exact_providers`` after the regional
 database, API services, workers and Amphora fleet are upgraded.
 
+``http_method_match_v1`` enables ``HTTP_METHOD`` rules for HTTP and
+terminated HTTPS listeners. This capability requires the provider name in
+``[api_settings] enabled_http_method_match_providers``. Apply the database
+migration and upgrade the regional API, workers and Amphora fleet first.
+
 .. rest_status_code:: success ../http-status.yaml
 
    - 200

@@ -140,6 +140,18 @@ capability is unavailable.
    {"rule": {"type": "HTTP_HEADER_EXACT", "compare_type": "EQUAL_TO",
              "key": "Version", "value": "one, other"}}
 
+With ``http_method_match_v1`` enabled, use ``HTTP_METHOD`` with
+``EQUAL_TO`` on HTTP or TERMINATED_HTTPS listeners. Omit the key and leave
+``invert`` false. The case-sensitive value must be one of ``GET``, ``HEAD``,
+``POST``, ``PUT``, ``DELETE``, ``CONNECT``, ``OPTIONS``, ``TRACE`` or ``PATCH``.
+An otherwise valid request for this rule type returns HTTP 501 when the
+capability is unavailable.
+
+.. code-block:: json
+
+   {"rule": {"type": "HTTP_METHOD", "compare_type": "EQUAL_TO",
+             "value": "GET"}}
+
 .. rest_status_code:: success ../http-status.yaml
 
    - 201
