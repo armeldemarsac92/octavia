@@ -59,6 +59,17 @@ class TestGatewayCapabilities(base.BaseAPITest):
     def capabilities_path(self, provider='amphora'):
         return f'{self.PROVIDERS_PATH}/{provider}/gateway_capabilities'
 
+    def test_full_header_exact_capability_requires_compatible_opt_in(self):
+        empty = {'gateway_capabilities': []}
+        self.assertEqual(empty, self.get(self.capabilities_path()).json)
+        self.conf.config(
+            group='api_settings',
+            enabled_http_header_exact_providers=['amphora', 'noop_driver'])
+        self.assertEqual({'gateway_capabilities': ['http_header_exact_v1']},
+                         self.get(self.capabilities_path()).json)
+        self.assertEqual(empty,
+                         self.get(self.capabilities_path('noop_driver')).json)
+
     def test_tls_sni_capability_is_independent_and_provider_specific(self):
         self.conf.config(group='api_settings',
                          enabled_tls_sni_providers=['amphora', 'noop_driver'])

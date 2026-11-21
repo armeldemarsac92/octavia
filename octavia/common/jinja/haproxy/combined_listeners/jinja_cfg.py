@@ -782,12 +782,24 @@ class JinjaTemplater:
 
             be processed by the templating system
         """
+        key = l7rule.key
+        if l7rule.type == constants.L7RULE_TYPE_HTTP_HEADER_EXACT:
+            # Protect the token in both the configuration and sample fetch
+            # parsers. Match raw field bytes with a hex-encoded ACL pattern.
+            escaped_key = key.translate({
+                ord('#'): r'\x23', ord('$'): r'\x24', ord("'"): r'\x27',
+            })
+            key = rf'\"{escaped_key}\"'
+            value = l7rule.value.encode('utf-8').hex()
+        else:
+            value = self._escape_haproxy_config_string(l7rule.value)
+
         return {
             'id': l7rule.id,
             'type': l7rule.type,
             'compare_type': l7rule.compare_type,
-            'key': l7rule.key,
-            'value': self._escape_haproxy_config_string(l7rule.value),
+            'key': key,
+            'value': value,
             'invert': l7rule.invert,
             'enabled': l7rule.enabled
         }

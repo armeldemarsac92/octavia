@@ -211,6 +211,11 @@ the provider name stops advertisement and admission of new h2c settings.
 Existing pools keep their stored setting. Set it to false or drain those
 pools before rolling back the fleet.
 
+``http_header_exact_v1`` enables ``HTTP_HEADER_EXACT`` rules for HTTP and
+terminated HTTPS listeners. This capability requires the provider name in
+``[api_settings] enabled_http_header_exact_providers`` after the regional
+database, API services, workers and Amphora fleet are upgraded.
+
 .. rest_status_code:: success ../http-status.yaml
 
    - 200

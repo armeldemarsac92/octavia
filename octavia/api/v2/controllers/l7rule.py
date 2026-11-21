@@ -273,8 +273,6 @@ class L7RuleController(base.BaseController):
             context.session.refresh(db_l7rule, with_for_update=True)
             self._validate_rule_update(db_l7rule, l7rule_dict)
             protocol = db_l7policy.listener.protocol
-            driver_utils.validate_l7rule_context(
-                driver, l7rule_dict.get('type', db_l7rule.type), protocol)
 
             match_fields = {'type', 'compare_type', 'key', 'value', 'invert'}
             enabled = l7rule_dict.get('enabled', db_l7rule.enabled)
@@ -282,6 +280,10 @@ class L7RuleController(base.BaseController):
                 field in l7rule_dict and
                 l7rule_dict[field] != getattr(db_l7rule, field)
                 for field in match_fields)
+            driver_utils.validate_l7rule_context(
+                driver, l7rule_dict.get('type', db_l7rule.type), protocol,
+                admit_http_header_exact=(match_changed or
+                                         (enabled and not db_l7rule.enabled)))
             tcp_policy = driver_utils.uses_tls_sni_policy_path(
                 driver, protocol)
             if ((enabled and (not db_l7rule.enabled or match_changed)) or

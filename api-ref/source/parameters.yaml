@@ -1083,7 +1083,8 @@ l7rule-type:
     The L7 rule type.  One of ``COOKIE``, ``FILE_TYPE``, ``HEADER``,
     ``HOST_NAME``, ``PATH``, ``SSL_CONN_HAS_CERT``, ``SSL_VERIFY_RESULT``,
     or ``SSL_DN_FIELD``. The Amphora provider additionally accepts ``TLS_SNI``
-    for TCP passthrough when enabled by the region.
+    for TCP passthrough and ``HTTP_HEADER_EXACT`` for full HTTP header
+    values when enabled by the region.
   in: body
   required: true
   type: string
@@ -1092,7 +1093,8 @@ l7rule-type-optional:
     The L7 rule type.  One of ``COOKIE``, ``FILE_TYPE``, ``HEADER``,
     ``HOST_NAME``, ``PATH``, ``SSL_CONN_HAS_CERT``, ``SSL_VERIFY_RESULT``,
     or ``SSL_DN_FIELD``. The Amphora provider additionally accepts ``TLS_SNI``
-    for TCP passthrough when enabled by the region.
+    for TCP passthrough and ``HTTP_HEADER_EXACT`` for full HTTP header
+    values when enabled by the region.
   in: body
   required: false
   type: string
