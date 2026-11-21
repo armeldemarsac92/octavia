@@ -104,12 +104,13 @@ bind {{ lb_vip_address }}:{{ listener.protocol_port }} {{
 {% endmacro %}
 
 
-{% macro l7rule_macro(constants, l7rule) %}
+{% macro l7rule_macro(constants, l7rule, listener) %}
     {% if l7rule.type == constants.L7RULE_TYPE_TLS_SNI %}
+        {% set sni_fetch = 'ssl_fc_sni' if listener.tcp_tls_termination else 'req.ssl_sni' %}
         {% if l7rule.compare_type == constants.L7RULE_COMPARE_TYPE_ENDS_WITH %}
-        acl {{ l7rule.id }} req.ssl_sni -i -m end {{ l7rule.value[1:] }}
+        acl {{ l7rule.id }} {{ sni_fetch }} -i -m end {{ l7rule.value[1:] }}
         {% else %}
-        acl {{ l7rule.id }} req.ssl_sni -i -m str {{ l7rule.value }}
+        acl {{ l7rule.id }} {{ sni_fetch }} -i -m str {{ l7rule.value }}
         {% endif %}
     {% elif l7rule.type == constants.L7RULE_TYPE_HOST_NAME %}
         acl {{ l7rule.id }} req.hdr(host) -i {{ l7rule_compare_type_macro(
@@ -175,7 +176,7 @@ backend {{ fixed_response_backend_name(constants, listener, response_id) }}
 
 
 {% macro closed_backend_macro(listener, pool) %}
-{# HAProxy returns 503 for an empty HTTP backend, including older versions. #}
+{# An empty backend returns 503 in HTTP mode and closes TCP connections. #}
 backend {{ pool.id }}:{{ listener.id }}
     mode {{ listener.protocol_mode }}
     timeout connect {{ listener.timeout_member_connect }}
@@ -184,9 +185,9 @@ backend {{ pool.id }}:{{ listener.id }}
 {% endmacro %}
 
 
-{% macro l7policy_rules_macro(constants, l7policy) %}
+{% macro l7policy_rules_macro(constants, l7policy, listener) %}
     {% for l7rule in l7policy.l7rules %}
-        {{- l7rule_macro(constants, l7rule) -}}
+        {{- l7rule_macro(constants, l7rule, listener) -}}
     {% endfor %}
 {% endmacro %}
 
@@ -299,7 +300,7 @@ frontend {{ listener.id }}
         {# Match the first eligible switching policy before sampling. Only a
            weighted winner draws, and txn variables are reset per request. #}
         {% for l7policy in policies %}
-            {{- l7policy_rules_macro(constants, l7policy) -}}
+            {{- l7policy_rules_macro(constants, l7policy, listener) -}}
         {% endfor %}
         {% for l7policy in policies %}
             {{- select_switching_policy_macro(constants, l7policy) -}}
@@ -307,7 +308,7 @@ frontend {{ listener.id }}
     {% endif %}
     {% for l7policy in policies %}
         {% if not select_policy %}
-            {{- l7policy_rules_macro(constants, l7policy) -}}
+            {{- l7policy_rules_macro(constants, l7policy, listener) -}}
         {% endif %}
         {{- l7policy_macro(constants, l7policy, listener) -}}
     {% endfor %}
@@ -318,7 +319,7 @@ frontend {{ listener.id }}
     default_backend {{ listener.default_pool.id }}:{{ listener.id }}
     {% endif %}
     timeout client {{ listener.timeout_client_data }}
-    {% if listener.timeout_tcp_inspect and listener.inspect_tls_sni is not defined %}
+    {% if listener.timeout_tcp_inspect and listener.inspect_tls_sni is not defined and not listener.tcp_tls_termination %}
     tcp-request inspect-delay {{ listener.timeout_tcp_inspect }}
     {% endif %}
     {% if listener.protocol == lib_consts.PROTOCOL_PROMETHEUS and

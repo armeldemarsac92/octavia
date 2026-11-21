@@ -46,6 +46,19 @@ LOG = logging.getLogger(__name__)
 def validate_policy_options_on_create(
         driver, listener, *, creating_load_balancer=False):
     protocol = listener['protocol']
+    tcp_tls_termination = listener.get('tcp_tls_termination', False)
+    if type(tcp_tls_termination) is not bool:
+        raise exceptions.ValidationException(detail=_(
+            'tcp_tls_termination must be true or false.'))
+    if tcp_tls_termination:
+        if protocol != constants.PROTOCOL_TCP:
+            raise exceptions.ValidationException(detail=_(
+                'tcp_tls_termination requires a TCP listener.'))
+        if not listener.get('tls_certificate_id'):
+            raise exceptions.ValidationException(detail=_(
+                'tcp_tls_termination requires default_tls_container_ref.'))
+        driver_utils.require_tcp_tls_termination(driver)
+
     default_response = listener.get('default_http_response')
     hosts = listener.get('https_virtual_hosts')
     if hosts is not None:
@@ -63,7 +76,8 @@ def validate_policy_options_on_create(
     if default_response is not None:
         driver_utils.require_fixed_http_responses(driver)
 
-    tcp_policy = driver_utils.uses_tls_sni_policy_path(driver, protocol)
+    tcp_policy = driver_utils.uses_tls_sni_policy_path(
+        driver, protocol, tcp_tls_termination)
     for policy in listener.get('l7policies') or []:
         hostname = validate.validate_https_policy_hostname(
             hosts, policy.get('https_listener_hostname'))
@@ -72,14 +86,15 @@ def validate_policy_options_on_create(
         action = policy.get('action')
         for rule in policy.get('rules') or []:
             driver_utils.validate_l7rule_context(
-                driver, rule['type'], protocol)
+                driver, rule['type'], protocol,
+                tcp_tls_termination=tcp_tls_termination)
             if tcp_policy:
                 try:
                     validate.l7rule_data(data_models.L7Rule.from_dict(rule))
                 except exceptions.InvalidL7Rule as e:
                     raise exceptions.L7RuleValidation(error=e) from e
                 driver_utils.require_tls_sni_rule_comparison(
-                    driver, rule['compare_type'])
+                    driver, rule['compare_type'], tcp_tls_termination)
         if (not tcp_policy and
                 action not in (constants.L7POLICY_ACTION_FIXED_RESPONSE,
                                constants.L7POLICY_ACTION_WEIGHTED_TARGETS) and
@@ -90,7 +105,8 @@ def validate_policy_options_on_create(
         checked = validate.sanitize_l7policy_api_args(
             policy.copy(), create=True)
         driver_utils.require_gateway_policy_action(
-            driver, checked['action'], protocol)
+            driver, checked['action'], protocol,
+            tcp_tls_termination=tcp_tls_termination)
         l7policy.validate_policy_request_headers(checked, protocol, driver)
         if not creating_load_balancer:
             raise exceptions.ValidationException(
@@ -197,7 +213,8 @@ class ListenersController(base.BaseController):
 
     def _has_tls_container_refs(self, listener_dict):
         return (listener_dict.get('tls_certificate_id') or
-                listener_dict.get('client_ca_tls_container_id') or
+                listener_dict.get('client_ca_tls_certificate_id') or
+                listener_dict.get('client_crl_container_id') or
                 listener_dict.get('sni_containers'))
 
     def _is_tls_or_insert_header(self, listener_dict):
@@ -259,6 +276,7 @@ class ListenersController(base.BaseController):
         listener_protocol = listener_dict.get('protocol')
 
         _can_tls_offload = (
+            listener_dict.get('tcp_tls_termination') is True or
             listener_protocol == constants.PROTOCOL_TERMINATED_HTTPS or
             (listener_protocol == constants.PROTOCOL_PROMETHEUS and
              self._has_tls_container_refs(listener_dict)))
@@ -409,6 +427,13 @@ class ListenersController(base.BaseController):
 
         validate.check_hsts_options(listener_dict)
 
+        if (listener_dict.get('tcp_tls_termination') and
+                listener_dict.get('default_pool_id')):
+            pool = self.repositories.pool.get_transport_for_update(
+                lock_session, listener_dict['default_pool_id'])
+            validate.validate_tcp_redirect_pool_protocol(
+                pool.protocol, pool.tls_enabled)
+
         try:
             db_listener = self.repositories.listener.create(
                 lock_session, **listener_dict)
@@ -545,6 +570,7 @@ class ListenersController(base.BaseController):
 
     def _validate_listener_PUT(self, listener, db_listener):
         _can_tls_offload = (
+            db_listener.tcp_tls_termination or
             db_listener.protocol == constants.PROTOCOL_TERMINATED_HTTPS or
             (db_listener.protocol == constants.PROTOCOL_PROMETHEUS and
              self._has_tls_container_refs(listener.to_dict())))
@@ -570,6 +596,45 @@ class ListenersController(base.BaseController):
                 "Certificate container references are not allowed on "
                 "%s protocol listeners.") % db_listener.protocol)
 
+        if not db_listener.tcp_tls_termination:
+            self._validate_listener_tls_references(listener, db_listener)
+
+        if listener.insert_headers:
+            self._validate_insert_headers(
+                list(listener.insert_headers.keys()), db_listener.protocol)
+
+        # Validate allowed CIDRs
+        if (listener.allowed_cidrs and listener.allowed_cidrs != wtypes.Unset):
+            vip_addresses = [db_listener.load_balancer.vip.ip_address]
+            vip_addresses.extend(
+                [vip.ip_address
+                 for vip in db_listener.load_balancer.additional_vips]
+            )
+            self._validate_cidr_compatible_with_vip(
+                db_listener.load_balancer.vip,
+                vip_addresses, listener.allowed_cidrs)
+
+        # Check TLS cipher prohibit list
+        if listener.tls_ciphers:
+            rejected_ciphers = validate.check_cipher_prohibit_list(
+                listener.tls_ciphers)
+            if rejected_ciphers:
+                raise exceptions.ValidationException(detail=_(
+                    'The following ciphers have been prohibited by an '
+                    'administrator: ' + ', '.join(rejected_ciphers)))
+
+        if listener.tls_versions is not wtypes.Unset:
+            # Validate TLS versions
+            validate.check_tls_version_list(listener.tls_versions)
+            validate.check_tls_version_min(listener.tls_versions)
+
+        if listener.alpn_protocols is not wtypes.Unset:
+            # Validate ALPN protocol list
+            validate.check_alpn_protocols(listener.alpn_protocols)
+
+        validate.check_hsts_options_put(listener, db_listener)
+
+    def _validate_listener_tls_references(self, listener, db_listener):
         # Make sure we have a client CA cert if they enable client auth
         if (listener.client_authentication not in
                 (wtypes.Unset, constants.CLIENT_AUTH_NONE) and
@@ -579,10 +644,6 @@ class ListenersController(base.BaseController):
                 "Client authentication setting %s requires a client CA "
                 "container reference.") %
                 listener.client_authentication)
-
-        if listener.insert_headers:
-            self._validate_insert_headers(
-                list(listener.insert_headers.keys()), db_listener.protocol)
 
         sni_containers = listener.sni_container_refs or []
         tls_refs = list(sni_containers)
@@ -612,37 +673,57 @@ class ListenersController(base.BaseController):
         if ca_ref or crl_ref:
             self._validate_client_ca_and_crl_refs(ca_ref, crl_ref)
 
-        # Validate allowed CIDRs
-        if (listener.allowed_cidrs and listener.allowed_cidrs != wtypes.Unset):
-            vip_addresses = [db_listener.load_balancer.vip.ip_address]
-            vip_addresses.extend(
-                [vip.ip_address
-                 for vip in db_listener.load_balancer.additional_vips]
-            )
-            self._validate_cidr_compatible_with_vip(
-                db_listener.load_balancer.vip,
-                vip_addresses, listener.allowed_cidrs)
+    def _validate_tcp_tls_update(self, session, listener, updates, driver,
+                                 reopening):
+        if ('tcp_tls_termination' in updates and
+                updates['tcp_tls_termination'] is not
+                listener.tcp_tls_termination):
+            raise exceptions.ValidationException(detail=_(
+                'tcp_tls_termination can only be set at listener creation.'))
+        if not listener.tcp_tls_termination:
+            return
 
-        # Check TLS cipher prohibit list
-        if listener.tls_ciphers:
-            rejected_ciphers = validate.check_cipher_prohibit_list(
-                listener.tls_ciphers)
-            if rejected_ciphers:
+        tls_fields = {
+            'tls_certificate_id', 'sni_containers',
+            'client_ca_tls_certificate_id', 'client_authentication',
+            'client_crl_container_id', 'tls_ciphers', 'tls_versions',
+            'alpn_protocols',
+        }
+        pool_id = updates.get('default_pool_id', listener.default_pool_id)
+        admits_pool = pool_id and (reopening or
+                                   pool_id != listener.default_pool_id)
+        checks_tls = reopening or tls_fields.intersection(updates)
+        if checks_tls or admits_pool:
+            driver_utils.require_tcp_tls_termination(driver)
+        if checks_tls:
+            server_cert = updates.get('tls_certificate_id',
+                                      listener.tls_certificate_id)
+            if not server_cert:
                 raise exceptions.ValidationException(detail=_(
-                    'The following ciphers have been prohibited by an '
-                    'administrator: ' + ', '.join(rejected_ciphers)))
+                    'tcp_tls_termination requires default_tls_container_ref.'))
+            if 'sni_containers' in updates:
+                sni_certs = updates['sni_containers'] or []
+            else:
+                sni_certs = self.repositories.sni.get_refs_for_update(
+                    session, listener.id)
+            ca_ref = updates.get('client_ca_tls_certificate_id',
+                                 listener.client_ca_tls_certificate_id)
+            crl_ref = updates.get('client_crl_container_id',
+                                  listener.client_crl_container_id)
+            client_auth = updates.get('client_authentication',
+                                      listener.client_authentication)
+            if ((crl_ref or client_auth != constants.CLIENT_AUTH_NONE) and
+                    not ca_ref):
+                raise exceptions.ValidationException(detail=_(
+                    'Client authentication and revocation lists require a '
+                    'client CA certificate reference.'))
+            self._validate_tls_refs([server_cert, *sni_certs])
+            if ca_ref:
+                self._validate_client_ca_and_crl_refs(ca_ref, crl_ref)
 
-        if listener.tls_versions is not wtypes.Unset:
-            # Validate TLS version list
-            validate.check_tls_version_list(listener.tls_versions)
-            # Validate TLS versions against minimum
-            validate.check_tls_version_min(listener.tls_versions)
-
-        if listener.alpn_protocols is not wtypes.Unset:
-            # Validate ALPN protocol list
-            validate.check_alpn_protocols(listener.alpn_protocols)
-
-        validate.check_hsts_options_put(listener, db_listener)
+        if admits_pool:
+            self.repositories.l7policy.validate_tcp_redirect_pool(
+                session, listener, pool_id)
 
     def _validate_https_listener_update(
             self, session, driver, db_listener, updates):
@@ -673,7 +754,7 @@ class ListenersController(base.BaseController):
                     session, db_listener.id):
                 validate.validate_https_policy_hostname(hosts, hostname)
 
-    def _set_default_on_none(self, listener):
+    def _set_default_on_none(self, listener, tcp_tls_termination=False):
         """Reset settings to their default values if None/null was passed in
 
         A None/null value can be passed in to clear a value. PUT values
@@ -705,7 +786,7 @@ class ListenersController(base.BaseController):
         if listener.tls_versions is None:
             listener.tls_versions = (
                 CONF.api_settings.default_listener_tls_versions)
-        if listener.alpn_protocols is None:
+        if listener.alpn_protocols is None and not tcp_tls_termination:
             listener.alpn_protocols = (
                 CONF.api_settings.default_listener_alpn_protocols)
         if listener.hsts_include_subdomains is None:
@@ -731,7 +812,8 @@ class ListenersController(base.BaseController):
 
             self._validate_listener_PUT(listener, db_listener)
 
-            self._set_default_on_none(listener)
+            self._set_default_on_none(listener,
+                                      db_listener.tcp_tls_termination)
 
             if listener.default_pool_id:
                 if db_listener.protocol == lib_consts.PROTOCOL_PROMETHEUS:
@@ -756,6 +838,8 @@ class ListenersController(base.BaseController):
                 'default_http_response', db_listener.default_http_response)
             reopening = (listener_dict.get('enabled') is True and
                          not db_listener.enabled)
+            self._validate_tcp_tls_update(context.session, db_listener,
+                                          listener_dict, driver, reopening)
             if (reopening or 'default_http_response' in listener_dict or
                     'default_pool_id' in listener_dict):
                 validate.validate_default_http_response(
@@ -777,9 +861,11 @@ class ListenersController(base.BaseController):
                 for action, headers in policies:
                     driver_utils.require_gateway_policy_action(
                         driver, action, db_listener.protocol,
-                        request_header_operations=headers)
-                if (driver_utils.uses_tls_sni_policy_path(
-                        driver, db_listener.protocol) and
+                        request_header_operations=headers,
+                        tcp_tls_termination=db_listener.tcp_tls_termination)
+                if (not db_listener.tcp_tls_termination and
+                        driver_utils.uses_tls_sni_policy_path(
+                            driver, db_listener.protocol) and
                         policy_repo.has_enabled_tls_sni_suffix_rule(
                             context.session, listener_id=id)):
                     driver_utils.require_tls_sni_suffix(driver)

@@ -69,6 +69,7 @@ Response Parameters
    - project_id: project_id
    - protocol: protocol
    - protocol_port: protocol_port
+   - tcp_tls_termination: tcp_tls_termination
    - provisioning_status: provisioning_status
    - sni_container_refs: sni_container_refs
    - tags: tags
@@ -167,6 +168,7 @@ Request
    - project_id: project_id-optional-deprecated
    - protocol: protocol
    - protocol_port: protocol_port
+   - tcp_tls_termination: tcp_tls_termination
    - sni_container_refs: sni_container_refs-optional
    - tags: tags-optional
    - timeout_client_data: timeout_client_data-optional
@@ -296,6 +298,7 @@ Response Parameters
    - project_id: project_id
    - protocol: protocol
    - protocol_port: protocol_port
+   - tcp_tls_termination: tcp_tls_termination
    - provisioning_status: provisioning_status
    - sni_container_refs: sni_container_refs
    - tags: tags
@@ -380,6 +383,7 @@ Response Parameters
    - project_id: project_id
    - protocol: protocol
    - protocol_port: protocol_port
+   - tcp_tls_termination: tcp_tls_termination
    - provisioning_status: provisioning_status
    - sni_container_refs: sni_container_refs
    - tags: tags
@@ -496,6 +500,7 @@ Response Parameters
    - project_id: project_id
    - protocol: protocol
    - protocol_port: protocol_port
+   - tcp_tls_termination: tcp_tls_termination
    - provisioning_status: provisioning_status
    - sni_container_refs: sni_container_refs
    - tags: tags

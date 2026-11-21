@@ -67,7 +67,9 @@ def create_listener(listener_dict, lb_id):
     if 'client_authentication' not in listener_dict:
         listener_dict['client_authentication'] = constants.CLIENT_AUTH_NONE
 
-    if listener_dict['protocol'] == constants.PROTOCOL_TERMINATED_HTTPS:
+    tcp_tls_termination = listener_dict.get('tcp_tls_termination') is True
+    if (listener_dict['protocol'] == constants.PROTOCOL_TERMINATED_HTTPS or
+            tcp_tls_termination):
         if ('tls_ciphers' not in listener_dict or
                 listener_dict['tls_ciphers'] is None):
             listener_dict['tls_ciphers'] = (
@@ -79,6 +81,7 @@ def create_listener(listener_dict, lb_id):
         if ('alpn_protocols' not in listener_dict or
                 listener_dict['alpn_protocols'] is None):
             listener_dict['alpn_protocols'] = (
+                None if tcp_tls_termination else
                 CONF.api_settings.default_listener_alpn_protocols)
 
     if listener_dict.get('timeout_client_data') is None:

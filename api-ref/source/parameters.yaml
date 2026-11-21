@@ -1635,6 +1635,16 @@ tags-optional:
   min_version: 2.5
   required: false
   type: array
+tcp_tls_termination:
+  description: |
+    On creation, set this to true with protocol ``TCP`` and an authorized
+    ``default_tls_container_ref`` to terminate client TLS and forward the
+    decrypted stream to a plaintext TCP pool. The provider must advertise
+    ``tcp_tls_termination_v1``. The listener mode is immutable. Octavia includes
+    this field in listener responses when the mode is enabled.
+  in: body
+  required: false
+  type: boolean
 timeout_client_data:
   description: |
     Frontend client inactivity timeout in milliseconds. Default: 50000.

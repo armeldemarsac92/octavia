@@ -185,18 +185,21 @@ class L7RuleController(base.BaseController):
             protocol = db_l7policy.listener.protocol
             if db_l7policy.https_listener_hostname is not None:
                 driver_utils.require_https_listener_isolation(driver)
+            tcp_tls_termination = db_l7policy.listener.tcp_tls_termination
             driver_utils.validate_l7rule_context(
-                driver, l7rule.type, protocol)
+                driver, l7rule.type, protocol,
+                tcp_tls_termination=tcp_tls_termination)
             tcp_policy = driver_utils.uses_tls_sni_policy_path(
-                driver, protocol)
+                driver, protocol, tcp_tls_termination)
             if l7rule_dict['enabled'] or tcp_policy:
                 driver_utils.require_gateway_policy_action(
                     driver, db_l7policy.action, db_l7policy.listener.protocol,
                     request_header_operations=(
-                        db_l7policy.request_header_operations))
+                        db_l7policy.request_header_operations),
+                    tcp_tls_termination=tcp_tls_termination)
             if tcp_policy:
                 driver_utils.require_tls_sni_rule_comparison(
-                    driver, l7rule.compare_type)
+                    driver, l7rule.compare_type, tcp_tls_termination)
                 self.repositories.l7policy.validate_tcp_redirect_pool(
                     context.session, db_l7policy.listener,
                     db_l7policy.redirect_pool_id)
@@ -281,6 +284,7 @@ class L7RuleController(base.BaseController):
             context.session.refresh(db_l7rule, with_for_update=True)
             self._validate_rule_update(db_l7rule, l7rule_dict)
             protocol = db_l7policy.listener.protocol
+            tcp_tls_termination = db_l7policy.listener.tcp_tls_termination
 
             match_fields = {'type', 'compare_type', 'key', 'value', 'invert'}
             enabled = l7rule_dict.get('enabled', db_l7rule.enabled)
@@ -291,9 +295,10 @@ class L7RuleController(base.BaseController):
             driver_utils.validate_l7rule_context(
                 driver, l7rule_dict.get('type', db_l7rule.type), protocol,
                 admit_http_l7rule=(match_changed or
-                                   (enabled and not db_l7rule.enabled)))
+                                   (enabled and not db_l7rule.enabled)),
+                tcp_tls_termination=tcp_tls_termination)
             tcp_policy = driver_utils.uses_tls_sni_policy_path(
-                driver, protocol)
+                driver, protocol, tcp_tls_termination)
             if ((enabled and (not db_l7rule.enabled or match_changed)) or
                     (tcp_policy and match_changed)):
                 if db_l7policy.https_listener_hostname is not None:
@@ -301,12 +306,13 @@ class L7RuleController(base.BaseController):
                 driver_utils.require_gateway_policy_action(
                     driver, db_l7policy.action, db_l7policy.listener.protocol,
                     request_header_operations=(
-                        db_l7policy.request_header_operations))
+                        db_l7policy.request_header_operations),
+                    tcp_tls_termination=tcp_tls_termination)
                 if tcp_policy:
                     compare_type = l7rule_dict.get(
                         'compare_type', db_l7rule.compare_type)
                     driver_utils.require_tls_sni_rule_comparison(
-                        driver, compare_type)
+                        driver, compare_type, tcp_tls_termination)
                     self.repositories.l7policy.validate_tcp_redirect_pool(
                         context.session, db_l7policy.listener,
                         db_l7policy.redirect_pool_id)

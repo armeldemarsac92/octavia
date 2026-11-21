@@ -235,6 +235,34 @@ class PoolsController(base.BaseController):
                 return False
         return True
 
+    def _validate_tcp_listener_pool_update(self, session, pool_id, current,
+                                           changes, driver):
+        reopening = changes.admin_state_up is True and not current.enabled
+        if current.protocol != constants.PROTOCOL_TCP or not (
+                changes.tls_enabled is True or reopening):
+            return
+        tls_enabled = changes.tls_enabled
+        if tls_enabled is wtypes.Unset:
+            tls_enabled = current.tls_enabled
+        policy_repo = self.repositories.l7policy
+        if (self.repositories.listener.has_tcp_tls_default_pool(
+                session, pool_id) or policy_repo.get_tcp_policy_using_pool(
+                    session, pool_id, tcp_tls_termination=True)):
+            validate.validate_tcp_redirect_pool_protocol(
+                current.protocol, tls_enabled)
+            if reopening:
+                driver_utils.require_tcp_tls_termination(driver)
+
+        if (driver_utils.uses_tls_sni_policy_path(driver, current.protocol) and
+                policy_repo.get_tcp_policy_using_pool(session, pool_id)):
+            validate.validate_tcp_redirect_pool_protocol(
+                current.protocol, tls_enabled)
+            driver_utils.require_tls_sni_passthrough(driver)
+            if policy_repo.has_enabled_tls_sni_suffix_rule(
+                    session, redirect_pool_id=pool_id,
+                    tcp_tls_termination=False):
+                driver_utils.require_tls_sni_suffix(driver)
+
     def _validate_pool_request_for_udp_sctp(self, request):
         if request.session_persistence:
             if (request.session_persistence.type ==
@@ -355,6 +383,10 @@ class PoolsController(base.BaseController):
                 validate.validate_default_http_response(
                     listener.protocol, listener.default_http_response,
                     pool_dict['id'])
+                if listener.tcp_tls_termination:
+                    driver_utils.require_tcp_tls_termination(driver)
+                    validate.validate_tcp_redirect_pool_protocol(
+                        pool_dict['protocol'], pool_dict['tls_enabled'])
                 listener.provisioning_status = constants.PENDING_UPDATE
 
             db_pool = self._validate_create_pool(
@@ -587,22 +619,8 @@ class PoolsController(base.BaseController):
                 context.session, id)
             self._validate_backend_transport_update(pool, current, driver)
             self._validate_pool_PUT(pool, current)
-            if (driver_utils.uses_tls_sni_policy_path(
-                    driver, db_pool.protocol) and
-                    (pool.tls_enabled is True or pool.admin_state_up is True)):
-                policy_repo = self.repositories.l7policy
-                reopening = pool.admin_state_up is True and not current.enabled
-                if ((pool.tls_enabled is True or reopening) and
-                        policy_repo.get_tcp_policy_using_pool(
-                            context.session, id)):
-                    if pool.tls_enabled is True:
-                        raise exceptions.ValidationException(detail=_(
-                            'A TCP listener policy requires TLS passthrough '
-                            'to its pool.'))
-                    driver_utils.require_tls_sni_passthrough(driver)
-                    if policy_repo.has_enabled_tls_sni_suffix_rule(
-                            context.session, redirect_pool_id=id):
-                        driver_utils.require_tls_sni_suffix(driver)
+            self._validate_tcp_listener_pool_update(
+                context.session, id, current, pool, driver)
 
             # Prepare the data for the driver data model
             pool_dict = pool.to_dict(render_unsets=False)

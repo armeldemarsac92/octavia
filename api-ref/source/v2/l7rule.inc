@@ -101,21 +101,23 @@ If you need to express a logical OR operation between rules, then do this by
 creating multiple policies with the same action.
 
 The Amphora provider can route connections on a TCP listener by the TLS
-ClientHello server name. A ``TLS_SNI`` rule belongs to a
+ClientHello server name or by the SNI of a terminated TLS session. A
+``TLS_SNI`` rule belongs to a
 ``REDIRECT_TO_POOL`` policy targeting a TCP pool with ``tls_enabled`` set
 to ``false``. Both comparisons ignore case and accept neither a key nor
 inversion.
 
-For an exact DNS hostname, use ``EQUAL_TO``. The region must enable
-``tls_sni_passthrough_v1`` for the provider.
+For an exact DNS hostname, use ``EQUAL_TO``. TCP TLS termination requires
+``tcp_tls_termination_v1``. TCP TLS passthrough requires
+``tls_sni_passthrough_v1``.
 
 .. code-block:: json
 
    {"rule": {"type": "TLS_SNI", "compare_type": "EQUAL_TO",
              "value": "a.example.test"}}
 
-For a DNS wildcard, use ``ENDS_WITH``. The region must enable both
-``tls_sni_passthrough_v1`` and ``tls_sni_suffix_v1`` for the provider. The
+For a DNS wildcard, use ``ENDS_WITH``. TCP TLS passthrough additionally
+requires ``tls_sni_suffix_v1``. The
 wildcard matches subdomains at any depth, such as ``a.b.example.test``.
 The apex ``example.test`` is excluded. Exact matches take precedence over
 wildcards. The longest matching suffix wins among wildcards, with policy

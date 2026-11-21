@@ -178,6 +178,12 @@ class HaproxyAmphoraLoadBalancerDriver(
             else:
                 has_tcp = True
                 obj_id = loadbalancer.id
+                if (getattr(listener, 'tcp_tls_termination', False) is True
+                        and not (listener.enabled and loadbalancer.enabled)):
+                    # A disabled endpoint must close even if its certificate
+                    # has been withdrawn from the certificate manager.
+                    listeners_to_update.append(listener)
+                    continue
 
                 try:
                     certs.update({

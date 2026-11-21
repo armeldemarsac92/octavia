@@ -577,6 +577,8 @@ class Listener(base_models.BASE, base_models.IdMixin,
         sa.ForeignKey("load_balancer.id", name="fk_listener_load_balancer_id"),
         nullable=True)
     tls_certificate_id = sa.Column(sa.String(255), nullable=True)
+    tcp_tls_termination = sa.Column(sa.Boolean(), nullable=False,
+                                    server_default=sa.false())
     default_http_response = sa.Column(sa.JSON(none_as_null=True))
     https_virtual_hosts = sa.Column(sa.JSON(none_as_null=True))
     default_pool_id = sa.Column(

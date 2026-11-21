@@ -74,6 +74,10 @@ def gateway_capabilities(driver):
             getattr(driver, 'supports_backend_tls_hostname', False) is True):
         capabilities.append(
             constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME)
+    if (api_settings.allow_tls_terminated_listeners and driver.name in
+            api_settings.enabled_tcp_tls_termination_providers and
+            getattr(driver, 'supports_tcp_tls_termination', False) is True):
+        capabilities.append(constants.GATEWAY_CAPABILITY_TCP_TLS_TERMINATION)
     if (driver.name in api_settings.enabled_tls_sni_providers and
             getattr(driver, 'supports_tls_sni_passthrough', False) is True):
         capabilities.append(constants.GATEWAY_CAPABILITY_TLS_SNI)
@@ -124,9 +128,19 @@ def require_request_header_operations(driver):
                 'this provider.'))
 
 
-def uses_tls_sni_policy_path(driver, protocol):
-    return (protocol == constants.PROTOCOL_TCP and
-            getattr(driver, 'supports_tls_sni_passthrough', False) is True)
+def uses_tls_sni_policy_path(driver, protocol, tcp_tls_termination=False):
+    return protocol == constants.PROTOCOL_TCP and (
+        tcp_tls_termination is True or
+        getattr(driver, 'supports_tls_sni_passthrough', False) is True)
+
+
+def require_tcp_tls_termination(driver):
+    if (constants.GATEWAY_CAPABILITY_TCP_TLS_TERMINATION not in
+            gateway_capabilities(driver)):
+        raise exceptions.ProviderUnsupportedOptionError(
+            prov=driver.name, user_msg=_(
+                'TCP listener TLS termination is unavailable for this '
+                'provider.'))
 
 
 def require_tls_sni_passthrough(driver):
@@ -145,8 +159,10 @@ def require_tls_sni_suffix(driver):
                 'TLS SNI suffix routing is unavailable for this provider.'))
 
 
-def require_tls_sni_rule_comparison(driver, compare_type):
-    if compare_type == constants.L7RULE_COMPARE_TYPE_ENDS_WITH:
+def require_tls_sni_rule_comparison(driver, compare_type,
+                                    tcp_tls_termination=False):
+    if (not tcp_tls_termination and
+            compare_type == constants.L7RULE_COMPARE_TYPE_ENDS_WITH):
         require_tls_sni_suffix(driver)
 
 
@@ -171,7 +187,7 @@ def require_active_http_l7rule_capabilities(driver, policy_repo, session,
 
 
 def validate_l7rule_context(driver, rule_type, protocol, *,
-                            admit_http_l7rule=True):
+                            admit_http_l7rule=True, tcp_tls_termination=False):
     if rule_type in HTTP_L7RULE_CAPABILITIES:
         if protocol not in (constants.PROTOCOL_HTTP,
                             constants.PROTOCOL_TERMINATED_HTTPS):
@@ -185,23 +201,27 @@ def validate_l7rule_context(driver, rule_type, protocol, *,
         if protocol != constants.PROTOCOL_TCP:
             raise exceptions.L7RuleValidation(error=_(
                 'TLS_SNI requires a TCP listener.'))
-        if not uses_tls_sni_policy_path(driver, protocol):
+        if not uses_tls_sni_policy_path(driver, protocol, tcp_tls_termination):
             require_tls_sni_passthrough(driver)
-    elif uses_tls_sni_policy_path(driver, protocol):
+    elif uses_tls_sni_policy_path(driver, protocol, tcp_tls_termination):
         raise exceptions.L7RuleValidation(error=_(
             'TCP listener policies require TLS_SNI rules.'))
 
 
 def require_gateway_policy_action(driver, action, protocol, *,
-                                  request_header_operations=None):
+                                  request_header_operations=None,
+                                  tcp_tls_termination=False):
     if action == constants.L7POLICY_ACTION_FIXED_RESPONSE:
         validate.validate_fixed_http_protocol(protocol)
         require_fixed_http_responses(driver)
     elif action == constants.L7POLICY_ACTION_WEIGHTED_TARGETS:
         validate.validate_weighted_l7policy_protocol(protocol)
         require_weighted_targets(driver)
-    elif uses_tls_sni_policy_path(driver, protocol):
-        require_tls_sni_passthrough(driver)
+    elif uses_tls_sni_policy_path(driver, protocol, tcp_tls_termination):
+        if tcp_tls_termination:
+            require_tcp_tls_termination(driver)
+        else:
+            require_tls_sni_passthrough(driver)
         if action != constants.L7POLICY_ACTION_REDIRECT_TO_POOL:
             raise exceptions.ValidationException(detail=_(
                 'TCP listener policies require the REDIRECT_TO_POOL action.'))
@@ -409,6 +429,10 @@ def listener_dict_to_provider_dict(listener_dict, for_delete=False):
     if 'load_balancer_id' in new_listener_dict:
         new_listener_dict['loadbalancer_id'] = new_listener_dict.pop(
             'load_balancer_id')
+
+    # Preserve the existing driver payload for ordinary listeners.
+    if not new_listener_dict.get('tcp_tls_termination'):
+        new_listener_dict.pop('tcp_tls_termination', None)
 
     # Pull the certs out of the certificate manager to pass to the provider
     if 'tls_certificate_id' in new_listener_dict:
