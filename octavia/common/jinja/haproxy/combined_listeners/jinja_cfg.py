@@ -203,6 +203,11 @@ class JinjaTemplater:
                     raise driver_except.AmpVersionUnsupported(
                         version=f'HAProxy {haproxy_version}; weighted L7 '
                                 'policies require 2.2')
+                if (listener['enabled'] and
+                        'request_header_operations_by_pool' in listener):
+                    raise driver_except.AmpVersionUnsupported(
+                        version=f'HAProxy {haproxy_version}; request header '
+                                'operations require 2.2')
         if not socket_path:
             socket_path = (f'{self.base_amp_path}/'
                            f'{listeners[0].load_balancer.id}.sock')
@@ -449,6 +454,26 @@ class JinjaTemplater:
             policy, feature_compatibility, tls_enabled, tls_certs,
             available_pool_ids) for policy in policy_gen]
         ret_value['l7policies'] = l7policies
+        operations_by_pool = {}
+        for policy in l7policies:
+            operations = policy.get('request_header_operations')
+            if not operations:
+                continue
+            if 'weighted_targets' in policy:
+                pool_ids = {target['pool_id']
+                            for target in policy['weighted_targets']
+                            if 'pool_id' in target}
+            elif (policy['redirect_pool'] and
+                  policy['redirect_pool']['id'] in available_pool_ids):
+                pool_ids = {policy['redirect_pool']['id']}
+            else:
+                pool_ids = set()
+            for pool_id in pool_ids:
+                operations_by_pool.setdefault(pool_id, []).append(
+                    (policy['id'], operations))
+        if operations_by_pool:
+            ret_value['request_header_operations_by_pool'] = operations_by_pool
+
         weighted_policies = [policy for policy in l7policies
                              if 'weighted_targets' in policy]
         if weighted_policies:
@@ -650,7 +675,36 @@ class JinjaTemplater:
                     l7policy.targets, available_pool_ids)
                 ret_value['weighted_targets'] = targets
                 ret_value['total_weight'] = total
+            if l7policy.request_header_operations:
+                ret_value['request_header_operations'] = (
+                    self._transform_request_header_operations(
+                        l7policy.request_header_operations))
         return ret_value
+
+    @staticmethod
+    def _transform_request_header_operations(operations):
+        actions = {'SET': 'set-header', 'ADD': 'add-header',
+                   'REMOVE': 'del-header'}
+
+        def quote(value):
+            value = value.replace('\\', '\\\\')
+            value = value.replace('"', '\\"').replace('$', '\\$')
+            return f'"{value}"'
+
+        transformed = []
+        for operation in validate.request_header_operations(operations):
+            action = actions[operation['operation']]
+            name = quote(operation['name'])
+            if 'value' in operation:
+                # HAProxy parses a log-format expression after the config
+                # parser. Double percent signs denote literal percent signs.
+                value = operation['value'].replace('%', '%%')
+                # HAProxy treats a zero-length argument as a missing one.
+                line = f'{action} {name} {quote(value or "%[str()]")}'
+            else:
+                line = f'{action} {name}'
+            transformed.append(line)
+        return transformed
 
     @staticmethod
     def _transform_weighted_targets(targets, available_pool_ids):

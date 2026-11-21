@@ -58,12 +58,14 @@ def validate_http_policy_options_on_create(
         if (action not in (constants.L7POLICY_ACTION_FIXED_RESPONSE,
                            constants.L7POLICY_ACTION_WEIGHTED_TARGETS) and
                 policy.get('fixed_response') is None and
-                policy.get('targets') is None):
+                policy.get('targets') is None and
+                'request_header_operations' not in policy):
             continue
         checked = validate.sanitize_l7policy_api_args(
             policy.copy(), create=True)
         driver_utils.require_gateway_policy_action(
             driver, checked['action'], protocol)
+        l7policy.validate_policy_request_headers(checked, protocol, driver)
         if not creating_load_balancer:
             raise exceptions.ValidationException(
                 detail=_('Create extended policies from the L7 policy '
@@ -708,10 +710,12 @@ class ListenersController(base.BaseController):
                 driver_utils.require_fixed_http_responses(driver)
             if reopening:
                 policy_repo = self.repositories.l7policy
-                for action in policy_repo.get_enabled_gateway_actions(
-                        context.session, id):
+                policies = policy_repo.get_enabled_gateway_policies(
+                    context.session, id)
+                for action, headers in policies:
                     driver_utils.require_gateway_policy_action(
-                        driver, action, db_listener.protocol)
+                        driver, action, db_listener.protocol,
+                        request_header_operations=headers)
 
             db_listener.provisioning_status = constants.PENDING_UPDATE
 
