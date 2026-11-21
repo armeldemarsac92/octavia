@@ -71,6 +71,9 @@ until the operator enables the provider by name in that region.
 
 To stop admitting new use, remove the provider name from the option on every
 API replica. The patched workers continue to render existing configurations
-and can process their removal. Before downgrading a worker or replacing an
-Amphora with an incompatible image, clear listener defaults and convert or
-delete the affected L7 policies. Wait for those operations to finish.
+and can process their removal. Enabled matching rules require opt-in when
+added or changed. Restoring the active state of a listener with a fixed
+default or enabled extended policies also requires opt-in. Before downgrading
+a worker or replacing an Amphora with an incompatible image, clear listener
+defaults and convert or delete the affected L7 policies. Wait for those
+operations to finish.

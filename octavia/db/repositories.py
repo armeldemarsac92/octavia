@@ -1114,6 +1114,21 @@ class ListenerRepository(BaseRepository):
                 resource=data_models.Pool._name(), id=pool_id)
         return pool_db
 
+    def get_for_update(self, session, id, show_deleted=True):
+        # A plain SELECT may reuse a stale REPEATABLE READ snapshot even
+        # after the load balancer write lock has been acquired.
+        query = (session.query(self.model_class).filter_by(id=id)
+                 .options(lazyload('*')).populate_existing()
+                 .with_for_update())
+        if not show_deleted:
+            query = query.filter(
+                self.model_class.provisioning_status != consts.DELETED)
+        listener = query.one_or_none()
+        if listener is None:
+            raise exceptions.NotFound(
+                resource=data_models.Listener._name(), id=id)
+        return listener
+
     def has_default_pool(self, session, id):
         """Checks if a listener has a default pool."""
         listener = self.get(session, id=id)
@@ -1129,10 +1144,14 @@ class ListenerRepository(BaseRepository):
         if tags is not None:
             resource = session.get(self.model_class, id)
             resource.tags = tags
-        validate.validate_default_http_response(
-            listener_db.protocol, model_kwargs.get(
-                'default_http_response', listener_db.default_http_response),
-            model_kwargs.get('default_pool_id', listener_db.default_pool_id))
+        if {'default_pool_id', 'default_http_response'}.intersection(
+                model_kwargs):
+            validate.validate_default_http_response(
+                listener_db.protocol,
+                model_kwargs.get('default_http_response',
+                                 listener_db.default_http_response),
+                model_kwargs.get('default_pool_id',
+                                 listener_db.default_pool_id))
         # Verify any newly specified default_pool_id exists
         default_pool_id = model_kwargs.get('default_pool_id')
         if default_pool_id:
@@ -1913,6 +1932,19 @@ class L7PolicyRepository(BaseRepository):
         return super().get_all_orm(
             session, pagination_helper=pagination_helper,
             query_options=query_options, **filters)
+
+    def get_enabled_gateway_actions(self, session, listener_id):
+        """Read current extended actions under the listener write lock."""
+        model = self.model_class
+        return {action for action, in (
+            session.query(model.action)
+            .filter_by(listener_id=listener_id, enabled=True)
+            .filter(model.action.in_((
+                consts.L7POLICY_ACTION_FIXED_RESPONSE,
+                consts.L7POLICY_ACTION_WEIGHTED_TARGETS)))
+            .filter(model.provisioning_status.notin_((
+                consts.PENDING_DELETE, consts.DELETED)))
+            .with_for_update().all())}
 
     def get_for_update(self, session, id, show_deleted=True):
         """Load the current policy and its targets for a write transaction."""

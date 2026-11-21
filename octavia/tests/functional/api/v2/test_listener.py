@@ -551,6 +551,17 @@ class TestListener(base.BaseAPITest):
                                         l7policies=[policy], status=400)
         self.assertIn('L7 policy endpoint', response['faultstring'])
 
+    @mock.patch.object(noop_driver.NoopProviderDriver,
+                       'supports_fixed_http_responses', True)
+    def test_create_listener_rejects_nested_fixed_policy(self):
+        self.conf.config(group='api_settings',
+                         enabled_gateway_action_providers=['noop_driver'])
+        policy = {'action': 'FIXED_RESPONSE',
+                  'fixed_response': {'status_code': 500}}
+        response = self.create_listener('HTTP', 80, self.lb_id,
+                                        l7policies=[policy], status=400)
+        self.assertIn('L7 policy endpoint', response['faultstring'])
+
     def test_get(self):
         listener = self.create_listener(
             constants.PROTOCOL_HTTP, 80, self.lb_id).get(self.root_tag)
@@ -699,6 +710,12 @@ class TestListener(base.BaseAPITest):
             'listener': {'name': 'retained'}}).json['listener']
         self.assertEqual(response, retained['default_http_response'])
         self.set_lb_status(lb['id'])
+        self.put(path, {'listener': {'admin_state_up': False}})
+        self.set_lb_status(lb['id'])
+        rpc.return_value.cast.reset_mock()
+        self.put(path, {'listener': {'admin_state_up': True}}, status=501)
+        rpc.return_value.cast.assert_not_called()
+        self.assertFalse(self.get(path).json['listener']['admin_state_up'])
         cleared = self.put(path, {'listener': {
             'default_http_response': None}}).json['listener']
         self.assertIsNone(cleared.get('default_http_response'))
@@ -725,6 +742,32 @@ class TestListener(base.BaseAPITest):
             'default_pool_id': self.pool_id}}).json['listener']
         self.assertIsNone(listener.get('default_http_response'))
         self.assertEqual(self.pool_id, listener['default_pool_id'])
+
+    @mock.patch.object(noop_driver.NoopProviderDriver,
+                       'supports_fixed_http_responses', True)
+    def test_default_http_response_list_projection_and_query_fields(self):
+        self.conf.config(group='api_settings',
+                         enabled_gateway_action_providers=['noop_driver'])
+        response = {'status_code': 404}
+        listener_id = self.create_listener(
+            'HTTP', 80, self.lb_id,
+            default_http_response=response)['listener']['id']
+        listing = self.get(
+            self.LISTENERS_PATH, params={'fields': 'default_http_response'})
+        self.assertEqual([{'default_http_response': response}],
+                         listing.json['listeners'])
+        for query in (
+                {'default_http_response': 'value'},
+                {'default_http_response.status_code': '404'},
+                {'sort': 'default_http_response'},
+                {'sort_key': 'default_http_response.status_code',
+                 'marker': listener_id}):
+            with self.subTest(query=query):
+                self.get(self.LISTENERS_PATH, params=query, status=400)
+        self.conf.config(group='api_settings', allow_sorting=False)
+        self.get(self.LISTENERS_PATH, params={
+            'sort_key': 'default_http_response', 'marker': listener_id},
+            status=400)
 
     def test_default_http_response_rejects_non_http_and_invalid_status(self):
         for protocol, status_code in [('TCP', 404), ('HTTP', 503),

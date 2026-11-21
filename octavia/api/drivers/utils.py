@@ -27,6 +27,7 @@ from octavia.common import constants
 from octavia.common import data_models
 from octavia.common import exceptions
 from octavia.common.tls_utils import cert_parser
+from octavia.common import validate
 from octavia.db import api as db_api
 from octavia.db import repositories
 from octavia.i18n import _
@@ -62,6 +63,15 @@ def require_weighted_targets(driver):
             prov=driver.name, user_msg=_(
                 'Weighted L7 policy targets are unavailable for this '
                 'provider.'))
+
+
+def require_gateway_policy_action(driver, action, protocol):
+    if action == constants.L7POLICY_ACTION_FIXED_RESPONSE:
+        validate.validate_fixed_http_protocol(protocol)
+        require_fixed_http_responses(driver)
+    elif action == constants.L7POLICY_ACTION_WEIGHTED_TARGETS:
+        validate.validate_weighted_l7policy_protocol(protocol)
+        require_weighted_targets(driver)
 
 
 def call_provider(provider, driver_method, *args, **kwargs):

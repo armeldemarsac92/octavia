@@ -1268,6 +1268,33 @@ class TestPool(base.BaseAPITest):
             'project_id': self.project_id}
         self.post(self.POOLS_PATH, self._build_body(lb_pool), status=409)
 
+    @mock.patch.object(noop_driver.NoopProviderDriver,
+                       'supports_fixed_http_responses', True)
+    def test_pool_attachment_requires_listener_without_fixed_default(self):
+        self.conf.config(group='api_settings',
+                         enabled_gateway_action_providers=['noop_driver'])
+        listener_id = self.create_listener(
+            'HTTP', 81, self.lb_id,
+            default_http_response={'status_code': 404})['listener']['id']
+        self.set_lb_status(self.lb_id)
+        fields = {'listener_id': listener_id, 'protocol': 'HTTP',
+                  'lb_algorithm': 'ROUND_ROBIN'}
+        with mock.patch.object(noop_driver.NoopProviderDriver,
+                               'pool_create') as dispatch:
+            self.post(self.POOLS_PATH, {'pool': fields}, status=400)
+            dispatch.assert_not_called()
+        path = self.LISTENER_PATH.format(listener_id=listener_id)
+        listener = self.get(path).json['listener']
+        self.assertEqual({'status_code': 404},
+                         listener['default_http_response'])
+        self.assertIsNone(listener['default_pool_id'])
+
+        self.put(path, {'listener': {'default_http_response': None}})
+        self.set_lb_status(self.lb_id)
+        pool = self.post(self.POOLS_PATH, {'pool': fields}).json['pool']
+        self.assertEqual(pool['id'],
+                         self.get(path).json['listener']['default_pool_id'])
+
     def test_create_bad_protocol(self):
         lb_pool = {
             'loadbalancer_id': self.lb_id,
