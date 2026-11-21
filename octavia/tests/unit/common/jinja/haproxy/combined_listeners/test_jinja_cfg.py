@@ -15,6 +15,7 @@
 
 import copy
 import os
+from types import SimpleNamespace
 from unittest import mock
 
 from octavia_lib.common import constants as lib_consts
@@ -878,6 +879,22 @@ class TestHaproxyCfg(base.TestCase):
         self.assertEqual(
             sample_configs_combined.sample_base_expected_config(backend=be),
             rendered_obj)
+
+    def test_h2c_member_with_http11_monitor_on_another_port(self):
+        listener = sample_configs_combined.sample_listener_tuple(
+            monitor_ip_port=True, hm_host_http_check=True)
+        pool = SimpleNamespace(**listener.pools[0]._asdict(), backend_h2c=True)
+        config = self.jinja_cfg.render_loadbalancer_obj(
+            sample_configs_combined.sample_amphora_tuple(),
+            [listener._replace(default_pool=pool, pools=[pool])])
+        self.assertIn('option httpchk GET /index.html HTTP/1.1', config)
+        members = [line for line in config.splitlines()
+                   if line.lstrip().startswith('server ')]
+        self.assertEqual(2, len(members))
+        for line in members:
+            self.assertIn('port 9000', line)
+            self.assertIn('proto h2', line)
+            self.assertIn('check-proto h1', line)
 
     def test_render_template_https_real_monitor(self):
         fe = ("frontend sample_listener_id_1\n"
