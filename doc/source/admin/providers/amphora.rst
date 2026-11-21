@@ -148,6 +148,36 @@ independently of the byte limits imposed by the HTTP transport, HAProxy
 request buffers and the total size of the request headers.
 
 
+Exact HTTP method matching
+--------------------------
+
+An ``HTTP_METHOD`` L7 rule compares the request method case-sensitively
+using HAProxy's ``method`` ACL. Use ``EQUAL_TO`` on an HTTP or terminated
+HTTPS listener and leave ``key`` unset and ``invert`` false. The supported
+methods follow the Gateway API v1.7.0 ``HTTPMethod`` enum: ``GET``, ``HEAD``,
+``POST``, ``PUT``, ``DELETE``, ``CONNECT``, ``OPTIONS``, ``TRACE`` and ``PATCH``.
+Combine the method rule with a ``PATH`` rule in the same policy to require
+both. Requests that fail the method rule continue through the listener's
+ordinary policy order and default routing.
+
+Apply database migration ``e4c57b2d836f`` and upgrade the regional API and
+workers. Verify that the existing and replacement Amphorae accept the
+rendered configuration. Set the registered provider names on each regional
+API replica and reload the configuration. The opt-in defaults to empty.
+
+.. code-block:: ini
+
+   [api_settings]
+   enabled_http_method_match_providers = amphora
+
+The provider's ``gateway_capabilities`` endpoint then lists
+``http_method_match_v1``. Removing the provider name stops new rule creation,
+match changes and re-enabling. Reopening a policy, listener or load balancer
+that would activate an enabled method rule also requires enrollment. Existing
+active rules continue to serve and can be disabled or removed. Retire them
+before rolling back the workers.
+
+
 TLS passthrough by SNI
 ----------------------
 

@@ -815,10 +815,10 @@ class LoadBalancersController(base.BaseController):
 
             reopening = (load_balancer.admin_state_up is True and
                          not db_lb.enabled)
-            if (reopening and self.repositories.l7policy.has_enabled_l7rule(
-                    context.session, constants.L7RULE_TYPE_HTTP_HEADER_EXACT,
-                    load_balancer_id=id)):
-                driver_utils.require_http_header_exact(driver)
+            if reopening:
+                driver_utils.require_active_http_l7rule_capabilities(
+                    driver, self.repositories.l7policy, context.session,
+                    load_balancer_id=id)
             if (reopening and
                     driver_utils.uses_tls_sni_policy_path(
                         driver, constants.PROTOCOL_TCP) and

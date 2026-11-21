@@ -35,6 +35,13 @@ from octavia.i18n import _
 LOG = logging.getLogger(__name__)
 CONF = cfg.CONF
 
+HTTP_L7RULE_CAPABILITIES = {
+    constants.L7RULE_TYPE_HTTP_HEADER_EXACT:
+        constants.GATEWAY_CAPABILITY_HTTP_HEADER_EXACT,
+    constants.L7RULE_TYPE_HTTP_METHOD:
+        constants.GATEWAY_CAPABILITY_HTTP_METHOD_MATCH,
+}
+
 
 def gateway_capabilities(driver):
     api_settings = CONF.api_settings
@@ -55,6 +62,9 @@ def gateway_capabilities(driver):
     if (driver.name in api_settings.enabled_http_header_exact_providers and
             getattr(driver, 'supports_http_header_exact', False) is True):
         capabilities.append(constants.GATEWAY_CAPABILITY_HTTP_HEADER_EXACT)
+    if (driver.name in api_settings.enabled_http_method_match_providers and
+            getattr(driver, 'supports_http_method_match', False) is True):
+        capabilities.append(constants.GATEWAY_CAPABILITY_HTTP_METHOD_MATCH)
     if (driver.name in api_settings.enabled_backend_h2c_providers and
             getattr(driver, 'supports_backend_h2c', False) is True):
         capabilities.append(constants.GATEWAY_CAPABILITY_BACKEND_H2C)
@@ -119,25 +129,37 @@ def require_tls_sni_rule_comparison(driver, compare_type):
         require_tls_sni_suffix(driver)
 
 
-def require_http_header_exact(driver):
-    if (constants.GATEWAY_CAPABILITY_HTTP_HEADER_EXACT not in
-            gateway_capabilities(driver)):
-        raise exceptions.ProviderUnsupportedOptionError(
-            prov=driver.name, user_msg=_(
-                'Full-value exact HTTP header matching is unavailable '
-                'for this provider.'))
+def _unsupported_http_l7rule(driver, rule_type):
+    if rule_type == constants.L7RULE_TYPE_HTTP_HEADER_EXACT:
+        message = _('Full-value exact HTTP header matching is unavailable '
+                    'for this provider.')
+    else:
+        message = _('Exact HTTP method matching is unavailable for this '
+                    'provider.')
+    return exceptions.ProviderUnsupportedOptionError(prov=driver.name,
+                                                     user_msg=message)
+
+
+def require_active_http_l7rule_capabilities(driver, policy_repo, session,
+                                            **parent_filters):
+    capabilities = gateway_capabilities(driver)
+    for rule_type, capability in HTTP_L7RULE_CAPABILITIES.items():
+        if (capability not in capabilities and policy_repo.has_enabled_l7rule(
+                session, rule_type, **parent_filters)):
+            raise _unsupported_http_l7rule(driver, rule_type)
 
 
 def validate_l7rule_context(driver, rule_type, protocol, *,
-                            admit_http_header_exact=True):
-    if rule_type == constants.L7RULE_TYPE_HTTP_HEADER_EXACT:
+                            admit_http_l7rule=True):
+    if rule_type in HTTP_L7RULE_CAPABILITIES:
         if protocol not in (constants.PROTOCOL_HTTP,
                             constants.PROTOCOL_TERMINATED_HTTPS):
             raise exceptions.L7RuleValidation(error=_(
-                'HTTP_HEADER_EXACT requires an HTTP or TERMINATED_HTTPS '
-                'listener.'))
-        if admit_http_header_exact:
-            require_http_header_exact(driver)
+                '%(rule_type)s requires an HTTP or TERMINATED_HTTPS '
+                'listener.') % {'rule_type': rule_type})
+        if (admit_http_l7rule and HTTP_L7RULE_CAPABILITIES[rule_type] not in
+                gateway_capabilities(driver)):
+            raise _unsupported_http_l7rule(driver, rule_type)
     elif rule_type == constants.L7RULE_TYPE_TLS_SNI:
         if protocol != constants.PROTOCOL_TCP:
             raise exceptions.L7RuleValidation(error=_(

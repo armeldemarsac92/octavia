@@ -99,6 +99,11 @@ api_opts = [
                        'header operations. Enable only after the Octavia '
                        'services, driver and Amphora images support these '
                        'operations.')),
+    cfg.ListOpt('enabled_http_method_match_providers', default=[],
+                help=_('Provider driver names whose regional fleets '
+                       'support exact HTTP method L7 rules. Enable '
+                       'after upgrading the database, API, workers '
+                       'and Amphora fleet.')),
     cfg.ListOpt('enabled_http_header_exact_providers', default=[],
                 help=_('Provider driver names whose regional fleets '
                        'support full-value exact HTTP header L7 rules. '
