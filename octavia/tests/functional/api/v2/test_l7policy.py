@@ -2348,8 +2348,9 @@ class TestL7Policy(base.BaseAPITest):
     def test_tcp_tls_termination_admission_and_withdrawal(self, rpc, certs):
         certs.return_value = {
             'tls_cert': data_models.TLSContainer(certificate='test')}
-        lb_id = self.create_load_balancer(
-            uuidutils.generate_uuid(), provider='amphora')['loadbalancer']['id']
+        lb = self.create_load_balancer(
+            uuidutils.generate_uuid(), provider='amphora')['loadbalancer']
+        lb_id = lb['id']
         cert_ref = 'https://barbican.example.test/v1/secrets/server'
         options = {'tcp_tls_termination': True,
                    'default_tls_container_ref': cert_ref}
@@ -2365,6 +2366,13 @@ class TestL7Policy(base.BaseAPITest):
                          self.get(capability.format('amphora')).json)
         self.assertEqual({'gateway_capabilities': []},
                          self.get(capability.format('noop_driver')).json)
+        self.conf.config(group='api_settings',
+                         allow_tls_terminated_listeners=False)
+        self.assertEqual({'gateway_capabilities': []},
+                         self.get(capability.format('amphora')).json)
+        self.create_listener('TCP', 443, lb_id, status=501, **options)
+        self.conf.config(group='api_settings',
+                         allow_tls_terminated_listeners=True)
         self.create_listener('HTTP', 443, lb_id, status=400, **options)
         self.create_listener('TCP', 443, lb_id, status=400,
                              tcp_tls_termination=True)
@@ -2376,7 +2384,8 @@ class TestL7Policy(base.BaseAPITest):
         get_cert.side_effect = RuntimeError('No project access')
         self.create_listener('TCP', 443, lb_id, status=400, **options)
         get_cert.side_effect = None
-        listener = self.create_listener('TCP', 443, lb_id, **options)['listener']
+        created = self.create_listener('TCP', 443, lb_id, **options)
+        listener = created['listener']
         self.assertTrue(listener['tcp_tls_termination'])
         self.assertIsNone(listener['alpn_protocols'])
         payload = rpc.return_value.cast.call_args.kwargs['listener']
@@ -2387,7 +2396,8 @@ class TestL7Policy(base.BaseAPITest):
         path = self.LISTENER_PATH.format(listener_id=listener_id)
         lb_path = self.LB_PATH.format(lb_id=lb_id)
         self.set_lb_status(lb_id)
-        self.put(path, {'listener': {'tcp_tls_termination': False}}, status=400)
+        self.put(path, {'listener': {'tcp_tls_termination': False}},
+                 status=400)
         self.put(path, {'listener': {'default_tls_container_ref': None}},
                  status=400)
         self.create_pool(lb_id, 'TCP', 'ROUND_ROBIN', listener_id=listener_id,
@@ -2405,11 +2415,27 @@ class TestL7Policy(base.BaseAPITest):
             policy['id'], 'TLS_SNI', 'ENDS_WITH', '*.example.test')
         self.set_lb_status(lb_id)
 
+        for resource, path_to_reopen in (('loadbalancer', lb_path),
+                                         ('listener', path)):
+            self.put(path_to_reopen, {resource: {'admin_state_up': False}})
+            self.set_lb_status(lb_id)
+            rpc.return_value.cast.reset_mock()
+            get_cert.side_effect = RuntimeError('Certificate access removed')
+            self.put(path_to_reopen, {resource: {'admin_state_up': True}},
+                     status=400)
+            rpc.return_value.cast.assert_not_called()
+            self.assertFalse(self.get(path_to_reopen).json[resource][
+                'admin_state_up'])
+            get_cert.side_effect = None
+            self.put(path_to_reopen, {resource: {'admin_state_up': True}})
+            self.set_lb_status(lb_id)
+
         self.conf.config(group='api_settings',
                          enabled_tcp_tls_termination_providers=[])
         self.put(lb_path, {'loadbalancer': {'admin_state_up': False}})
         self.set_lb_status(lb_id)
-        self.put(lb_path, {'loadbalancer': {'admin_state_up': True}}, status=501)
+        self.put(lb_path, {'loadbalancer': {'admin_state_up': True}},
+                 status=501)
         self.put(path, {'listener': {'admin_state_up': False}})
         self.set_lb_status(lb_id)
         self.put(path, {'listener': {'admin_state_up': True}}, status=501)

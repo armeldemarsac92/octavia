@@ -245,6 +245,18 @@ newer). Withdrawing enrollment preserves isolation on existing listeners.
 Delete policies selecting a section before removing it from the listener.
 Replace the listener to remove isolation.
 
+``tcp_tls_termination_v1`` enables ``tcp_tls_termination: true`` on TCP
+listeners. Set the field on creation with a project-authorized
+``default_tls_container_ref``. Route the decrypted stream to TCP pools
+with ``tls_enabled: false``. Use ``TLS_SNI`` rules for exact names or
+wildcard suffixes. Connections without a match close if the listener has
+no default pool.
+
+Enable this capability with ``[api_settings] allow_tls_terminated_listeners``
+and add the provider name to ``enabled_tcp_tls_termination_providers`` after
+upgrading the regional database, API, workers, driver library and Amphora
+fleet. This enrollment is independent of TLS passthrough.
+
 .. rest_status_code:: success ../http-status.yaml
 
    - 200
