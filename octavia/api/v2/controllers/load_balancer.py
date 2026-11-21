@@ -813,6 +813,13 @@ class LoadBalancersController(base.BaseController):
 
             self._test_lb_status(context.session, id)
 
+            if (load_balancer.admin_state_up is True and not db_lb.enabled and
+                    driver_utils.uses_tls_sni_policy_path(
+                        driver, constants.PROTOCOL_TCP) and
+                    self.repositories.l7policy.has_active_tcp_sni_policy(
+                        context.session, id)):
+                driver_utils.require_tls_sni_passthrough(driver)
+
             # Prepare the data for the driver data model
             lb_dict = load_balancer.to_dict(render_unsets=False)
             lb_dict['id'] = id

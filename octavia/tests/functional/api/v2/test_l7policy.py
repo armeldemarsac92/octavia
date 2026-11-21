@@ -2106,6 +2106,14 @@ class TestL7Policy(base.BaseAPITest):
             listener['id'], 'REDIRECT_TO_POOL',
             redirect_pool_id=proxy_pool['id'], status=400)
         self.create_l7policy(listener['id'], 'REJECT', status=400)
+        rpc.return_value.cast.reset_mock()
+        invalid = self.create_l7policy(
+            listener['id'], 'REDIRECT_TO_POOL', status=400, **target,
+            rules=[{'type': 'TLS_SNI', 'compare_type': 'EQUAL_TO',
+                    'value': 'a.example.test'}])
+        self.assertIn('/v2/lbaas/l7policies/{id}/rules',
+                      invalid['faultstring'])
+        rpc.return_value.cast.assert_not_called()
         policy = self.create_l7policy(
             listener['id'], 'REDIRECT_TO_POOL', **target)['l7policy']
         policy_path = self.L7POLICY_PATH.format(l7policy_id=policy['id'])
@@ -2133,6 +2141,10 @@ class TestL7Policy(base.BaseAPITest):
         self.put(wrong_parent, {'rule': {'type': 'HOST_NAME'}}, status=404)
         self.put(policy_path, {'l7policy': {
             'redirect_pool_id': proxy_pool['id']}}, status=400)
+        self.put(policy_path, {'l7policy': {'redirect_pool_id': None}},
+                 status=400)
+        saved_policy = self.get(policy_path).json['l7policy']
+        self.assertEqual(pool['id'], saved_policy['redirect_pool_id'])
         self.put(path, {'rule': {'value': 'b.example.test'}})
         self.set_lb_status(lb_id)
         self.assertEqual('b.example.test',
@@ -2140,13 +2152,21 @@ class TestL7Policy(base.BaseAPITest):
 
         pool_path = self.POOL_PATH.format(pool_id=pool['id'])
         listener_path = self.LISTENER_PATH.format(listener_id=listener['id'])
+        lb_path = self.LB_PATH.format(lb_id=lb_id)
+        self.delete(pool_path, status=409)
         self.put(pool_path, {'pool': {'tls_enabled': True}}, status=400)
+        self.conf.config(group='api_settings', enabled_tls_sni_providers=[])
+        self.put(lb_path, {'loadbalancer': {'admin_state_up': False}})
+        self.set_lb_status(lb_id)
+
+        self.put(lb_path, {'loadbalancer': {'admin_state_up': True}},
+                 status=501)
+        saved_lb = self.get(lb_path).json['loadbalancer']
+        self.assertFalse(saved_lb['admin_state_up'])
         self.put(pool_path, {'pool': {'admin_state_up': False}})
         self.set_lb_status(lb_id)
         self.put(listener_path, {'listener': {'admin_state_up': False}})
         self.set_lb_status(lb_id)
-
-        self.conf.config(group='api_settings', enabled_tls_sni_providers=[])
         self.put(pool_path, {'pool': {'admin_state_up': True}}, status=501)
         self.put(listener_path, {'listener': {'admin_state_up': True}},
                  status=501)
@@ -2158,6 +2178,8 @@ class TestL7Policy(base.BaseAPITest):
         self.set_lb_status(lb_id)
         self.put(policy_path, {'l7policy': {'admin_state_up': True}},
                  status=501)
+        self.put(lb_path, {'loadbalancer': {'admin_state_up': True}})
+        self.set_lb_status(lb_id)
         self.delete(path)
         self.set_lb_status(lb_id)
         self.delete(policy_path)
