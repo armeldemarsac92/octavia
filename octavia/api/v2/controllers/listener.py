@@ -62,14 +62,14 @@ def validate_http_policy_options_on_create(
             continue
         checked = validate.sanitize_l7policy_api_args(
             policy.copy(), create=True)
-        l7policy.validate_policy_provider(checked['action'], protocol, driver)
-        if action != constants.L7POLICY_ACTION_WEIGHTED_TARGETS:
-            continue
+        driver_utils.require_gateway_policy_action(
+            driver, checked['action'], protocol)
         if not creating_load_balancer:
             raise exceptions.ValidationException(
-                detail=_('Create weighted targets from the L7 policy '
+                detail=_('Create extended policies from the L7 policy '
                          'endpoint after creating the listener.'))
-        if any('pool_id' in target for target in checked['targets']):
+        if (action == constants.L7POLICY_ACTION_WEIGHTED_TARGETS and
+                any('pool_id' in target for target in checked['targets'])):
             raise exceptions.ValidationException(
                 detail=_('Create weighted pool targets from the L7 policy '
                          'endpoint after creating the load balancer and '
@@ -687,18 +687,33 @@ class ListenersController(base.BaseController):
             # Load the driver early as it also provides validation
             driver = driver_factory.get_driver(provider)
 
+            self._test_lb_and_listener_statuses(
+                context.session, load_balancer_id)
+            db_listener = self.repositories.listener.get_for_update(
+                context.session, id, show_deleted=False)
+
             listener_dict = listener.to_dict(render_unsets=False)
             default_http_response = listener_dict.get(
                 'default_http_response', db_listener.default_http_response)
-            validate.validate_default_http_response(
-                db_listener.protocol, default_http_response,
-                listener_dict.get('default_pool_id',
-                                  db_listener.default_pool_id))
-            if listener_dict.get('default_http_response') is not None:
+            reopening = (listener_dict.get('enabled') is True and
+                         not db_listener.enabled)
+            if (reopening or 'default_http_response' in listener_dict or
+                    'default_pool_id' in listener_dict):
+                validate.validate_default_http_response(
+                    db_listener.protocol, default_http_response,
+                    listener_dict.get('default_pool_id',
+                                      db_listener.default_pool_id))
+            if (listener_dict.get('default_http_response') is not None or
+                    (reopening and default_http_response is not None)):
                 driver_utils.require_fixed_http_responses(driver)
+            if reopening:
+                policy_repo = self.repositories.l7policy
+                for action in policy_repo.get_enabled_gateway_actions(
+                        context.session, id):
+                    driver_utils.require_gateway_policy_action(
+                        driver, action, db_listener.protocol)
 
-            self._test_lb_and_listener_statuses(context.session,
-                                                load_balancer_id, id=id)
+            db_listener.provisioning_status = constants.PENDING_UPDATE
 
             # Prepare the data for the driver data model
             listener_dict['id'] = id

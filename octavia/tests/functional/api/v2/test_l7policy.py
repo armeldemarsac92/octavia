@@ -447,6 +447,26 @@ class TestL7Policy(base.BaseAPITest):
             with self.subTest(query=query):
                 self.get(self.L7POLICIES_PATH, params=query, status=400)
 
+    @mock.patch.object(noop_driver.NoopProviderDriver,
+                       'supports_fixed_http_responses', True)
+    def test_fixed_response_list_projection_and_query_fields(self):
+        response = {'status_code': 500}
+        policy_id = self.create_l7policy(
+            self.listener_id, 'FIXED_RESPONSE',
+            fixed_response=response)['l7policy']['id']
+        listing = self.get(
+            self.L7POLICIES_PATH, params={'fields': 'fixed_response'})
+        self.assertEqual([{'fixed_response': response}],
+                         listing.json['l7policies'])
+        for query in (
+                {'fixed_response': 'value'},
+                {'fixed_response.status_code': '500'},
+                {'sort': 'fixed_response'},
+                {'sort_key': 'fixed_response.status_code',
+                 'marker': policy_id}):
+            with self.subTest(query=query):
+                self.get(self.L7POLICIES_PATH, params=query, status=400)
+
     def test_get_all_sorted(self):
         self.create_l7policy(
             self.listener_id, constants.L7POLICY_ACTION_REJECT,
@@ -810,6 +830,40 @@ class TestL7Policy(base.BaseAPITest):
         self.assertIsNone(cleared.get('fixed_response'))
         self.set_lb_status(lb['id'])
         self.delete(weighted_path)
+
+    @mock.patch.object(noop_driver.NoopProviderDriver,
+                       'supports_fixed_http_responses', True)
+    def test_extended_policy_activation_and_matching_require_opt_in(self):
+        policy_id = self.create_l7policy(
+            self.listener_id, 'FIXED_RESPONSE',
+            fixed_response={'status_code': 500})['l7policy']['id']
+        self.set_lb_status(self.lb_id)
+        rule_id = self.create_l7rule(
+            policy_id, 'PATH', 'EQUAL_TO', '/original')['rule']['id']
+        self.set_lb_status(self.lb_id)
+        path = self.L7POLICY_PATH.format(l7policy_id=policy_id)
+        rule_path = self.L7RULE_PATH.format(l7policy_id=policy_id,
+                                            l7rule_id=rule_id)
+        self.conf.config(group='api_settings',
+                         enabled_gateway_action_providers=[])
+        self.create_l7rule(policy_id, 'PATH', 'EQUAL_TO', '/new', status=501)
+        self.put(rule_path, {'rule': {'value': '/changed'}}, status=501)
+        listener_path = self.LISTENER_PATH.format(listener_id=self.listener_id)
+        self.put(listener_path, {'listener': {'admin_state_up': False}})
+        self.set_lb_status(self.lb_id)
+        self.put(listener_path, {'listener': {'admin_state_up': True}},
+                 status=501)
+        self.put(rule_path, {'rule': {'tags': ['metadata']}})
+        self.set_lb_status(self.lb_id)
+        self.put(rule_path, {'rule': {'admin_state_up': False}})
+        self.set_lb_status(self.lb_id)
+        self.put(rule_path, {'rule': {'admin_state_up': True}}, status=501)
+        self.put(path, {'l7policy': {'admin_state_up': False}})
+        self.set_lb_status(self.lb_id)
+        self.put(path, {'l7policy': {'admin_state_up': True}}, status=501)
+        self.delete(rule_path)
+        self.set_lb_status(self.lb_id)
+        self.delete(path)
 
     @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
     @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.'

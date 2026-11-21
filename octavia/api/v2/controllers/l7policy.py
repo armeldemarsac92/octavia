@@ -39,15 +39,6 @@ CONF = cfg.CONF
 LOG = logging.getLogger(__name__)
 
 
-def validate_policy_provider(action, protocol, driver):
-    if action == constants.L7POLICY_ACTION_FIXED_RESPONSE:
-        validate.validate_fixed_http_protocol(protocol)
-        driver_utils.require_fixed_http_responses(driver)
-    elif action == constants.L7POLICY_ACTION_WEIGHTED_TARGETS:
-        validate.validate_weighted_l7policy_protocol(protocol)
-        driver_utils.require_weighted_targets(driver)
-
-
 class L7PolicyController(base.BaseController):
     RBAC_TYPE = constants.RBAC_L7POLICY
 
@@ -180,8 +171,8 @@ class L7PolicyController(base.BaseController):
             l7policy_dict = db_prepare.create_l7policy(
                 l7policy.to_dict(render_unsets=True),
                 load_balancer_id, listener_id)
-            validate_policy_provider(l7policy_dict['action'],
-                                     listener.protocol, driver)
+            driver_utils.require_gateway_policy_action(
+                driver, l7policy_dict['action'], listener.protocol)
 
             self._test_lb_and_listener_statuses(
                 lock_session, lb_id=load_balancer_id,
@@ -272,9 +263,15 @@ class L7PolicyController(base.BaseController):
             # Load the driver early as it also provides validation
             driver = driver_factory.get_driver(provider)
             action = l7policy_dict.get('action', db_l7policy.action)
-            if {'action', 'fixed_response', 'targets'}.intersection(
-                    l7policy_dict):
-                validate_policy_provider(action, listener.protocol, driver)
+            routing_changed = {'action', 'fixed_response', 'targets'}
+            enabled = l7policy_dict.get('enabled', db_l7policy.enabled)
+            activates_policy = enabled and (
+                not db_l7policy.enabled or
+                l7policy_dict.get('position', db_l7policy.position) !=
+                db_l7policy.position)
+            if activates_policy or routing_changed.intersection(l7policy_dict):
+                driver_utils.require_gateway_policy_action(
+                    driver, action, listener.protocol)
 
             # Prepare the data for the driver data model
             provider_l7policy_dict = (

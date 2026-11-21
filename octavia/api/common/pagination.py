@@ -42,6 +42,11 @@ class PaginationHelper:
                             'fields', 'page_reverse',
                             )
 
+    _non_query_fields = {
+        models.L7Policy: {'fixed_response', 'targets'},
+        models.Listener: {'default_http_response'},
+    }
+
     def __init__(self, params, sort_dir=constants.DEFAULT_SORT_DIR):
         """Pagination Helper takes params and a default sort direction
 
@@ -244,6 +249,14 @@ class PaginationHelper:
         :returns: The query with sorting/pagination/filtering added.
         """
 
+        non_query_fields = self._non_query_fields.get(model, ())
+        if (CONF.api_settings.allow_sorting or
+                (CONF.api_settings.allow_pagination and
+                 self.marker is not None)):
+            for key, _direction in self.sort_keys:
+                if key.partition('.')[0] in non_query_fields:
+                    raise exceptions.InvalidSortKey(key=key)
+
         # Add filtering
         if CONF.api_settings.allow_filtering:
             # Exclude (valid) arguments that are not used for data filtering
@@ -279,8 +292,8 @@ class PaginationHelper:
                 tag_params['not-tags-any'] = self._prepare_tags_list(
                     filter_params.pop('not-tags-any'))
 
-            # Weighted destinations are an ordered collection.
-            if model is models.L7Policy and 'targets' in filter_params:
+            if any(key.partition('.')[0] in non_query_fields
+                   for key in filter_params):
                 raise exceptions.InvalidFilterArgument()
 
             # Drop invalid arguments
@@ -313,9 +326,6 @@ class PaginationHelper:
                 current_sort_key = (
                     model.__v2_wsme__.translate_key_to_db_obj(
                         current_sort_key))
-                if (model is models.L7Policy and
-                        current_sort_key.split('.', 1)[0] == 'targets'):
-                    raise exceptions.InvalidSortKey(key=current_sort_key)
                 sort_dir_func = {
                     constants.ASC: sqlalchemy.asc,
                     constants.DESC: sqlalchemy.desc,

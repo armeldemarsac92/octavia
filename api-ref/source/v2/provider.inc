@@ -181,9 +181,15 @@ same load balancer or a ``fixed_response``. At least one weight must be
 positive. A matching request selects one target proportionally to its
 weight. A pool target must be created before it is referenced.
 
-These fields require HTTP or terminated HTTPS. Octavia returns HTTP 501 for
-an otherwise valid request to add or replace action values while the
-capability is unavailable. Stored values remain readable. Clear a listener
+These fields require HTTP or terminated HTTPS. Create extended policies
+through the L7 policy endpoint or in the initial load balancer graph. To
+add one to a standalone listener, create the listener first.
+
+Octavia returns HTTP 501 for an otherwise valid request to add or replace
+action values, reactivate an extended action, or add or change its enabled
+matching rules while the capability is unavailable. The three action fields
+are available for projection with ``fields``. Use scalar fields for sorting
+and filtering. Stored values remain readable. Clear a listener
 default with ``default_http_response: null``. Convert a policy to a stock
 action or delete it to remove its stored action data.
 

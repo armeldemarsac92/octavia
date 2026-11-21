@@ -235,8 +235,8 @@ class PoolsController(base.BaseController):
                 pool.project_id, provider = self._get_lb_project_id_provider(
                     context.session, pool.loadbalancer_id)
             elif pool.listener_id:
-                listener = self.repositories.listener.get_orm(
-                    context.session, id=pool.listener_id)
+                listener = self._get_db_listener(
+                    context.session, pool.listener_id, show_deleted=False)
                 pool.loadbalancer_id = listener.load_balancer_id
                 pool.project_id, provider = self._get_lb_project_id_provider(
                     context.session, pool.loadbalancer_id)
@@ -248,7 +248,14 @@ class PoolsController(base.BaseController):
             self._auth_validate_action(context, pool.project_id,
                                        constants.RBAC_POST)
 
-            if pool.listener_id and listener:
+            if pool.listener_id:
+                if listener is None:
+                    listener = self._get_db_listener(
+                        context.session, pool.listener_id, show_deleted=False)
+                if listener.load_balancer_id != pool.loadbalancer_id:
+                    raise exceptions.ValidationException(
+                        detail=_('The listener belongs to a different load '
+                                 'balancer.'))
                 if listener.protocol == lib_consts.PROTOCOL_PROMETHEUS:
                     raise exceptions.ListenerNoChildren(
                         protocol=lib_consts.PROTOCOL_PROMETHEUS)
@@ -279,19 +286,23 @@ class PoolsController(base.BaseController):
                 raise exceptions.QuotaException(
                     resource=data_models.Pool._name())
 
-            listener_repo = self.repositories.listener
             pool_dict = db_prepare.create_pool(
                 pool.to_dict(render_unsets=True))
 
             listener_id = pool_dict.pop('listener_id', None)
-            if listener_id:
-                if listener_repo.has_default_pool(context.session,
-                                                  listener_id):
-                    raise exceptions.DuplicatePoolEntry()
-
             self._test_lb_and_listener_statuses(
                 context.session, lb_id=pool_dict['load_balancer_id'],
-                listener_ids=[listener_id] if listener_id else [])
+                listener_ids=[])
+
+            if listener_id:
+                listener = self.repositories.listener.get_for_update(
+                    context.session, listener_id, show_deleted=False)
+                if listener.default_pool_id:
+                    raise exceptions.DuplicatePoolEntry()
+                validate.validate_default_http_response(
+                    listener.protocol, listener.default_http_response,
+                    pool_dict['id'])
+                listener.provisioning_status = constants.PENDING_UPDATE
 
             db_pool = self._validate_create_pool(
                 context.session, pool_dict, listener_id)
