@@ -133,6 +133,53 @@ class TestL7Policy(base.BaseAPITest):
         self.put(path, {'l7policy': {field: []}})
         self.assertEqual([], self.get(path).json['l7policy'][field])
 
+    @mock.patch.object(noop_driver.NoopProviderDriver,
+                       'supports_request_header_operations', True)
+    @mock.patch.object(noop_driver.NoopProviderDriver,
+                       'supports_response_header_operations', True)
+    def test_loadbalancer_reopen_checks_active_header_operations(self):
+        group = 'api_settings'
+        request_flag = 'enabled_request_header_operation_providers'
+        response_flag = 'enabled_response_header_operation_providers'
+        self.conf.config(group=group, **{
+            request_flag: ['noop_driver'], response_flag: ['noop_driver']})
+        policy = self.create_l7policy(
+            self.listener_id, 'REDIRECT_TO_POOL',
+            redirect_pool_id=self.pool_id,
+            request_header_operations=[
+                {'operation': 'REMOVE', 'name': 'x-request'}],
+            response_header_operations=[
+                {'operation': 'SET', 'name': 'x-response', 'value': 'blue'}]
+        )['l7policy']
+        self.set_lb_status(self.lb_id)
+        self.create_l7rule(policy['id'], 'PATH', 'EQUAL_TO', '/')
+        self.set_lb_status(self.lb_id)
+        lb_path = self.LB_PATH.format(lb_id=self.lb_id)
+        listener_path = self.LISTENER_PATH.format(listener_id=self.listener_id)
+        policy_path = self.L7POLICY_PATH.format(l7policy_id=policy['id'])
+
+        def set_admin_state(path, resource, enabled, status=200):
+            self.put(path, {resource: {'admin_state_up': enabled}},
+                     status=status)
+            if status == 200:
+                self.set_lb_status(self.lb_id)
+
+        set_admin_state(lb_path, 'loadbalancer', False)
+        for missing in (response_flag, request_flag):
+            self.conf.config(group=group, **{missing: []})
+            set_admin_state(lb_path, 'loadbalancer', True, status=501)
+            self.assertFalse(
+                self.get(lb_path).json['loadbalancer']['admin_state_up'])
+            self.conf.config(group=group, **{missing: ['noop_driver']})
+
+        self.conf.config(group=group, **{request_flag: [], response_flag: []})
+        set_admin_state(listener_path, 'listener', False)
+        set_admin_state(lb_path, 'loadbalancer', True)
+        set_admin_state(lb_path, 'loadbalancer', False)
+        set_admin_state(policy_path, 'l7policy', False)
+        set_admin_state(listener_path, 'listener', True)
+        set_admin_state(lb_path, 'loadbalancer', True)
+
     def test_request_header_operations_require_driver_support(self):
         self.conf.config(
             group='api_settings',

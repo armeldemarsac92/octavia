@@ -242,11 +242,17 @@ def require_gateway_policy_action(driver, action, protocol, *,
         if action != constants.L7POLICY_ACTION_REDIRECT_TO_POOL:
             raise exceptions.ValidationException(detail=_(
                 'TCP listener policies require the REDIRECT_TO_POOL action.'))
-    if request_header_operations:
+    require_policy_header_operations(
+        driver, protocol, request_header_operations, response_header_operations)
+
+
+def require_policy_header_operations(driver, protocol, request_ops,
+                                     response_ops):
+    if request_ops:
         require_request_header_operations(driver)
-    if response_header_operations:
+    if response_ops:
         require_response_header_operations(driver)
-    if request_header_operations or response_header_operations:
+    if request_ops or response_ops:
         validate.validate_header_protocol(protocol)
 
 
