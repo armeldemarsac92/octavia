@@ -1839,6 +1839,14 @@ class VRRPGroupRepository(BaseRepository):
 class L7RuleRepository(BaseRepository):
     model_class = models.L7Rule
 
+    def has_other_enabled_rules(self, session, rule):
+        model = self.model_class
+        return (session.query(model.id).filter(
+            model.l7policy_id == rule.l7policy_id, model.id != rule.id,
+            model.enabled.is_(True), model.provisioning_status.notin_(
+                (consts.PENDING_DELETE, consts.DELETED)))
+            .with_for_update().limit(1).scalar() is not None)
+
     def get_all_API_list(self, session, pagination_helper=None, **filters):
         """Get a list of L7 Rules for the API list call.
 

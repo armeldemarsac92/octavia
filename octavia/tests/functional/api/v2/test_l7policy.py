@@ -1084,6 +1084,61 @@ class TestL7Policy(base.BaseAPITest):
         self.delete(path)
 
     @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
+    @mock.patch('octavia.common.tls_utils.cert_parser.load_certificates_data')
+    def test_redirect_scope_withdrawal_blocks_widening_of_active_policy(
+            self, cert_data, rpc):
+        cert_data.return_value = {
+            'tls_cert': data_models.TLSContainer(certificate='cert 1')}
+        self.conf.config(
+            group='api_settings',
+            enabled_https_listener_isolation_providers=['amphora'],
+            enabled_gateway_action_providers=['amphora'],
+            enabled_http_request_redirect_providers=['amphora'])
+        lb = self.create_load_balancer(
+            uuidutils.generate_uuid(), provider='amphora')['loadbalancer']
+        self.set_lb_status(lb['id'])
+        listener = self.create_listener(
+            'TERMINATED_HTTPS', 443, lb['id'],
+            default_tls_container_ref=uuidutils.generate_uuid(),
+            default_http_response={'status_code': 404},
+            https_virtual_hosts=['a.example.test', 'b.example.test']
+        )['listener']
+        self.set_lb_status(lb['id'])
+        policy = self.create_l7policy(
+            listener['id'], 'REDIRECT_REQUEST',
+            redirect_request={'scheme': 'https', 'port': 443},
+            https_listener_hostname='a.example.test')['l7policy']
+        self.set_lb_status(lb['id'])
+        rule = self.create_l7rule(
+            policy['id'], 'PATH', 'EQUAL_TO', '/protected')['rule']
+        self.set_lb_status(lb['id'])
+        self.create_l7rule(policy['id'], 'HEADER', 'EQUAL_TO', 'yes',
+                           key='x-test')
+        self.set_lb_status(lb['id'])
+        rule_path = self.L7RULE_PATH.format(l7policy_id=policy['id'],
+                                            l7rule_id=rule['id'])
+        policy_path = self.L7POLICY_PATH.format(l7policy_id=policy['id'])
+        listener_path = self.LISTENER_PATH.format(listener_id=listener['id'])
+        self.conf.config(group='api_settings',
+                         enabled_http_request_redirect_providers=[])
+        rpc.return_value.cast.reset_mock()
+        self.put(rule_path, {'rule': {'admin_state_up': False}}, status=501)
+        self.delete(rule_path, status=501)
+        self.put(policy_path, {'l7policy': {
+            'https_listener_hostname': 'b.example.test'}}, status=501)
+        rpc.return_value.cast.assert_not_called()
+        self.assertTrue(self.get(rule_path).json['rule']['admin_state_up'])
+        self.assertEqual('a.example.test', self.get(policy_path).json[
+            'l7policy']['https_listener_hostname'])
+        self.put(rule_path, {'rule': {'tags': ['maintenance']}})
+        self.set_lb_status(lb['id'])
+        self.put(listener_path, {'listener': {'admin_state_up': False}})
+        self.set_lb_status(lb['id'])
+        self.delete(rule_path)
+        self.set_lb_status(lb['id'])
+        self.delete(policy_path)
+
+    @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
     def test_amphora_stored_actions_can_be_removed_after_disabling(self, _rpc):
         self.conf.config(group='api_settings',
                          enabled_gateway_action_providers=['amphora'])

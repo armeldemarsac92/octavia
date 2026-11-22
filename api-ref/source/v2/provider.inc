@@ -222,6 +222,12 @@ other UTF-8 bytes are percent encoded. An empty full replacement produces
 resulting path becomes ``/``. The top-level ``redirect_request`` field is
 omitted for other actions.
 
+For a request that matches a structured redirect, Amphora selects between
+redirects and forwarding policies by position. Legacy redirects retain
+their usual priority on other requests. Use ``REDIRECT_REQUEST`` with an
+explicit DNS hostname and effective scheme and port for a fixed destination
+that needs position-order precedence with forwarding.
+
 These fields require HTTP or terminated HTTPS. Create extended policies
 through the L7 policy endpoint or in the initial load balancer graph. To
 add one to a standalone listener, create the listener first.
