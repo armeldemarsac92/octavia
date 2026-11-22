@@ -356,8 +356,21 @@ class DeleteL7PolicyInDB(BaseDatabaseTask):
         LOG.debug("Delete in DB for l7policy id: %s ",
                   l7policy[constants.L7POLICY_ID])
         with db_apis.session().begin() as session:
-            self.l7policy_repo.delete(session,
-                                      id=l7policy[constants.L7POLICY_ID])
+            policy_id = l7policy[constants.L7POLICY_ID]
+            try:
+                policy = self.l7policy_repo.get_for_update(session, policy_id)
+            except exceptions.NotFound:
+                # A replay after commit must not release quota twice.
+                return
+            rule_count = self.l7rule_repo.count(
+                session, l7policy_id=policy_id, show_deleted=False)
+            self.l7policy_repo.delete(session, id=policy_id)
+            self.repos.decrement_quota(session, data_models.L7Policy,
+                                       policy.project_id)
+            if rule_count:
+                self.repos.decrement_quota(
+                    session, data_models.L7Rule, policy.project_id,
+                    quantity=rule_count)
 
     def revert(self, l7policy, *args, **kwargs):
         """Mark the l7policy ERROR since the delete couldn't happen
@@ -2888,80 +2901,6 @@ class CountPoolChildrenForQuota(BaseDatabaseTask):
                 self.pool_repo.get_children_count(session, pool_id))
 
         return {'HM': hm_count, 'member': member_count}
-
-
-class DecrementL7policyQuota(BaseDatabaseTask):
-    """Decrements the l7policy quota for a project.
-
-    Since sqlalchemy will likely retry by itself always revert if it fails
-    """
-
-    def execute(self, l7policy):
-        """Decrements the l7policy quota.
-
-        :param l7policy: The l7policy to decrement the quota on.
-        :returns: None
-        """
-        LOG.debug("Decrementing l7policy quota for "
-                  "project: %s ", l7policy[constants.PROJECT_ID])
-        lock_session = db_apis.get_session()
-        try:
-            self.repos.decrement_quota(lock_session,
-                                       data_models.L7Policy,
-                                       l7policy[constants.PROJECT_ID])
-            db_l7policy = self.l7policy_repo.get(
-                lock_session,
-                id=l7policy[constants.L7POLICY_ID])
-
-            if db_l7policy and db_l7policy.l7rules:
-                self.repos.decrement_quota(lock_session,
-                                           data_models.L7Rule,
-                                           l7policy[constants.PROJECT_ID],
-                                           quantity=len(db_l7policy.l7rules))
-            lock_session.commit()
-        except Exception:
-            with excutils.save_and_reraise_exception():
-                LOG.error('Failed to decrement l7policy quota for project: '
-                          '%(proj)s the project may have excess quota in use.',
-                          {'proj': l7policy[constants.L7POLICY_ID]})
-                lock_session.rollback()
-
-    def revert(self, l7policy, result, *args, **kwargs):
-        """Re-apply the quota
-
-        :param l7policy: The l7policy to decrement the quota on.
-        :returns: None
-        """
-        LOG.warning('Reverting decrement quota for l7policy on project'
-                    ' %(proj)s Project quota counts may be incorrect.',
-                    {'proj': l7policy[constants.PROJECT_ID]})
-        # Increment the quota back if this task wasn't the failure
-        if not isinstance(result, failure.Failure):
-            try:
-                session = db_apis.get_session()
-                try:
-                    self.repos.check_quota_met(session,
-                                               data_models.L7Policy,
-                                               l7policy[constants.PROJECT_ID])
-                    session.commit()
-                except Exception:
-                    session.rollback()
-                db_l7policy = self.l7policy_repo.get(
-                    session, id=l7policy[constants.L7POLICY_ID])
-                if db_l7policy:
-                    # Attempt to increment back the L7Rule quota
-                    for i in range(len(db_l7policy.l7rules)):
-                        session = db_apis.get_session()
-                        try:
-                            self.repos.check_quota_met(
-                                session, data_models.L7Rule,
-                                db_l7policy.project_id)
-                            session.commit()
-                        except Exception:
-                            session.rollback()
-            except Exception:
-                # Don't fail the revert flow
-                pass
 
 
 class DecrementL7ruleQuota(BaseDatabaseTask):

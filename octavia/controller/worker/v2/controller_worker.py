@@ -792,6 +792,12 @@ class ControllerWorker:
         :returns: None
         :raises NoResultFound: Unable to find the object
         """
+        if l7policy.get('rules'):
+            self.run_flow(
+                flow_utils.get_create_l7policy_with_initial_rules_flow,
+                store={constants.L7POLICY: l7policy})
+            return
+
         session = db_apis.get_session()
         with session.begin():
             db_l7policy = self._l7policy_repo.get(

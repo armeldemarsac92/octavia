@@ -44,6 +44,12 @@ class L7PolicyFlows:
 
         return create_l7policy_flow
 
+    def get_create_l7policy_with_initial_rules_flow(self):
+        flow = linear_flow.Flow(constants.CREATE_L7POLICY_FLOW)
+        flow.add(amphora_driver_tasks.ApplyL7PolicyWithInitialRules(
+            requires=constants.L7POLICY))
+        return flow
+
     def get_delete_l7policy_flow(self):
         """Create a flow to delete an L7 policy
 
@@ -59,8 +65,6 @@ class L7PolicyFlows:
         delete_l7policy_flow.add(amphora_driver_tasks.ListenersUpdate(
             requires=constants.LOADBALANCER_ID))
         delete_l7policy_flow.add(database_tasks.DeleteL7PolicyInDB(
-            requires=constants.L7POLICY))
-        delete_l7policy_flow.add(database_tasks.DecrementL7policyQuota(
             requires=constants.L7POLICY))
         delete_l7policy_flow.add(database_tasks.MarkLBAndListenersActiveInDB(
             requires=(constants.LOADBALANCER_ID, constants.LISTENERS)))

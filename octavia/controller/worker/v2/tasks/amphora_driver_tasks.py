@@ -27,6 +27,7 @@ from taskflow.types import failure
 from octavia.amphorae.backends.agent import agent_jinja_cfg
 from octavia.amphorae.driver_exceptions import exceptions as driver_except
 from octavia.common import constants
+from octavia.common import exceptions
 from octavia.common import utils
 from octavia.controller.worker import task_utils as task_utilities
 from octavia.db import api as db_apis
@@ -169,6 +170,69 @@ class ListenersUpdate(BaseAmphoraTask):
         for listener in loadbalancer.listeners:
             self.task_utils.mark_listener_prov_status_error(
                 listener.id)
+
+
+class ApplyL7PolicyWithInitialRules(BaseAmphoraTask):
+    """Serialize render and completion against duplicate create deliveries."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.l7policy_repo = repo.L7PolicyRepository()
+        self.l7rule_repo = repo.L7RuleRepository()
+
+    def execute(self, l7policy):
+        lb_id = l7policy[constants.LOADBALANCER_ID]
+        policy_id = l7policy[constants.L7POLICY_ID]
+        expected_ids = {rule[constants.L7RULE_ID]
+                        for rule in l7policy['rules']}
+        update_error = None
+        # Wait for the API transaction, which holds the load balancer row
+        # when it dispatches the RPC. Release it before the Amphora call so
+        # API mutations can observe the existing PENDING_UPDATE state.
+        with db_apis.session().begin() as session:
+            if not self.loadbalancer_repo.lock(session, lb_id):
+                return
+
+        # Serialize duplicate deliveries through status publication. A
+        # duplicate cannot render stale state or clear a later LB status.
+        with db_apis.session().begin() as session:
+            try:
+                policy = self.l7policy_repo.get_for_update(session, policy_id)
+            except exceptions.NotFound:
+                return
+            if policy.provisioning_status != constants.PENDING_CREATE:
+                return
+
+            rules = policy.l7rules
+            try:
+                rule_ids = {rule.id for rule in rules}
+                if policy.enabled or rule_ids != expected_ids:
+                    raise exceptions.InvalidL7PolicyArgs(msg=(
+                        'The disabled policy and its complete set of rules '
+                        'are required for initial provisioning.'))
+                loadbalancer = self.loadbalancer_repo.get(session, id=lb_id)
+                self.amphora_driver.update(loadbalancer)
+            except Exception as e:
+                update_error = e
+
+            succeeded = update_error is None
+            status = constants.ACTIVE if succeeded else constants.ERROR
+            for rule in rules:
+                if rule.provisioning_status == constants.PENDING_CREATE:
+                    operating_status = (
+                        constants.ONLINE if succeeded and rule.enabled
+                        else constants.OFFLINE)
+                    self.l7rule_repo.update(
+                        session, rule.id, provisioning_status=status,
+                        operating_status=operating_status)
+            policy.provisioning_status = status
+            self.listener_repo.prov_status_active_if_not_error(
+                session, policy.listener_id)
+            self.loadbalancer_repo.update(
+                session, lb_id, provisioning_status=constants.ACTIVE)
+
+        if update_error is not None:
+            raise update_error
 
 
 class ListenersStart(BaseAmphoraTask):

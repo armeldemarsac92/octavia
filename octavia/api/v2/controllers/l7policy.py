@@ -151,6 +151,9 @@ class L7PolicyController(base.BaseController):
                          body=l7policy_types.L7PolicyRootPOST, status_code=201)
     def post(self, l7policy_):
         """Creates a l7policy on a listener."""
+        if not l7policy_ or not l7policy_.l7policy:
+            raise exceptions.ValidationException(detail=_(
+                'The request must contain an l7policy object.'))
         l7policy = l7policy_.l7policy
         context = pecan_request.context.get('octavia_context')
 
@@ -171,13 +174,27 @@ class L7PolicyController(base.BaseController):
                 raise exceptions.ListenerNoChildren(
                     protocol=lib_consts.PROTOCOL_PROMETHEUS)
 
-            if l7policy.rules:
-                raise exceptions.ValidationException(detail=_(
-                    'Create the policy first, then use POST '
-                    '/v2/lbaas/l7policies/{id}/rules.'))
-
             # Load the driver early as it also provides validation
             driver = driver_factory.get_driver(provider)
+            if l7policy.rules:
+                capabilities = driver_utils.gateway_capabilities(driver)
+                if (listener.protocol not in (
+                        lib_consts.PROTOCOL_HTTP,
+                        lib_consts.PROTOCOL_TERMINATED_HTTPS) or
+                        constants.GATEWAY_CAPABILITY_L7POLICY_INITIAL_RULES
+                        not in capabilities):
+                    raise exceptions.ValidationException(detail=_(
+                        'Create the policy first, then use POST '
+                        '/v2/lbaas/l7policies/{id}/rules.'))
+                self._auth_validate_action(
+                    context, l7policy.project_id, constants.RBAC_POST,
+                    rbac_type=constants.RBAC_L7RULE)
+                if l7policy.admin_state_up is not False:
+                    raise exceptions.ValidationException(detail=_(
+                        'An L7 policy with initial rules must be created '
+                        'with admin_state_up set to false.'))
+                for rule in l7policy.rules:
+                    l7rule.validate_create_rule_data(rule)
 
         lock_session = context.session
         lock_session.begin()
@@ -192,6 +209,15 @@ class L7PolicyController(base.BaseController):
             l7policy_dict = db_prepare.create_l7policy(
                 l7policy.to_dict(render_unsets=True),
                 load_balancer_id, listener_id)
+            rules = l7policy_dict.pop('l7rules', []) or []
+            if rules:
+                if self.repositories.check_quota_met(
+                        lock_session, data_models.L7Rule,
+                        l7policy.project_id, count=len(rules),
+                        ensure_project=False):
+                    raise exceptions.QuotaException(
+                        resource=data_models.L7Rule._name())
+
             driver_utils.require_gateway_policy_action(
                 driver, l7policy_dict['action'], listener.protocol,
                 tcp_tls_termination=listener.tcp_tls_termination,
@@ -218,8 +244,14 @@ class L7PolicyController(base.BaseController):
             elif pool_id:
                 self._validate_redirect_pool_protocol(
                     lock_session, listener, pool_id)
+            for rule in rules:
+                driver_utils.validate_l7rule_context(
+                    driver, rule['type'], listener.protocol,
+                    tcp_tls_termination=listener.tcp_tls_termination)
             db_l7policy = self._validate_create_l7policy(
                 lock_session, l7policy_dict)
+            if rules:
+                self._create_rules(lock_session, db_l7policy, rules)
 
             # Prepare the data for the driver data model
             provider_l7policy = (
@@ -250,15 +282,17 @@ class L7PolicyController(base.BaseController):
         rules = policy_dict.pop('l7rules', []) or []
         db_policy = self._validate_create_l7policy(lock_session, policy_dict)
 
-        new_rules = []
-        for r in rules:
-            r['project_id'] = db_policy.project_id
-            new_rules.append(
-                l7rule.L7RuleController(db_policy.id)._graph_create(
-                    lock_session, r))
-
-        db_policy.l7rules = new_rules
+        if rules:
+            self._create_rules(lock_session, db_policy, rules)
         return db_policy
+
+    def _create_rules(self, lock_session, db_policy, rules):
+        controller = l7rule.L7RuleController(db_policy.id)
+        new_rules = []
+        for rule in rules:
+            rule['project_id'] = db_policy.project_id
+            new_rules.append(controller._graph_create(lock_session, rule))
+        db_policy.l7rules = new_rules
 
     @wsme_pecan.wsexpose(l7policy_types.L7PolicyRootResponse,
                          wtypes.text, body=l7policy_types.L7PolicyRootPUT,
