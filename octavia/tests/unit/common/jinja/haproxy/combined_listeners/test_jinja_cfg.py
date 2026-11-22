@@ -1746,17 +1746,22 @@ class TestHaproxyCfg(base.TestCase):
                     rule('catalog', type='PATH', compare_type='EQUAL_TO',
                          value='/catalog'),
                     rule('query', type='HTTP_QUERY_PARAM_EXACT',
-                         compare_type='EQUAL_TO', key='X&', invert=True,
+                         compare_type='EQUAL_TO', key='X^$a&', invert=True,
                          value='é\r\n'),
                 ])
                 listener = listener._replace(l7policies=[policy])
                 rendered = self.jinja_cfg.build_config(
                     amp, [listener], None, haproxy_versions=['3', '0', '19'],
                     amp_details=None)
+                name_pattern = r'(^|&)(X|%58)(\\^|%5[eE])([\$]|%24)(a|%61)%26'
+                encoded_name = '%58%5E%24%61%26'
                 self.assertIn(
-                    r"""acl query 'query,regsub("(^|&)(?:\x58|(?i:%58))"""
-                    r"""(?i:%26)(?==|&|$)","\1%58%26"),param(%58%26),"""
-                    "url_dec(1)' -m bin c3a90d0a\n", rendered)
+                    r'acl query "query,'
+                    rf'regsub(\"{name_pattern}=\",\"\\1{encoded_name}=\"),'
+                    rf'regsub(\"{name_pattern}(&|\$)\",'
+                    rf'\"\\1{encoded_name}=&\"),'
+                    f'param({encoded_name}),url_dec(1)" -m bin c3a90d0a\n',
+                    rendered)
                 self.assertIn('if catalog !query\n', rendered)
 
     def test_request_headers_use_selected_policy_in_shared_backend(self):
