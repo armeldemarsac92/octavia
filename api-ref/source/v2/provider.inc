@@ -270,6 +270,13 @@ send pool targets to the L7 policy endpoint. A PUT replaces the complete
 ordered target list. Omit the filter fields from target entries to clear
 them and omit ``targets`` itself to retain the list.
 
+After regional withdrawal, a policy update can remove filters from selected
+targets. Each retained filter must stay at its original position and pool.
+A positive-weight filter can keep its share of the ordered draw or occupy a
+smaller interval within it. A policy whose remaining filters all have zero
+weight can be reactivated. Adding a filter or expanding its reach requires
+regional enrollment.
+
 Enable the capability with
 ``[api_settings] enabled_weighted_target_request_filter_providers`` after
 upgrading the database, API, workers and Amphora images. The provider must
