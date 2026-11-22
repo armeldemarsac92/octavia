@@ -431,6 +431,7 @@ class AmphoraProviderDriver(driver_base.ProviderDriver):
         # Preserve the normal RPC payload for policies without initial rules.
         if l7policy.rules:
             policy['rules'] = l7policy.to_dict(recurse=True)['rules']
+            policy[consts.LOADBALANCER_ID] = db_listener.load_balancer_id
         self.client.cast({}, 'create_l7policy', **{consts.L7POLICY: policy})
 
     def l7policy_delete(self, l7policy):

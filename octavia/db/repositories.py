@@ -438,7 +438,8 @@ class Repositories:
                                  provisioning_status=lb_prov_status)
         return success
 
-    def check_quota_met(self, session: Session, _class, project_id, count=1):
+    def check_quota_met(self, session: Session, _class, project_id, count=1,
+                        *, ensure_project=True):
         """Checks and updates object quotas.
 
         This method makes sure the project has available quota
@@ -449,6 +450,8 @@ class Repositories:
         :param _class: Data model object requesting quota
         :param project_id: Project ID requesting quota
         :param count: Number of objects we're going to create (default=1)
+        :param ensure_project: Initialize the quota row, unless this
+            transaction has already reserved another quota for this project
         :returns: True if quota is met, False if quota was available
         """
         LOG.debug('Checking quota for project: %(proj)s object: %(obj)s',
@@ -462,7 +465,8 @@ class Repositories:
         if not project_id:
             raise exceptions.MissingProjectID()
 
-        self.quotas.ensure_project_exists(project_id)
+        if ensure_project:
+            self.quotas.ensure_project_exists(project_id)
 
         # Lock the project record in the database to block other quota checks
         #
@@ -793,6 +797,11 @@ class LoadBalancerRepository(BaseRepository):
         return super().get_all_orm(
             session, pagination_helper=pagination_helper,
             query_options=query_options, **filters)
+
+    def lock(self, session, id):
+        """Lock and return an existing load balancer ID."""
+        return (session.query(self.model_class.id).filter_by(id=id)
+                .with_for_update().scalar())
 
     def test_and_set_provisioning_status(self, session, id, status,
                                          raise_exception=False):

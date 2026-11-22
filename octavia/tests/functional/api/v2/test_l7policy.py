@@ -19,6 +19,7 @@ from octavia_lib.api.drivers import exceptions as lib_exceptions
 from octavia_lib.common import constants as lib_consts
 from oslo_config import cfg
 from oslo_config import fixture as oslo_fixture
+from oslo_policy import policy as oslo_policy
 from oslo_utils import uuidutils
 
 from octavia.amphorae.drivers.noop_driver import driver as amphora_noop
@@ -27,7 +28,9 @@ from octavia.common import constants
 import octavia.common.context
 from octavia.common import data_models
 from octavia.common import exceptions
+from octavia.common import policy
 from octavia.controller.queue.v2 import endpoints
+from octavia.db import repositories
 from octavia.tests.common import constants as c_const
 from octavia.tests.functional.api.v2 import base
 
@@ -47,6 +50,7 @@ class TestInitialL7Rules(base.BaseAPITest):
         lb = self.create_load_balancer(
             uuidutils.generate_uuid(), provider='amphora')['loadbalancer']
         self.lb_id = lb['id']
+        self.project_id = lb['project_id']
         self.set_lb_status(self.lb_id)
         listener = self.create_listener('HTTP', 80, lb_id=self.lb_id)
         self.listener_id = listener['listener']['id']
@@ -123,6 +127,130 @@ class TestInitialL7Rules(base.BaseAPITest):
                 self.session, id=self.lb_id).provisioning_status)
             self.assertEqual('ACTIVE', self.listener_repo.get(
                 self.session, id=self.listener_id).provisioning_status)
+
+    def _authenticated_project(self):
+        self.conf.config(group='api_settings', auth_strategy=constants.TESTING)
+        context = octavia.common.context.RequestContext(
+            project_id=self.project_id,
+            roles=['load-balancer_member', 'member'])
+        self.useFixture(fixtures.MockPatchObject(
+            octavia.common.context.RequestContext, 'from_environ',
+            return_value=context))
+        with self.session.begin():
+            repositories.QuotasRepository().update(
+                self.session, self.project_id,
+                quota={'l7policy': 2, 'l7rule': 2})
+
+    def _dispatch(self, operation):
+        self.rpc.cast.assert_called_once()
+        call = self.rpc.cast.call_args
+        self.assertEqual(operation, call.args[1])
+        self.rpc.cast.reset_mock()
+        getattr(endpoints.Endpoints(), operation)({}, **call.kwargs)
+
+    def test_rule_quota_reusable_after_parent_delete(self):
+        self._authenticated_project()
+        policy = self._post_policy()['l7policy']
+        self._dispatch('create_l7policy')
+        self._post_policy(status=403)
+        self.rpc.cast.assert_not_called()
+
+        path = self.L7POLICY_PATH.format(l7policy_id=policy['id'])
+        self.delete(path)
+        self._dispatch('delete_l7policy')
+        self.get(path, status=404)
+        with self.session.begin():
+            quotas = repositories.QuotasRepository().get(
+                self.session, project_id=self.project_id)
+            self.assertEqual((0, 0), (quotas.in_use_l7policy,
+                                      quotas.in_use_l7rule))
+        replacement = self._post_policy()['l7policy']
+        self.assertEqual(2, len(replacement['rules']))
+        self._dispatch('create_l7policy')
+
+    def test_rule_creation_requires_separate_permission(self):
+        self._authenticated_project()
+        enforcer = policy.Policy(use_conf=False)
+        enforcer.set_rules(oslo_policy.Rules.from_dict({
+            f'{constants.RBAC_L7POLICY}{constants.RBAC_POST}':
+                'project_id:%(project_id)s and role:member',
+            f'{constants.RBAC_L7RULE}{constants.RBAC_POST}': '!',
+        }), use_conf=False)
+        with mock.patch.object(policy, 'get_enforcer', return_value=enforcer):
+            self._post_policy(status=403)
+            self.rpc.cast.assert_not_called()
+            self._post_policy(rules=[])
+
+    def test_rule_insert_failure_rolls_back_rows_and_quota(self):
+        self._authenticated_project()
+        create_rule = repositories.L7RuleRepository.create
+
+        def fail_on_second(repo, session, **kwargs):
+            if kwargs['type'] == 'PATH':
+                self.assertEqual(1, repo.count(session))
+                raise RuntimeError('second insert failed')
+            return create_rule(repo, session, **kwargs)
+
+        with mock.patch.object(repositories.L7RuleRepository, 'create',
+                               autospec=True, side_effect=fail_on_second):
+            self._post_policy(status=500)
+        self.rpc.cast.assert_not_called()
+        with self.session.begin():
+            self.assertEqual(0, self.l7policy_repo.count(self.session))
+            self.assertEqual(0, self.l7rule_repo.count(self.session))
+            quotas = repositories.QuotasRepository().get(
+                self.session, project_id=self.project_id)
+            self.assertFalse(quotas.in_use_l7policy)
+            self.assertFalse(quotas.in_use_l7rule)
+            self.assertEqual('ACTIVE', self.lb_repo.get(
+                self.session, id=self.lb_id).provisioning_status)
+        self._post_policy()
+
+    def test_json_rule_types_and_boolean_defaults(self):
+        for bad_policy in (
+            {'rules': {}},
+            {'rules': [None]},
+            {'rules': [True]},
+            {'admin_state_up': 'false'},
+            {'admin_state_up': 0},
+            {'admin_state_up': None},
+            {'rules': [dict(self.rules[0], invert='false')]},
+            {'rules': [dict(self.rules[0], invert=None)]},
+            {'rules': [dict(self.rules[0], admin_state_up=0)]},
+            {'rules': [dict(self.rules[0], admin_state_up=None)]},
+        ):
+            with self.subTest(bad_policy=bad_policy):
+                self._post_policy(status=400, **bad_policy)
+        self.rpc.cast.assert_not_called()
+        with self.session.begin():
+            self.assertEqual(0, self.l7policy_repo.count(self.session))
+            self.assertEqual(0, self.l7rule_repo.count(self.session))
+        rule = {key: self.rules[0][key]
+                for key in ('type', 'compare_type', 'value')}
+        created = self._post_policy(rules=[rule])['l7policy']
+        path = self.L7RULES_PATH.format(l7policy_id=created['id'])
+        saved, = self.get(path).json['rules']
+        self.assertTrue(saved['admin_state_up'])
+        self.assertFalse(saved['invert'])
+
+    def test_replayed_create_ignores_active_policy_after_rule_removed(self):
+        policy = self._post_policy()['l7policy']
+        payload = self.rpc.cast.call_args.kwargs['l7policy']
+        self._dispatch('create_l7policy')
+        removed, remaining = policy['rules']
+        rule_path = self.L7RULE_PATH.format(
+            l7policy_id=policy['id'], l7rule_id=removed['id'])
+        self.delete(rule_path)
+        self._dispatch('delete_l7rule')
+
+        with mock.patch.object(amphora_noop.NoopAmphoraLoadBalancerDriver,
+                               'update') as update:
+            endpoints.Endpoints().create_l7policy({}, payload)
+        update.assert_not_called()
+        path = self.L7POLICY_PATH.format(l7policy_id=policy['id'])
+        result = self.get(path).json['l7policy']
+        self.assertEqual(('ACTIVE', [remaining]),
+                         (result['provisioning_status'], result['rules']))
 
     def test_worker_failure_marks_policy_and_initial_rules_error(self):
         policy = self._post_policy()['l7policy']

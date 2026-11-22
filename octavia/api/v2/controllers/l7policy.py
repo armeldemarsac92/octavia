@@ -151,6 +151,9 @@ class L7PolicyController(base.BaseController):
                          body=l7policy_types.L7PolicyRootPOST, status_code=201)
     def post(self, l7policy_):
         """Creates a l7policy on a listener."""
+        if not l7policy_ or not l7policy_.l7policy:
+            raise exceptions.ValidationException(detail=_(
+                'The request must contain an l7policy object.'))
         l7policy = l7policy_.l7policy
         context = pecan_request.context.get('octavia_context')
 
@@ -183,6 +186,9 @@ class L7PolicyController(base.BaseController):
                     raise exceptions.ValidationException(detail=_(
                         'Create the policy first, then use POST '
                         '/v2/lbaas/l7policies/{id}/rules.'))
+                self._auth_validate_action(
+                    context, l7policy.project_id, constants.RBAC_POST,
+                    rbac_type=constants.RBAC_L7RULE)
                 if l7policy.admin_state_up is not False:
                     raise exceptions.ValidationException(detail=_(
                         'An L7 policy with initial rules must be created '
@@ -205,12 +211,10 @@ class L7PolicyController(base.BaseController):
                 load_balancer_id, listener_id)
             rules = l7policy_dict.pop('l7rules', []) or []
             if rules:
-                rule_controller = l7rule.L7RuleController(l7policy_dict['id'])
-                rule_controller._auth_validate_action(
-                    context, l7policy.project_id, constants.RBAC_POST)
                 if self.repositories.check_quota_met(
                         lock_session, data_models.L7Rule,
-                        l7policy.project_id, count=len(rules)):
+                        l7policy.project_id, count=len(rules),
+                        ensure_project=False):
                     raise exceptions.QuotaException(
                         resource=data_models.L7Rule._name())
 
