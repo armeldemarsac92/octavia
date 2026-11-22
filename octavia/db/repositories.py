@@ -2045,9 +2045,10 @@ class L7PolicyRepository(BaseRepository):
 
     def _validate_l7policy_pool_data(self, session, l7policy):
         """Does validations on a given L7 policy."""
-        if l7policy.request_header_operations:
+        if (l7policy.request_header_operations or
+                l7policy.response_header_operations):
             listener = session.get(models.Listener, l7policy.listener_id)
-            validate.validate_request_header_protocol(listener.protocol)
+            validate.validate_header_protocol(listener.protocol)
         if l7policy.action == consts.L7POLICY_ACTION_FIXED_RESPONSE:
             listener = session.get(models.Listener, l7policy.listener_id)
             validate.validate_fixed_http_protocol(listener.protocol)
@@ -2140,10 +2141,12 @@ class L7PolicyRepository(BaseRepository):
         if protocol == consts.PROTOCOL_TCP:
             actions.append(consts.L7POLICY_ACTION_REDIRECT_TO_POOL)
         return (
-            session.query(model.action, model.request_header_operations)
+            session.query(model.action, model.request_header_operations,
+                          model.response_header_operations)
             .filter_by(listener_id=listener_id, enabled=True)
             .filter(model.action.in_(actions) |
-                    model.request_header_operations.isnot(None))
+                    model.request_header_operations.isnot(None) |
+                    model.response_header_operations.isnot(None))
             .filter(model.provisioning_status.notin_((
                 consts.PENDING_DELETE, consts.DELETED)))
             .with_for_update().all())

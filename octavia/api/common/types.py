@@ -289,12 +289,16 @@ class RequestHeaderOperations(wtypes.UserType):
     basetype = object
     name = 'request_header_operations'
 
-    @staticmethod
-    def validate(value):
+    @classmethod
+    def validate(cls, value):
         try:
-            return validate.request_header_operations(value)
+            return validate.header_operations(value, cls.name)
         except exceptions.InvalidL7PolicyArgs as e:
             raise ValueError(str(e)) from e
+
+
+class ResponseHeaderOperations(RequestHeaderOperations):
+    name = 'response_header_operations'
 
 
 class IdOnlyType(BaseType):

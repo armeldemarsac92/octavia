@@ -1765,6 +1765,33 @@ class TestHaproxyCfg(base.TestCase):
             self.assertIn(f'http-request {action} {guard}', backends)
         self.assertEqual(3, backends.count(guard))
 
+    def test_response_headers_follow_policy_to_pool_or_fixed_response(self):
+        amp = sample_configs_combined.sample_amphora_tuple()
+        listener = sample_configs_combined.sample_listener_tuple(l7=True)
+        ordinary = listener.l7policies[0]
+        pool = ordinary.redirect_pool
+        modified = ordinary._replace(
+            id='modified', action=constants.L7POLICY_ACTION_WEIGHTED_TARGETS,
+            redirect_pool=None,
+            targets=[{'weight': 3, 'pool_id': pool.id},
+                     {'weight': 1, 'fixed_response': {'status_code': 500}}],
+            response_header_operations=[
+                {'operation': 'ADD', 'name': 'X-Tag', 'value': '%[path]'}])
+        listener = listener._replace(l7policies=[modified, ordinary])
+        config = self.jinja_cfg.build_config(
+            amp, [listener], None, haproxy_versions=['3', '0', '19'],
+            amp_details=None)
+        frontend, *backends = config.split('\nbackend ')
+        line = ('http-after-response add-header "x-tag" "%%[path]" '
+                'if { var(txn.octavia_l7_policy) -m str modified }')
+        self.assertNotIn(line, frontend)
+        self.assertEqual(
+            {f'{pool.id}:{listener.id}',
+             f'{constants.HAPROXY_FIXED_RESPONSE_BACKEND_PREFIX}'
+             f'{listener.id}-weighted-500'},
+            {backend.splitlines()[0] for backend in backends
+             if line in (entry.strip() for entry in backend.splitlines())})
+
     def test_weighted_policy_keeps_unavailable_targets_in_its_range(self):
         amp = sample_configs_combined.sample_amphora_tuple()
         listener = sample_configs_combined.sample_listener_tuple(l7=True)

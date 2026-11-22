@@ -107,6 +107,24 @@ and reactivation of stored operations. Patched workers keep rendering
 live configurations while operators clear or retire those policies.
 
 
+Response header operations in L7 policies
+-----------------------------------------
+
+Apply migration ``9372b8ac16d4`` and upgrade the Octavia API, workers and
+octavia-lib. Amphorae for the provider need HAProxy 2.2 or later. Enable
+response header operations on each API replica in the region with:
+
+.. code-block:: ini
+
+   [api_settings]
+   enabled_response_header_operation_providers = amphora
+
+The provider then advertises ``response_header_operations_v1``. Only the
+winning L7 policy modifies its responses, including a programmed fixed
+response. Operators can disable the option and clear existing lists.
+Request and response header options can be enabled independently.
+
+
 Full-value exact request header matching
 ----------------------------------------
 

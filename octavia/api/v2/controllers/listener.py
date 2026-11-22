@@ -100,14 +100,15 @@ def validate_policy_options_on_create(
                                constants.L7POLICY_ACTION_WEIGHTED_TARGETS) and
                 policy.get('fixed_response') is None and
                 policy.get('targets') is None and
-                'request_header_operations' not in policy):
+                'request_header_operations' not in policy and
+                'response_header_operations' not in policy):
             continue
         checked = validate.sanitize_l7policy_api_args(
             policy.copy(), create=True)
         driver_utils.require_gateway_policy_action(
             driver, checked['action'], protocol,
             tcp_tls_termination=tcp_tls_termination)
-        l7policy.validate_policy_request_headers(checked, protocol, driver)
+        l7policy.validate_policy_headers(checked, protocol, driver)
         if not creating_load_balancer:
             raise exceptions.ValidationException(
                 detail=_('Create extended policies from the L7 policy '
@@ -858,10 +859,11 @@ class ListenersController(base.BaseController):
                         driver, policy_repo, context.session, listener_id=id)
                 policies = policy_repo.get_enabled_gateway_policies(
                     context.session, id, db_listener.protocol)
-                for action, headers in policies:
+                for action, request_ops, response_ops in policies:
                     driver_utils.require_gateway_policy_action(
                         driver, action, db_listener.protocol,
-                        request_header_operations=headers,
+                        request_header_operations=request_ops,
+                        response_header_operations=response_ops,
                         tcp_tls_termination=db_listener.tcp_tls_termination)
                 if (not db_listener.tcp_tls_termination and
                         driver_utils.uses_tls_sni_policy_path(

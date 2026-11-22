@@ -725,7 +725,8 @@ class L7Policy(BaseDataModel):
                  updated_at=None, redirect_prefix=None, tags=None,
                  redirect_http_code=None, fixed_response=None,
                  targets=None, request_header_operations=None,
-                 https_listener_hostname=None):
+                 https_listener_hostname=None,
+                 response_header_operations=None):
         self.id = id
         self.name = name
         self.description = description
@@ -748,6 +749,7 @@ class L7Policy(BaseDataModel):
         self.redirect_http_code = redirect_http_code
         self.fixed_response = fixed_response
         self.request_header_operations = request_header_operations
+        self.response_header_operations = response_header_operations
         self.https_listener_hostname = https_listener_hostname
         self.targets = targets or []
 
