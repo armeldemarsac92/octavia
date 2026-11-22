@@ -194,7 +194,8 @@ class L7PolicyController(base.BaseController):
                 load_balancer_id, listener_id)
             driver_utils.require_gateway_policy_action(
                 driver, l7policy_dict['action'], listener.protocol,
-                tcp_tls_termination=listener.tcp_tls_termination)
+                tcp_tls_termination=listener.tcp_tls_termination,
+                request_url_rewrite=l7policy_dict.get('request_url_rewrite'))
             validate_policy_headers(
                 l7policy_dict, listener.protocol, driver)
 
@@ -322,6 +323,8 @@ class L7PolicyController(base.BaseController):
                 'redirect_prefix', 'redirect_http_code',
                 'request_header_operations', 'response_header_operations',
                 'https_listener_hostname'}
+            if l7policy_dict.get('request_url_rewrite'):
+                https_routing_changed.add('request_url_rewrite')
             if (hostname is not None and
                     (reopening or
                      https_routing_changed.intersection(l7policy_dict))):
@@ -338,6 +341,38 @@ class L7PolicyController(base.BaseController):
                 reopening or
                 l7policy_dict.get('position', db_l7policy.position) !=
                 db_l7policy.position)
+            rewrite = l7policy_dict.get('request_url_rewrite',
+                                        db_l7policy.request_url_rewrite)
+            if rewrite and (
+                    'request_url_rewrite' in l7policy_dict or
+                    (enabled and (
+                        activates_policy or routing_changed.intersection(
+                            l7policy_dict) or pool_id or
+                        hostname != db_l7policy.https_listener_hostname))):
+                driver_utils.require_request_url_rewrite(
+                    driver, listener.protocol)
+            routing_changed_or_disabled = (
+                not enabled or action != db_l7policy.action or
+                ('redirect_pool_id' in l7policy_dict and
+                 pool_id != db_l7policy.redirect_pool_id) or
+                hostname != db_l7policy.https_listener_hostname or
+                ('redirect_request' in l7policy_dict and
+                 l7policy_dict['redirect_request'] !=
+                 db_l7policy.redirect_request))
+            position = l7policy_dict.get('position') or db_l7policy.position
+            if routing_changed_or_disabled or (
+                    position > db_l7policy.position and
+                    action != constants.L7POLICY_ACTION_REJECT):
+                driver_utils.require_no_exposed_request_url_rewrite(
+                    driver, policy_repo, lock_session, policy_id=id,
+                    new_position=(
+                        None if routing_changed_or_disabled else position))
+            if (action == constants.L7POLICY_ACTION_REDIRECT_REQUEST and
+                    enabled and (routing_changed_or_disabled or reopening or
+                                 position > db_l7policy.position)):
+                driver_utils.require_no_rewrite_exposed_by_ordered_redirect(
+                    driver, policy_repo, lock_session, listener_id, hostname,
+                    position, policy_id=id)
             if activates_policy or routing_changed.intersection(l7policy_dict):
                 retained_headers = {
                     field: getattr(db_l7policy, field)
@@ -375,7 +410,8 @@ class L7PolicyController(base.BaseController):
             persist_before_dispatch = (any(
                 policy_action in (constants.L7POLICY_ACTION_WEIGHTED_TARGETS,
                                   constants.L7POLICY_ACTION_REDIRECT_REQUEST)
-                for policy_action in (action, db_l7policy.action)))
+                for policy_action in (action, db_l7policy.action)) or
+                'request_url_rewrite' in l7policy_dict)
             if persist_before_dispatch:
                 # Validate target pool references before sending them to a
                 # provider. The write rolls back if the provider rejects it.
@@ -431,7 +467,10 @@ class L7PolicyController(base.BaseController):
             self._test_lb_and_listener_statuses(context.session,
                                                 lb_id=load_balancer_id,
                                                 listener_ids=[listener_id])
-            self.repositories.l7policy.update(
+            policy_repo = self.repositories.l7policy
+            driver_utils.require_no_exposed_request_url_rewrite(
+                driver, policy_repo, context.session, policy_id=id)
+            policy_repo.update(
                 context.session, db_l7policy.id,
                 provisioning_status=constants.PENDING_DELETE)
 

@@ -116,6 +116,18 @@ class TestGatewayCapabilities(base.BaseAPITest):
         self.assertEqual(empty,
                          self.get(self.capabilities_path('noop_driver')).json)
 
+    def test_request_url_rewrite_capability_requires_compatible_opt_in(self):
+        empty = {'gateway_capabilities': []}
+        self.assertEqual(empty, self.get(self.capabilities_path()).json)
+        self.conf.config(
+            group='api_settings',
+            enabled_request_url_rewrite_providers=['amphora', 'noop_driver'])
+        self.assertEqual(
+            {'gateway_capabilities': ['request_url_rewrite_v1']},
+            self.get(self.capabilities_path()).json)
+        self.assertEqual(empty,
+                         self.get(self.capabilities_path('noop_driver')).json)
+
     def test_https_listener_isolation_is_independently_enrolled(self):
         empty = {'gateway_capabilities': []}
         self.assertEqual(empty, self.get(self.capabilities_path()).json)

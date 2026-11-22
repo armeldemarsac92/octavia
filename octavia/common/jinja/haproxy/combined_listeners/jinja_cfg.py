@@ -65,13 +65,14 @@ def _quote_config_arg(value):
     return f'"{value}"'
 
 
-def _redirect_path(value):
+def _http_url_path(value):
     # Retain existing percent escapes and encode the remaining path text.
     value = re.sub(r'%(?![a-fA-F0-9]{2})', '%25', value)
     value = quote(value, safe="/%~!$&'()*+,;=:@")
     if not value.startswith('/'):
         value = '/' + value
     return value.replace('%', '%%')
+
 
 # Use POSIX ERE for Amphora builds with and without PCRE. A Content-Type
 # field can contain a comma inside a quoted parameter, but cannot be a list.
@@ -242,6 +243,11 @@ class JinjaTemplater:
                     raise driver_except.AmpVersionUnsupported(
                         version=f'HAProxy {haproxy_version}; header '
                                 'operations require 2.2')
+                if (listener['enabled'] and
+                        'request_url_rewrites_by_pool' in listener):
+                    raise driver_except.AmpVersionUnsupported(
+                        version=f'HAProxy {haproxy_version}; request URL '
+                                'rewrites require 2.2')
         if loadbalancer['enabled']:
             for listener in loadbalancer['listeners']:
                 if not listener['enabled']:
@@ -605,10 +611,12 @@ class JinjaTemplater:
         ret_value['l7policies'] = l7policies
         requests_by_pool = {}
         responses_by_backend = {}
+        rewrites_by_pool = {}
         for policy in l7policies:
             request_ops = policy.get('request_header_operations')
             response_ops = policy.get('response_header_operations')
-            if not (request_ops or response_ops):
+            rewrite = policy.get('request_url_rewrite')
+            if not (request_ops or response_ops or rewrite):
                 continue
             pool_ids = set()
             fixed_responses = set()
@@ -625,6 +633,9 @@ class JinjaTemplater:
                   policy['redirect_pool']['id'] in available_pool_ids):
                 pool_ids.add(policy['redirect_pool']['id'])
             for pool_id in pool_ids:
+                if rewrite:
+                    rewrites_by_pool.setdefault(pool_id, []).append(
+                        (policy['id'], rewrite))
                 if request_ops:
                     requests_by_pool.setdefault(pool_id, []).append(
                         (policy['id'], request_ops))
@@ -639,6 +650,8 @@ class JinjaTemplater:
                         (policy['id'], response_ops))
         if requests_by_pool:
             ret_value['request_header_operations_by_pool'] = requests_by_pool
+        if rewrites_by_pool:
+            ret_value['request_url_rewrites_by_pool'] = rewrites_by_pool
         if responses_by_backend:
             ret_value['response_header_operations_by_backend'] = (
                 responses_by_backend)
@@ -897,6 +910,10 @@ class JinjaTemplater:
                     self._transform_request_redirect(l7policy.redirect_request))
                 ret_value['redirect_http_code'] = (
                     l7policy.redirect_http_code or 302)
+            if l7policy.request_url_rewrite is not None:
+                ret_value['request_url_rewrite'] = (
+                    self._transform_request_url_rewrite(
+                        l7policy.request_url_rewrite))
             for field in ('request_header_operations',
                           'response_header_operations'):
                 operations = getattr(l7policy, field)
@@ -920,12 +937,12 @@ class JinjaTemplater:
         query_suffix = '%[pathq,regsub(^[^?]+,)]'
         if 'replace_full_path' in redirect:
             result['mode'] = 'location'
-            target += _redirect_path(redirect['replace_full_path'])
+            target += _http_url_path(redirect['replace_full_path'])
             target += query_suffix
         elif 'replace_prefix' in redirect:
             prefix = redirect['replace_prefix']
             match = prefix['match'].removesuffix('/') or '/'
-            replacement = _redirect_path(prefix['replacement']).removesuffix(
+            replacement = _http_url_path(prefix['replacement']).removesuffix(
                 '/')
             if match != '/':
                 result['match'] = _quote_config_arg(match)
@@ -943,6 +960,48 @@ class JinjaTemplater:
                 target += replacement
         result['argument'] = _quote_config_arg(target)
         return result
+
+    @staticmethod
+    def _transform_request_url_rewrite(rewrite):
+        rewrite = validate.http_request_url_rewrite(rewrite)
+        operations = []
+        if 'hostname' in rewrite:
+            hostname = rewrite['hostname']
+            # Absolute-form clients carry the authority in both places.
+            absolute_uri = _quote_config_arg(
+                r'^([A-Za-z][A-Za-z0-9+.-]*://)[^/?]*(.*)$')
+            authority = r'\1' + hostname + r'\2'
+            operations.extend((
+                f'replace-uri {absolute_uri} {_quote_config_arg(authority)}',
+                f'set-header host {_quote_config_arg(hostname)}',
+            ))
+        if 'replace_full_path' in rewrite:
+            path = _http_url_path(rewrite['replace_full_path'])
+            operations.append(f'set-path {_quote_config_arg(path)}')
+        if 'replace_prefix' in rewrite:
+            prefix = rewrite['replace_prefix']
+            match = prefix['match'].removesuffix('/') or '/'
+            replacement = _http_url_path(prefix['replacement']).removesuffix(
+                '/')
+            if match == '/':
+                if not replacement:
+                    return operations
+                pattern = r'^(/.+)?/?$'
+                replacement += r'\1'
+            else:
+                # Quote only POSIX ERE metacharacters. The optional suffix
+                # starts at a segment boundary and excludes the query.
+                literal = re.sub(r'[][\\.^$*+?{}()|]', r'\\\g<0>', match)
+                if replacement:
+                    pattern = f'^{literal}(/.*)?$'
+                    replacement += r'\1'
+                else:
+                    pattern = f'^{literal}(/(.*))?$'
+                    replacement = r'/\2'
+            operations.append(
+                f'replace-path {_quote_config_arg(pattern)} '
+                f'{_quote_config_arg(replacement)}')
+        return operations
 
     @staticmethod
     def _transform_header_operations(operations, field):

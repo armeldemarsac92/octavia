@@ -36,6 +36,8 @@ LOG = logging.getLogger(__name__)
 CONF = cfg.CONF
 HTTP_REQUEST_REDIRECT_PAYLOAD_AVAILABLE = hasattr(
     driver_dm.L7Policy(), 'redirect_request')
+REQUEST_URL_REWRITE_PAYLOAD_AVAILABLE = hasattr(
+    driver_dm.L7Policy(), 'request_url_rewrite')
 
 HTTP_L7RULE_CAPABILITIES = {
     constants.L7RULE_TYPE_HTTP_HEADER_EXACT:
@@ -77,6 +79,10 @@ def gateway_capabilities(driver):
             driver.name in redirect_providers and
             getattr(driver, 'supports_http_request_redirect', False) is True):
         capabilities.append(constants.GATEWAY_CAPABILITY_HTTP_REQUEST_REDIRECT)
+    if (REQUEST_URL_REWRITE_PAYLOAD_AVAILABLE and
+            driver.name in api_settings.enabled_request_url_rewrite_providers
+            and getattr(driver, 'supports_request_url_rewrite', False) is True):
+        capabilities.append(constants.GATEWAY_CAPABILITY_REQUEST_URL_REWRITE)
     if (driver.name in api_settings.enabled_http_header_exact_providers and
             getattr(driver, 'supports_http_header_exact', False) is True):
         capabilities.append(constants.GATEWAY_CAPABILITY_HTTP_HEADER_EXACT)
@@ -169,6 +175,39 @@ def require_response_header_operations(driver):
             prov=driver.name, user_msg=_(
                 'L7 policy response header operations are unavailable for '
                 'this provider.'))
+
+
+def request_url_rewrite_available(driver):
+    return (constants.GATEWAY_CAPABILITY_REQUEST_URL_REWRITE in
+            gateway_capabilities(driver))
+
+
+def require_request_url_rewrite(driver, protocol):
+    validate.validate_http_request_url_rewrite_protocol(protocol)
+    if not request_url_rewrite_available(driver):
+        raise exceptions.ProviderUnsupportedOptionError(
+            prov=driver.name, user_msg=_(
+                'HTTP request URL rewrites are unavailable for this '
+                'provider.'))
+
+
+def require_no_exposed_request_url_rewrite(driver, policy_repo, session,
+                                           **changes):
+    if not request_url_rewrite_available(driver):
+        protocol = policy_repo.get_rewrite_exposed_by_policy(
+            session, **changes)
+        if protocol:
+            require_request_url_rewrite(driver, protocol)
+
+
+def require_no_rewrite_exposed_by_ordered_redirect(
+        driver, policy_repo, session, listener_id, hostname, position,
+        *, policy_id=None):
+    if not request_url_rewrite_available(driver):
+        protocol = policy_repo.get_rewrite_exposed_by_ordered_redirect(
+            session, listener_id, hostname, position, policy_id=policy_id)
+        if protocol:
+            require_request_url_rewrite(driver, protocol)
 
 
 def uses_tls_sni_policy_path(driver, protocol, tcp_tls_termination=False):
@@ -265,7 +304,10 @@ def validate_l7rule_context(driver, rule_type, protocol, *,
 def require_gateway_policy_action(driver, action, protocol, *,
                                   request_header_operations=None,
                                   tcp_tls_termination=False,
-                                  response_header_operations=None):
+                                  response_header_operations=None,
+                                  request_url_rewrite=None):
+    if request_url_rewrite:
+        require_request_url_rewrite(driver, protocol)
     if action == constants.L7POLICY_ACTION_FIXED_RESPONSE:
         validate.validate_fixed_http_protocol(protocol)
         require_fixed_http_responses(driver)
@@ -808,7 +850,7 @@ def db_l7policy_to_provider_l7policy(db_l7policy):
     for field in ('request_header_operations', 'response_header_operations'):
         if not new_l7policy_dict.get(field):
             new_l7policy_dict.pop(field, None)
-    for field in ('fixed_response', 'redirect_request'):
+    for field in ('fixed_response', 'redirect_request', 'request_url_rewrite'):
         if new_l7policy_dict.get(field) is None:
             new_l7policy_dict.pop(field, None)
     return driver_dm.L7Policy.from_dict(new_l7policy_dict)
@@ -818,6 +860,9 @@ def l7policy_dict_to_provider_dict(l7policy_dict):
     new_l7policy_dict = _base_to_provider_dict(l7policy_dict,
                                                include_project_id=True)
     new_l7policy_dict['l7policy_id'] = new_l7policy_dict.pop('id')
+    # Allow ordinary policies and cleanup with an older provider library.
+    if not REQUEST_URL_REWRITE_PAYLOAD_AVAILABLE:
+        new_l7policy_dict.pop('request_url_rewrite', None)
     for attribute in ('request_header_operations',
                       'response_header_operations', 'https_listener_hostname'):
         if new_l7policy_dict.get(attribute) is None:

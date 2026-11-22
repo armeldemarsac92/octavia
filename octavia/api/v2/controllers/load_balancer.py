@@ -925,6 +925,13 @@ class LoadBalancersController(base.BaseController):
                         driver_utils.require_http_request_redirect(driver)
                     driver_utils.require_policy_header_operations(
                         driver, protocol, request_ops, response_ops)
+                if not driver_utils.request_url_rewrite_available(driver):
+                    rewrites = policy_repo.get_active_url_rewrites(
+                        context.session, load_balancer_id=id,
+                        reopening='load_balancer')
+                    if rewrites:
+                        driver_utils.require_request_url_rewrite(
+                            driver, rewrites[0].protocol)
             if (reopening and
                     driver_utils.uses_tls_sni_policy_path(
                         driver, constants.PROTOCOL_TCP) and

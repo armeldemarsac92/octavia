@@ -159,6 +159,34 @@ policies during retirement. Remove all structured policies before rolling
 back octavia-lib or Octavia.
 
 
+HTTP request URL rewrites in L7 policies
+---------------------------------------
+
+Apply migration ``36ab5d95ca27`` and upgrade Octavia, octavia-lib and the
+Amphora fleet. Enroll the provider on every regional API replica only
+after those upgrades. The renderer requires HAProxy 2.2 or newer.
+
+.. code-block:: ini
+
+   [api_settings]
+   enabled_request_url_rewrite_providers = amphora
+
+The provider advertises ``request_url_rewrite_v1`` when both the driver
+and the installed octavia-lib support the field. The winning forwarding
+policy can rewrite the HTTP hostname or path while preserving the query.
+Routing uses the original hostname, path and headers. Request-header
+operations run on the selected backend, followed by any URL rewrite.
+
+Removing regional enrollment stops new settings and changes that
+reactivate or expand a stored rewrite. Stored active rewrites continue
+to run on patched workers. If a routing change could expose a retained
+rewrite, first clear that rewrite with ``request_url_rewrite: null`` or
+disable the listener and retire the affected settings before reopening it.
+A disabled listener or load balancer can reopen with a stored rewrite
+that has no enabled match or forwarding destination. Clear existing
+settings before rolling back the services or provider library.
+
+
 Full-value exact request header matching
 ----------------------------------------
 
