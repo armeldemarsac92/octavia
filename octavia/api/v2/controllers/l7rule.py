@@ -159,7 +159,7 @@ class L7RuleController(base.BaseController):
                                        constants.RBAC_POST)
 
             try:
-                validate.l7rule_data(l7rule)
+                validate.l7rule_data(l7rule, validate_request_value=True)
             except Exception as e:
                 raise exceptions.L7RuleValidation(error=e)
 
@@ -245,8 +245,15 @@ class L7RuleController(base.BaseController):
     def _validate_rule_update(self, db_l7rule, updates):
         new_l7rule = data_models.L7Rule.from_dict(
             dict(db_l7rule.to_dict(), **updates))
+        # Changing a query rule to another type also changes how its stored
+        # value is rendered, even if the update does not supply a value.
+        leaving_query_type = (
+            db_l7rule.type == constants.L7RULE_TYPE_HTTP_QUERY_PARAM_EXACT and
+            new_l7rule.type != db_l7rule.type)
         try:
-            validate.l7rule_data(new_l7rule)
+            validate.l7rule_data(
+                new_l7rule,
+                validate_request_value='value' in updates or leaving_query_type)
         except Exception as e:
             raise exceptions.L7RuleValidation(error=e)
 

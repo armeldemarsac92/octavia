@@ -1096,7 +1096,8 @@ l7rule-type:
     or ``SSL_DN_FIELD``. The Amphora provider additionally accepts ``TLS_SNI``
     for TCP passthrough, ``HTTP_HEADER_EXACT`` for full HTTP header
     values, and ``HTTP_METHOD`` for exact HTTP methods when enabled by the
-    region.
+    region. ``HTTP_QUERY_PARAM_EXACT`` requires the regional provider
+    capability ``http_query_param_exact_v1`` for exact query parameter matches.
   in: body
   required: true
   type: string
@@ -1107,7 +1108,8 @@ l7rule-type-optional:
     or ``SSL_DN_FIELD``. The Amphora provider additionally accepts ``TLS_SNI``
     for TCP passthrough, ``HTTP_HEADER_EXACT`` for full HTTP header
     values, and ``HTTP_METHOD`` for exact HTTP methods when enabled by the
-    region.
+    region. ``HTTP_QUERY_PARAM_EXACT`` requires the regional provider
+    capability ``http_query_param_exact_v1`` for exact query parameter matches.
   in: body
   required: false
   type: string

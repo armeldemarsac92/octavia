@@ -40,6 +40,8 @@ HTTP_L7RULE_CAPABILITIES = {
         constants.GATEWAY_CAPABILITY_HTTP_HEADER_EXACT,
     constants.L7RULE_TYPE_HTTP_METHOD:
         constants.GATEWAY_CAPABILITY_HTTP_METHOD_MATCH,
+    constants.L7RULE_TYPE_HTTP_QUERY_PARAM_EXACT:
+        constants.GATEWAY_CAPABILITY_HTTP_QUERY_PARAM_EXACT,
 }
 
 
@@ -72,6 +74,11 @@ def gateway_capabilities(driver):
     if (driver.name in api_settings.enabled_http_method_match_providers and
             getattr(driver, 'supports_http_method_match', False) is True):
         capabilities.append(constants.GATEWAY_CAPABILITY_HTTP_METHOD_MATCH)
+    query_param_providers = (
+        api_settings.enabled_http_query_param_exact_providers)
+    if (driver.name in query_param_providers and
+            getattr(driver, 'supports_http_query_param_exact', False) is True):
+        capabilities.append(constants.GATEWAY_CAPABILITY_HTTP_QUERY_PARAM_EXACT)
     if (driver.name in api_settings.enabled_backend_h2c_providers and
             getattr(driver, 'supports_backend_h2c', False) is True):
         capabilities.append(constants.GATEWAY_CAPABILITY_BACKEND_H2C)
@@ -185,6 +192,9 @@ def require_tls_sni_rule_comparison(driver, compare_type,
 def _unsupported_http_l7rule(driver, rule_type):
     if rule_type == constants.L7RULE_TYPE_HTTP_HEADER_EXACT:
         message = _('Full-value exact HTTP header matching is unavailable '
+                    'for this provider.')
+    elif rule_type == constants.L7RULE_TYPE_HTTP_QUERY_PARAM_EXACT:
+        message = _('Exact HTTP query parameter matching is unavailable '
                     'for this provider.')
     else:
         message = _('Exact HTTP method matching is unavailable for this '

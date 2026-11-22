@@ -213,13 +213,38 @@ def validate_tcp_redirect_pool_protocol(protocol, tls_enabled):
 
 # Note that we can evaluate this outside the context of any L7 Policy because
 # L7 rules must be internally consistent.
-def l7rule_data(l7rule):
+def l7rule_data(l7rule, *, validate_request_value=False):
     """Raises an error if the l7rule given is invalid in some way."""
     if not l7rule.value:
         raise exceptions.InvalidL7Rule(msg=_('L7 rule type requires a value'))
+    if l7rule.type == constants.L7RULE_TYPE_HTTP_QUERY_PARAM_EXACT:
+        if l7rule.compare_type != constants.L7RULE_COMPARE_TYPE_EQUAL_TO:
+            raise exceptions.InvalidL7Rule(msg=_(
+                'HTTP_QUERY_PARAM_EXACT requires EQUAL_TO.'))
+        if not l7rule.key or not _HEADER_NAME_RE.fullmatch(l7rule.key):
+            raise exceptions.InvalidL7Rule(msg=_(
+                'HTTP_QUERY_PARAM_EXACT requires an ASCII token name of '
+                '1 to 256 characters.'))
+        if len(l7rule.value) > constants.MAX_L7RULE_QUERY_PARAM_VALUE_LENGTH:
+            raise exceptions.InvalidL7Rule(msg=_(
+                'HTTP_QUERY_PARAM_EXACT values are limited to 1024 '
+                'characters.'))
+        try:
+            l7rule.value.encode('utf-8')
+        except UnicodeEncodeError as e:
+            raise exceptions.InvalidL7Rule(msg=_(
+                'HTTP_QUERY_PARAM_EXACT requires a valid UTF-8 value.')) from e
+        return True
+
     if l7rule.key and len(l7rule.key) > constants.MAX_L7RULE_KEY_LENGTH:
         raise exceptions.InvalidL7Rule(msg=_(
             'L7 rule keys are limited to 255 characters.'))
+    # Preserve the original WSME pattern, which allows one final LF. Apply
+    # it to request values so previously stored rules can still be edited.
+    if (validate_request_value and
+            ('\r' in l7rule.value or '\n' in l7rule.value.removesuffix('\n'))):
+        raise exceptions.InvalidL7Rule(msg=_(
+            'Line breaks are unsupported in values for this L7 rule type.'))
     if l7rule.type == constants.L7RULE_TYPE_HTTP_HEADER_EXACT:
         if l7rule.compare_type != constants.L7RULE_COMPARE_TYPE_EQUAL_TO:
             raise exceptions.InvalidL7Rule(msg=_(
