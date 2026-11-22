@@ -280,9 +280,9 @@ class L7RuleController(base.BaseController):
             if l7rule.invert is None:
                 l7rule.invert = False
 
-            # A type change to HTTP_METHOD also clears an inherited header
-            # key in the partial update sent to the worker.
-            if (l7rule.type == constants.L7RULE_TYPE_HTTP_METHOD and
+            # Clear an inherited key when converting to a keyless predicate.
+            if (l7rule.type in (constants.L7RULE_TYPE_HTTP_METHOD,
+                                constants.L7RULE_TYPE_GRPC_CONTENT_TYPE) and
                     l7rule.key is wtypes.Unset):
                 l7rule.key = None
 

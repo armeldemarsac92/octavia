@@ -127,6 +127,9 @@ bind {{ lb_vip_address }}:{{ listener.protocol_port }} {{
         acl {{ l7rule.id }} req.fhdr({{ l7rule.key|safe }}) -m bin {{ l7rule.value }}
     {% elif l7rule.type == constants.L7RULE_TYPE_HTTP_QUERY_PARAM_EXACT %}
         acl {{ l7rule.id }} {{ l7rule.key|safe }} -m bin {{ l7rule.value }}
+    {% elif l7rule.type == constants.L7RULE_TYPE_GRPC_CONTENT_TYPE %}
+        acl {{ l7rule.id }}_single req.fhdr_cnt(content-type) eq 1
+        acl {{ l7rule.id }} req.fhdr(content-type) -m reg -i {{ l7rule.value|safe }}
     {% elif l7rule.type == constants.L7RULE_TYPE_HEADER %}
         acl {{ l7rule.id }} req.hdr({{ l7rule.key }}) {{
             l7rule_compare_type_macro(
@@ -154,11 +157,14 @@ bind {{ lb_vip_address }}:{{ listener.protocol_port }} {{
 {% endmacro %}
 
 
-{% macro l7rule_list_macro(l7policy) %}
+{% macro l7rule_list_macro(constants, l7policy) %}
     {% if l7policy.https_section is defined %}
         {{- " { var(txn.octavia_https_authority_section) -m str %s }"|format(l7policy.https_section) -}}
     {% endif %}
     {% for l7rule in l7policy.l7rules %}
+        {% if l7rule.type == constants.L7RULE_TYPE_GRPC_CONTENT_TYPE %}
+            {{- " " -}}{{- l7rule.id -}}{{- "_single" -}}
+        {% endif %}
         {{- " " -}}{{- l7rule_invert_macro(l7rule.invert) -}}{{- l7rule.id -}}
     {% endfor %}
 {% endmacro %}
@@ -216,7 +222,7 @@ backend {{ pool.id }}:{{ listener.id }}
           (l7policy.action == constants.L7POLICY_ACTION_REDIRECT_TO_POOL and
            l7policy.redirect_pool and
            (l7policy.redirect_pool.enabled or l7policy.redirect_pool.closed)) %}
-    http-request set-var(txn.octavia_l7_policy) str({{ l7policy.id }}) if !{ var(txn.octavia_l7_policy) -m found }{{ l7rule_list_macro(l7policy) }}
+    http-request set-var(txn.octavia_l7_policy) str({{ l7policy.id }}) if !{ var(txn.octavia_l7_policy) -m found }{{ l7rule_list_macro(constants, l7policy) }}
         {% if l7policy.weighted_targets is defined %}
     http-request set-var(txn.octavia_weighted_draw) rand({{ l7policy.total_weight }}) if {{ selected_policy_match_macro(l7policy.id) }}
         {% endif %}
@@ -232,15 +238,15 @@ backend {{ pool.id }}:{{ listener.id }}
         {% set redirect_http_code_opt = "" %}
     {% endif %}
     {% if l7policy.action == constants.L7POLICY_ACTION_REJECT %}
-    http-request deny if{{ l7rule_list_macro(l7policy) }}
+    http-request deny if{{ l7rule_list_macro(constants, l7policy) }}
     {% elif l7policy.action == constants.L7POLICY_ACTION_REDIRECT_TO_URL %}
-    redirect {{- redirect_http_code_opt }} location {{ l7policy.redirect_url }} if{{ l7rule_list_macro(l7policy) }}
+    redirect {{- redirect_http_code_opt }} location {{ l7policy.redirect_url }} if{{ l7rule_list_macro(constants, l7policy) }}
     {% elif l7policy.action == constants.L7POLICY_ACTION_REDIRECT_TO_POOL and
             (l7policy.redirect_pool.enabled or l7policy.redirect_pool.closed) %}
-    use_backend {{ l7policy.redirect_pool.id }}:{{ listener.id }} if{{ l7rule_list_macro(l7policy) }}
+    use_backend {{ l7policy.redirect_pool.id }}:{{ listener.id }} if{{ l7rule_list_macro(constants, l7policy) }}
     {% elif l7policy.action == constants.L7POLICY_ACTION_FIXED_RESPONSE %}
     {# Keep status responses in the same ordered switching stage as pools. #}
-    use_backend {{ fixed_response_backend_name(constants, listener, l7policy.id) }} if{{ l7rule_list_macro(l7policy) }}
+    use_backend {{ fixed_response_backend_name(constants, listener, l7policy.id) }} if{{ l7rule_list_macro(constants, l7policy) }}
     {% elif l7policy.weighted_targets is defined %}
         {% for target in l7policy.weighted_targets %}
             {% if target.pool_id is defined %}
@@ -251,7 +257,7 @@ backend {{ pool.id }}:{{ listener.id }}
     use_backend {{ backend }} if {{ selected_policy_match_macro(l7policy.id) }} { var(txn.octavia_weighted_draw) -m int {{ target.first }}:{{ target.last }} }
         {% endfor %}
     {% elif l7policy.action == constants.L7POLICY_ACTION_REDIRECT_PREFIX %}
-    redirect {{- redirect_http_code_opt }} prefix {{ l7policy.redirect_prefix }} if{{ l7rule_list_macro(l7policy) }}
+    redirect {{- redirect_http_code_opt }} prefix {{ l7policy.redirect_prefix }} if{{ l7rule_list_macro(constants, l7policy) }}
     {% endif %}
 {% endmacro %}
 

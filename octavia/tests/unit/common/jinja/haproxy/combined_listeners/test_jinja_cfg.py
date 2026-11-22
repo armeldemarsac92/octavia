@@ -1765,6 +1765,29 @@ class TestHaproxyCfg(base.TestCase):
                     rendered)
                 self.assertIn('if catalog !query\n', rendered)
 
+    def test_grpc_content_type_combines_full_header_with_other_rules(self):
+        amp = sample_configs_combined.sample_amphora_tuple()
+        rule = sample_configs_combined.sample_l7rule_tuple
+        for protocol in ('HTTP', 'TERMINATED_HTTPS'):
+            with self.subTest(protocol=protocol):
+                listener = sample_configs_combined.sample_listener_tuple(
+                    l7=True, proto=protocol)
+                policy = listener.l7policies[0]._replace(l7rules=[
+                    rule('method', type='HTTP_METHOD', compare_type='EQUAL_TO',
+                         value='POST'),
+                    rule('media', type='GRPC_CONTENT_TYPE',
+                         compare_type='EQUAL_TO', value='application/grpc'),
+                ])
+                listener = listener._replace(l7policies=[policy])
+                rendered = self.jinja_cfg.build_config(
+                    amp, [listener], None, haproxy_versions=['3', '0', '19'],
+                    amp_details=None)
+                self.assertIn('acl media_single req.fhdr_cnt(content-type) '
+                              'eq 1\n', rendered)
+                self.assertIn('acl media req.fhdr(content-type) -m reg -i "',
+                              rendered)
+                self.assertIn('if method media_single media\n', rendered)
+
     def test_request_headers_use_selected_policy_in_shared_backend(self):
         amp = sample_configs_combined.sample_amphora_tuple()
         listener = sample_configs_combined.sample_listener_tuple(l7=True)

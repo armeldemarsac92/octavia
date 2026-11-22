@@ -1890,7 +1890,8 @@ class L7RuleRepository(BaseRepository):
         if (rule_type in (consts.L7RULE_TYPE_HOST_NAME,
                           consts.L7RULE_TYPE_PATH,
                           consts.L7RULE_TYPE_FILE_TYPE) or
-                (rule_type == consts.L7RULE_TYPE_HTTP_METHOD and
+                (rule_type in (consts.L7RULE_TYPE_HTTP_METHOD,
+                               consts.L7RULE_TYPE_GRPC_CONTENT_TYPE) and
                  model_kwargs.get('key') is None)):
             l7rule_dict['key'] = None
             model_kwargs['key'] = None
