@@ -832,9 +832,14 @@ class LoadBalancersController(base.BaseController):
                 for tls_listener in tls_listeners:
                     listener_controller._validate_tcp_tls_update(
                         context.session, tls_listener, {}, driver, True)
+                policy_repo = self.repositories.l7policy
                 driver_utils.require_active_http_l7rule_capabilities(
-                    driver, self.repositories.l7policy, context.session,
-                    load_balancer_id=id)
+                    driver, policy_repo, context.session, load_balancer_id=id)
+                for protocol, request_ops, response_ops in (
+                        policy_repo.get_active_http_policy_headers(
+                            context.session, id)):
+                    driver_utils.require_policy_header_operations(
+                        driver, protocol, request_ops, response_ops)
             if (reopening and
                     driver_utils.uses_tls_sni_policy_path(
                         driver, constants.PROTOCOL_TCP) and

@@ -2135,6 +2135,26 @@ class L7PolicyRepository(BaseRepository):
         data_model_list = [model.to_data_model() for model in model_list]
         return data_model_list, links
 
+    def get_active_http_policy_headers(self, session, load_balancer_id):
+        """Read enabled HTTP policy headers under the load balancer lock."""
+        policy = self.model_class
+        listener = models.Listener
+        removed = (consts.PENDING_DELETE, consts.DELETED)
+        return (
+            session.query(listener.protocol, policy.request_header_operations,
+                          policy.response_header_operations)
+            .select_from(policy)
+            .join(listener, listener.id == policy.listener_id)
+            .filter(listener.load_balancer_id == load_balancer_id,
+                    listener.protocol.in_((consts.PROTOCOL_HTTP,
+                                           consts.PROTOCOL_TERMINATED_HTTPS)),
+                    listener.enabled.is_(True), policy.enabled.is_(True),
+                    listener.provisioning_status.notin_(removed),
+                    policy.provisioning_status.notin_(removed),
+                    policy.request_header_operations.isnot(None) |
+                    policy.response_header_operations.isnot(None))
+            .with_for_update().all())
+
     def get_enabled_gateway_policies(self, session, listener_id, protocol):
         """Read current extended actions under the listener write lock."""
         model = self.model_class
