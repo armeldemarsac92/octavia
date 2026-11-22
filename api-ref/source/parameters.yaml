@@ -1038,6 +1038,16 @@ l7policy-redirect-url:
   in: body
   required: true
   type: string
+l7policy-request-url-rewrite:
+  description: |
+    Request URL changes made by the winning HTTP forwarding policy.
+    Requires a DNS ``hostname``, a ``replace_full_path`` string or a
+    ``replace_prefix`` object with ``match`` and ``replacement``. A
+    hostname and one path modifier can be combined. Send ``null`` in an
+    update to clear the settings. Responses omit the field when unset.
+  in: body
+  required: false
+  type: object
 l7policy-redirect-url-optional:
   description: |
     Requests matching this policy will be redirected to this URL.

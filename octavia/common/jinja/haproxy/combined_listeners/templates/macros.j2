@@ -356,7 +356,8 @@ frontend {{ listener.id }}
     {% set structured = policies|selectattr('action', 'equalto', constants.L7POLICY_ACTION_REDIRECT_REQUEST)|list %}
     {% set select_policy = listener.weighted_response_codes is defined or
                            listener.request_header_operations_by_pool is defined or
-                           listener.response_header_operations_by_backend is defined %}
+                           listener.response_header_operations_by_backend is defined or
+                           listener.request_url_rewrites_by_pool is defined %}
     {% if select_policy or structured %}
         {% for l7policy in policies %}
             {{- l7policy_rules_macro(constants, l7policy, listener) -}}
@@ -557,6 +558,11 @@ backend {{ pool.id }}:{{ listener.id }}
     {% endif %}
 {{ policy_response_headers(listener, 'pool', pool.id) -}}
     {% for policy_id, operations in listener.get('request_header_operations_by_pool', {}).get(pool.id, []) %}
+        {% for operation in operations %}
+    http-request {{ operation|safe }} if {{ selected_policy_match_macro(policy_id) }}
+        {% endfor %}
+    {% endfor %}
+    {% for policy_id, operations in listener.get('request_url_rewrites_by_pool', {}).get(pool.id, []) %}
         {% for operation in operations %}
     http-request {{ operation|safe }} if {{ selected_policy_match_macro(policy_id) }}
         {% endfor %}

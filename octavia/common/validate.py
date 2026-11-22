@@ -541,14 +541,14 @@ def validate_header_protocol(protocol):
                      'TERMINATED_HTTPS listener.'))
 
 
-HTTP_REDIRECT_PATH_RE = re.compile(
+HTTP_URL_PATH_RE = re.compile(
     r"/(?:[a-zA-Z0-9/._~!$&'()*+,;=:@-]|%[a-fA-F0-9]{2})*")
+_HTTP_URL_MODIFIER_FIELDS = {'hostname', 'replace_full_path', 'replace_prefix'}
 
 
 def http_request_redirect(redirect):
-    if not isinstance(redirect, dict) or redirect.keys() - {
-            'scheme', 'port', 'hostname', 'replace_full_path',
-            'replace_prefix'}:
+    if (not isinstance(redirect, dict) or
+            redirect.keys() - (_HTTP_URL_MODIFIER_FIELDS | {'scheme', 'port'})):
         raise exceptions.InvalidL7PolicyArgs(
             msg=_('Invalid redirect_request fields.'))
     if redirect.get('scheme') not in ('http', 'https'):
@@ -558,40 +558,58 @@ def http_request_redirect(redirect):
     if type(port) is not int or not 1 <= port <= constants.MAX_PORT_NUMBER:
         raise exceptions.InvalidL7PolicyArgs(
             msg=_('redirect_request.port must be an integer from 1 to 65535.'))
-    if 'hostname' in redirect:
-        hostname = redirect['hostname']
+    _validate_http_url_modifiers(redirect, 'redirect_request')
+    return redirect
+
+
+def http_request_url_rewrite(rewrite):
+    if (not isinstance(rewrite, dict) or not rewrite or
+            rewrite.keys() - _HTTP_URL_MODIFIER_FIELDS):
+        raise exceptions.InvalidL7PolicyArgs(
+            msg=_('request_url_rewrite requires hostname or a path '
+                  'replacement.'))
+    _validate_http_url_modifiers(rewrite, 'request_url_rewrite')
+    return rewrite
+
+
+def _validate_http_url_modifiers(modifiers, field):
+    if 'hostname' in modifiers:
+        hostname = modifiers['hostname']
         if not isinstance(hostname, str) or not is_exact_sni_name(hostname):
             raise exceptions.InvalidL7PolicyArgs(
-                msg=_('redirect_request.hostname must be a DNS name.'))
-    if 'replace_prefix' in redirect:
-        if 'replace_full_path' in redirect:
+                msg=_('%s.hostname must be a DNS name.') % field)
+    if 'replace_prefix' in modifiers:
+        if 'replace_full_path' in modifiers:
             raise exceptions.InvalidL7PolicyArgs(
-                msg=_('Specify only one redirect path replacement.'))
-        prefix = redirect['replace_prefix']
+                msg=_('Specify only one redirect path replacement.')
+                if field == 'redirect_request' else
+                _('Specify only one rewrite path replacement.'))
+        prefix = modifiers['replace_prefix']
         if not isinstance(prefix, dict) or prefix.keys() != {
                 'match', 'replacement'}:
             raise exceptions.InvalidL7PolicyArgs(
                 msg=_('replace_prefix requires match and replacement.'))
         match = prefix['match']
         if (not isinstance(match, str) or len(match) > 1024 or
-                not HTTP_REDIRECT_PATH_RE.fullmatch(match) or
+                not HTTP_URL_PATH_RE.fullmatch(match) or
                 any(part in match for part in ('//', '/./', '/../')) or
                 '%2f' in match.lower() or match.endswith(('/.', '/..'))):
             raise exceptions.InvalidL7PolicyArgs(
                 msg=_('replace_prefix.match must be a valid absolute '
                       'PathPrefix of at most 1024 characters.'))
-        _validate_http_redirect_replacement(prefix['replacement'])
-    if 'replace_full_path' in redirect:
-        _validate_http_redirect_replacement(redirect['replace_full_path'])
-    return redirect
+        _validate_http_url_replacement(prefix['replacement'], field)
+    if 'replace_full_path' in modifiers:
+        _validate_http_url_replacement(modifiers['replace_full_path'], field)
 
 
-def _validate_http_redirect_replacement(path):
+def _validate_http_url_replacement(path, field):
     if (not isinstance(path, str) or len(path) > 1024 or
             any(0xD800 <= ord(char) <= 0xDFFF for char in path)):
         raise exceptions.InvalidL7PolicyArgs(
             msg=_('Redirect replacements must be UTF-8 text of at most '
-                  '1024 characters.'))
+                  '1024 characters.') if field == 'redirect_request' else
+            _('Rewrite replacements must be UTF-8 text of at most '
+              '1024 characters.'))
 
 
 def validate_http_request_redirect_protocol(protocol):
@@ -599,6 +617,14 @@ def validate_http_request_redirect_protocol(protocol):
                         constants.PROTOCOL_TERMINATED_HTTPS):
         raise exceptions.ValidationException(
             detail=_('HTTP request redirects require an HTTP or '
+                     'TERMINATED_HTTPS listener.'))
+
+
+def validate_http_request_url_rewrite_protocol(protocol):
+    if protocol not in (constants.PROTOCOL_HTTP,
+                        constants.PROTOCOL_TERMINATED_HTTPS):
+        raise exceptions.ValidationException(
+            detail=_('HTTP request URL rewrites require an HTTP or '
                      'TERMINATED_HTTPS listener.'))
 
 
@@ -757,6 +783,15 @@ def sanitize_l7policy_api_args(l7policy, create=False, old_policy=None):
 
     forwarding_actions = (constants.L7POLICY_ACTION_REDIRECT_TO_POOL,
                           constants.L7POLICY_ACTION_WEIGHTED_TARGETS)
+    rewrite = l7policy.get('request_url_rewrite',
+                           getattr(old_policy, 'request_url_rewrite', None))
+    if rewrite is not None:
+        if l7policy.get('action', old_action) not in forwarding_actions:
+            raise exceptions.InvalidL7PolicyArgs(
+                msg=_('request_url_rewrite requires REDIRECT_TO_POOL or '
+                      'WEIGHTED_TARGETS.'))
+        if 'request_url_rewrite' in l7policy:
+            l7policy['request_url_rewrite'] = http_request_url_rewrite(rewrite)
     for field, actions in (
             ('request_header_operations', forwarding_actions),
             ('response_header_operations',

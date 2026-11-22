@@ -283,6 +283,18 @@ class HTTPRequestRedirect(wtypes.UserType):
             raise ValueError(str(e)) from e
 
 
+class HTTPRequestURLRewrite(wtypes.UserType):
+    basetype = object
+    name = 'http_request_url_rewrite'
+
+    @staticmethod
+    def validate(value):
+        try:
+            return validate.http_request_url_rewrite(value)
+        except exceptions.InvalidL7PolicyArgs as e:
+            raise ValueError(str(e)) from e
+
+
 class WeightedL7PolicyTargets(wtypes.UserType):
     # Preserve the original JSON types for strict validation.
     basetype = object

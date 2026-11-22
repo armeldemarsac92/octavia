@@ -1139,6 +1139,98 @@ class TestL7Policy(base.BaseAPITest):
         self.delete(policy_path)
 
     @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
+    def test_request_url_rewrite_round_trip_and_withdrawal(self, rpc):
+        lb = self.create_load_balancer(
+            uuidutils.generate_uuid(), provider='amphora')['loadbalancer']['id']
+        self.set_lb_status(lb)
+        pool = self.create_pool(lb, 'HTTP', 'ROUND_ROBIN')['pool']['id']
+        self.set_lb_status(lb)
+        listener = self.create_listener('HTTP', 80, lb)['listener']['id']
+        self.set_lb_status(lb)
+        field = 'request_url_rewrite'
+        rewrite = {'hostname': 'backend.example', 'replace_prefix': {
+            'match': '/one', 'replacement': ''}}
+        target = {'redirect_pool_id': pool}
+        self.create_l7policy(listener, 'REDIRECT_TO_POOL', status=501,
+                             **target, request_url_rewrite=rewrite)
+        self.conf.config(group='api_settings',
+                         enabled_request_url_rewrite_providers=['amphora'])
+        for invalid in ({}, {'scheme': 'https'}, {'hostname': '*.example'},
+                        {'replace_full_path': 42},
+                        {'replace_prefix': {'match': '/x%2fy',
+                                            'replacement': '/'}},
+                        rewrite | {'replace_full_path': '/'}):
+            with self.subTest(invalid=invalid):
+                self.create_l7policy(
+                    listener, 'REDIRECT_TO_POOL', status=400, **target,
+                    request_url_rewrite=invalid)
+        self.create_l7policy(listener, 'REJECT', status=400,
+                             request_url_rewrite=rewrite)
+        tcp = self.create_listener('TCP', 81, lb)['listener']['id']
+        self.set_lb_status(lb)
+        self.create_l7policy(tcp, 'REDIRECT_TO_POOL', status=400, **target,
+                             request_url_rewrite=rewrite)
+
+        policy = self.create_l7policy(listener, 'REDIRECT_TO_POOL',
+                                      **target)['l7policy']
+        self.assertNotIn(field, policy)
+        self.set_lb_status(lb)
+        policy_id = policy['id']
+        path = self.L7POLICY_PATH.format(l7policy_id=policy_id)
+        rpc.return_value.cast.reset_mock()
+        persisted = self.put(path, {'l7policy': {field: rewrite}})
+        self.assertEqual(rewrite, persisted.json['l7policy'][field])
+        self.assertEqual(rewrite, self.get(path).json['l7policy'][field])
+        updates = rpc.return_value.cast.call_args.kwargs[
+            constants.L7POLICY_UPDATES]
+        self.assertEqual(rewrite, updates[field])
+        self.set_lb_status(lb)
+        rule = self.create_l7rule(policy_id, 'PATH', 'STARTS_WITH', '/one')
+        rule_path = self.L7RULE_PATH.format(
+            l7policy_id=policy_id, l7rule_id=rule['rule']['id'])
+        self.set_lb_status(lb)
+        self.create_l7rule(policy_id, 'HEADER', 'EQUAL_TO', 'yes', key='x-test')
+        self.set_lb_status(lb)
+
+        self.conf.config(group='api_settings',
+                         enabled_request_url_rewrite_providers=[])
+        rpc.return_value.cast.reset_mock()
+        self.put(rule_path, {'rule': {'value': '/two'}}, status=501)
+        self.put(rule_path, {'rule': {'admin_state_up': False}}, status=501)
+        self.delete(rule_path, status=501)
+        rpc.return_value.cast.assert_not_called()
+        self.assertTrue(self.get(rule_path).json['rule']['admin_state_up'])
+        self.assertEqual(rewrite, self.get(path).json['l7policy'][field])
+
+        pool_path = self.POOL_PATH.format(pool_id=pool)
+        self.put(pool_path, {'pool': {'admin_state_up': False}})
+        self.set_lb_status(lb)
+        self.put(pool_path, {'pool': {'admin_state_up': True}}, status=501)
+        lb_path = self.LB_PATH.format(lb_id=lb)
+        self.put(lb_path, {'loadbalancer': {'admin_state_up': False}})
+        self.set_lb_status(lb)
+        self.put(lb_path, {'loadbalancer': {'admin_state_up': True}},
+                 status=501)
+        listener_path = self.LISTENER_PATH.format(listener_id=listener)
+        self.put(listener_path, {'listener': {'admin_state_up': False}})
+        self.set_lb_status(lb)
+        self.put(listener_path, {'listener': {'admin_state_up': True}},
+                 status=501)
+        self.put(path, {'l7policy': {'admin_state_up': False}})
+        self.set_lb_status(lb)
+        self.put(path, {'l7policy': {'admin_state_up': True}}, status=501)
+        rpc.return_value.cast.reset_mock()
+        cleared = self.put(path, {'l7policy': {field: None}})
+        self.assertNotIn(field, cleared.json['l7policy'])
+        updates = rpc.return_value.cast.call_args.kwargs[
+            constants.L7POLICY_UPDATES]
+        self.assertIsNone(updates[field])
+        self.set_lb_status(lb)
+        self.delete(rule_path)
+        self.set_lb_status(lb)
+        self.delete(path)
+
+    @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
     def test_amphora_stored_actions_can_be_removed_after_disabling(self, _rpc):
         self.conf.config(group='api_settings',
                          enabled_gateway_action_providers=['amphora'])
