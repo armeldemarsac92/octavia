@@ -99,8 +99,7 @@ class AmphoraInfo:
                 'topology_status': consts.TOPOLOGY_STATUS_OK,
                 'listeners': listeners,
                 'packages': {}}
-        if haproxy_compatibility.supports_backend_tls_hostname():
-            body[consts.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME] = True
+        body.update(haproxy_compatibility.get_backend_tls_capabilities())
         if extend_body:
             body.update(extend_body)
         return webob.Response(json=body)

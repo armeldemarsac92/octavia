@@ -227,6 +227,114 @@ class TestHaproxyAmphoraLoadBalancerDriverTest(base.TestCase):
             [mock.call(amp, timeout_dict=None) for amp in amphorae],
             details.call_args_list)
 
+    def test_missing_h2_capability_closes_only_h2_pool_on_both_peers(self):
+        hostname = constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME
+        h2_alpn = constants.GATEWAY_CAPABILITY_BACKEND_TLS_H2_ALPN
+        amphorae = [
+            data_models.Amphora(id='amp-one', status=constants.ACTIVE),
+            data_models.Amphora(id='amp-two', status=constants.ACTIVE)]
+        for amphora in amphorae:
+            amphora.api_version = API_VERSION
+        tls_pool = data_models.Pool(
+            id='tls', enabled=True,
+            backend_tls_hostname='backend.example.test')
+        grpc_pool = data_models.Pool(
+            id='grpc', enabled=True,
+            backend_tls_hostname='backend.example.test',
+            backend_tls_require_h2=True)
+        listener = mock.Mock(enabled=True, pools=[tls_pool, grpc_pool],
+                             protocol=constants.PROTOCOL_HTTP)
+        lb = mock.Mock(enabled=True, listeners=[listener], amphorae=amphorae)
+        self.driver.clients[API_VERSION].get_details.side_effect = [
+            {hostname: True, h2_alpn: True}, {hostname: True}]
+        trust = {'ca_cert': '/ca.pem'}
+        with (
+            mock.patch.object(self.driver, '_process_pool_certs',
+                              return_value=trust) as process_certs,
+            mock.patch.object(self.driver, '_update_amphora_listeners') as arm,
+            mock.patch('octavia.db.api.session'),
+            mock.patch('octavia.db.repositories.PoolRepository.'
+                       'set_backend_tls_pool_statuses') as status,
+        ):
+            self.driver.update(lb)
+        self.assertEqual(
+            [mock.call(listener, tls_pool, amp, lb.id) for amp in amphorae],
+            process_certs.call_args_list)
+        self.assertEqual(2, arm.call_count)
+        for call in arm.call_args_list:
+            self.assertEqual(
+                {tls_pool.id: trust, grpc_pool.id: {'closed': True}},
+                call.kwargs['backend_tls_certs'])
+        self.assertEqual({grpc_pool.id}, status.call_args.kwargs['closed'])
+
+    @mock.patch('octavia.db.api.session')
+    @mock.patch('octavia.db.repositories.PoolRepository.'
+                'set_backend_tls_pool_statuses')
+    def test_failover_uses_same_trust_decision_on_both_peers(
+            self, status, session):
+        amphorae = [
+            data_models.Amphora(id='amp-one', status=constants.ACTIVE),
+            data_models.Amphora(id='amp-two', status=constants.ACTIVE)]
+        pool = data_models.Pool(
+            id='grpc', protocol=constants.PROTOCOL_HTTP, enabled=True,
+            tls_enabled=True, backend_tls_hostname='backend.example.test',
+            backend_tls_require_h2=True, ca_tls_certificate_id='ca')
+        listener = data_models.Listener(
+            id='http', protocol=constants.PROTOCOL_HTTP, enabled=True,
+            pools=[pool])
+        lb = data_models.LoadBalancer(
+            id='lb', enabled=True, listeners=[listener], amphorae=amphorae)
+        client = self.driver.clients[API_VERSION]
+        client.get_details.return_value = {
+            constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME: True,
+            constants.GATEWAY_CAPABILITY_BACKEND_TLS_H2_ALPN: True,
+        }
+        self.driver.cert_manager.get_secret.return_value = (
+            sample_certs.X509_CA_CERT)
+
+        def render(**kwargs):
+            self.assertEqual(2, client.upload_cert_pem.call_count)
+            return 'config'
+
+        build = self.driver.jinja_combo.build_config
+        build.side_effect = render
+        client.upload_cert_pem.side_effect = [None, RuntimeError('CA upload')]
+        self.assertTrue(self.driver.update_failover_listeners(lb, 1, {}))
+        client.reload_listener.assert_not_called()
+        self.assertTrue(self.driver.update_failover_listeners(lb, 0, {}))
+
+        for call in build.call_args_list:
+            self.assertEqual({'closed': True},
+                             call.kwargs['tls_certs'][pool.id])
+        reload_calls = [mock.call(amp, lb.id, timeout_dict=None)
+                        for amp in amphorae]
+        self.assertEqual(reload_calls, client.reload_listener.call_args_list)
+        status.assert_called_once_with(session().begin().__enter__(),
+                                       closed={pool.id}, recovered=set())
+
+        pool.provisioning_status = constants.ERROR
+        client.reset_mock(side_effect=True)
+        build.reset_mock()
+        status.reset_mock()
+        client.reload_listener.side_effect = [None, RuntimeError('reload')]
+        self.assertRaises(RuntimeError, self.driver.update_failover_listeners,
+                          lb, 0, {})
+        status.assert_not_called()
+
+        client.reset_mock(side_effect=True)
+        build.reset_mock()
+
+        def publish(*args, **kwargs):
+            self.assertEqual(reload_calls,
+                             client.reload_listener.call_args_list)
+
+        status.side_effect = publish
+        self.assertTrue(self.driver.update_failover_listeners(lb, 0, {}))
+        for call in build.call_args_list:
+            self.assertIn('ca_cert', call.kwargs['tls_certs'][pool.id])
+        status.assert_called_once_with(session().begin().__enter__(),
+                                       closed=set(), recovered={pool.id})
+
     @mock.patch('octavia.amphorae.drivers.haproxy.rest_api_driver.'
                 'HaproxyAmphoraLoadBalancerDriver._process_secret')
     @mock.patch('octavia.common.tls_utils.cert_parser.load_certificates_data')

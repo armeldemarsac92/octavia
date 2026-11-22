@@ -154,7 +154,7 @@ class HaproxyAmphoraLoadBalancerDriver(
             amp_details=None, backend_tls_certs=None):
         if not loadbalancer.listeners:
             LOG.debug('No listeners found to update.')
-            return
+            return set()
 
         # Check which HAProxy version is on the amp
         haproxy_versions = self._get_haproxy_versions(
@@ -240,6 +240,8 @@ class HaproxyAmphoraLoadBalancerDriver(
                 self.clients[amphora.api_version].delete_listener(
                     amphora, loadbalancer.id)
 
+        return {listener.id for listener in listeners_to_update}
+
     def _udp_update(self, listener, vip):
         LOG.debug("Amphora %s keepalivedlvs, updating "
                   "listener %s, vip %s",
@@ -267,6 +269,22 @@ class HaproxyAmphoraLoadBalancerDriver(
             for amphora in amphorae:
                 self._update_amphora_listeners(loadbalancer, amphora)
 
+    def update_failover_listeners(self, loadbalancer, amphora_index,
+                                  amphorae_status, timeout_dict=None):
+        opted_in, protected = self._backend_tls_pools(loadbalancer)
+        if opted_in and amphora_index == 0:
+            peers = [amp for amp in loadbalancer.amphorae
+                     if amp.status != consts.DELETED]
+            unreachable = {amp.id for amp in peers
+                           if amphorae_status.get(amp.id, {}).get(
+                               consts.UNREACHABLE)}
+            self._update_backend_tls_listeners(
+                loadbalancer, [amp for amp in peers
+                               if amp.id not in unreachable],
+                peers, protected, timeout_dict=timeout_dict,
+                unreachable=unreachable)
+        return opted_in
+
     @staticmethod
     def _backend_tls_pools(loadbalancer):
         opted_in = False
@@ -275,7 +293,7 @@ class HaproxyAmphoraLoadBalancerDriver(
             if listener.protocol in consts.LVS_PROTOCOLS:
                 continue
             for pool in listener.pools:
-                if (getattr(pool, 'backend_tls_hostname', None) is None and
+                if (not utils.is_protected_backend_tls_pool(pool) and
                         not utils.is_disabled_backend_tls_pool(pool)):
                     continue
                 opted_in = True
@@ -286,12 +304,15 @@ class HaproxyAmphoraLoadBalancerDriver(
         return opted_in, pools
 
     def _update_backend_tls_listeners(self, loadbalancer, amphorae, peers,
-                                      protected, timeout_dict=None):
+                                      protected, timeout_dict=None,
+                                      unreachable=()):
         # Preflight the entire pair and stage the trust material before any
         # reload. Both amphorae use an empty backend if either lacks support.
         details = {}
-        capability = consts.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME
         for amphora in peers if protected else amphorae:
+            if amphora.id in unreachable:
+                details[amphora.id] = {}
+                continue
             try:
                 self._populate_amphora_api_version(amphora, timeout_dict)
                 client = self.clients[amphora.api_version]
@@ -301,45 +322,64 @@ class HaproxyAmphoraLoadBalancerDriver(
             except (driver_except.AmphoraDriverError, exc.APIException,
                     requests.RequestException, ValueError):
                 details[amphora.id] = {}
-            if protected and details[amphora.id].get(capability) is not True:
-                LOG.warning('Strict backend TLS support could not be '
-                            'confirmed on amphora %s.', amphora.id)
 
-        supported = all(detail.get(capability) is True
-                        for detail in details.values())
-        certs = {}
+        certs = {amphora.id: {} for amphora in amphorae}
+        closed = set()
         for pool_id, (listener, pool) in protected.items():
-            if supported:
+            required = [consts.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME]
+            if getattr(pool, 'backend_tls_require_h2', False) is True:
+                required.append(consts.GATEWAY_CAPABILITY_BACKEND_TLS_H2_ALPN)
+            unsupported = [
+                amp_id for amp_id, detail in details.items()
+                if any(detail.get(capability) is not True
+                       for capability in required)]
+            if unsupported:
+                LOG.warning('Backend TLS pool %s will close because its '
+                            'required capabilities could not be confirmed '
+                            'on amphorae %s.', pool_id, unsupported)
+            else:
                 try:
-                    for amphora in amphorae:
-                        certs[pool_id] = self._process_pool_certs(
+                    material = {
+                        amphora.id: self._process_pool_certs(
                             listener, pool, amphora, loadbalancer.id)
-                    continue
+                        for amphora in peers
+                    }
                 except Exception as error:
                     LOG.warning('Backend TLS pool %s will close because its '
                                 'TLS configuration could not be prepared '
                                 '(%s).', pool_id, type(error).__name__)
-            certs[pool_id] = {'closed': True}
+                else:
+                    for amphora in amphorae:
+                        certs[amphora.id][pool_id] = material[amphora.id]
+                    continue
+            closed.add(pool_id)
+            for amphora in amphorae:
+                certs[amphora.id][pool_id] = {'closed': True}
 
         reload_error = None
+        reloaded_listeners = []
         for amphora in amphorae:
             try:
-                self._update_amphora_listeners(
+                configured = self._update_amphora_listeners(
                     loadbalancer, amphora, timeout_dict=timeout_dict,
-                    amp_details=details[amphora.id], backend_tls_certs=certs)
+                    amp_details=details[amphora.id],
+                    backend_tls_certs=certs[amphora.id])
+                reloaded_listeners.append(configured)
             except Exception as error:
                 LOG.warning('Could not reload listeners on amphora %s (%s).',
                             amphora.id, type(error).__name__)
                 if reload_error is None:
                     reload_error = error
 
-        closed = {pool_id for pool_id, material in certs.items()
-                  if material.get('closed')}
         recovered = set()
-        if reload_error is None and len(amphorae) == len(peers):
-            recovered = {pool_id for pool_id, (_, pool) in protected.items()
+        if (reload_error is None and amphorae and
+                len(amphorae) == len(peers)):
+            recovered = {pool_id
+                         for pool_id, (listener, pool) in protected.items()
                          if pool_id not in closed and
-                         pool.provisioning_status == consts.ERROR}
+                         pool.provisioning_status == consts.ERROR and
+                         all(listener.id in configured
+                             for configured in reloaded_listeners)}
         if closed or recovered:
             pool_repo = repo.PoolRepository()
             with db_api.session().begin() as session:
@@ -624,7 +664,7 @@ class HaproxyAmphoraLoadBalancerDriver(
         for pool in pools.values():
             # Protected pools are staged once for the pair, independently of
             # the listener's own credentials and the legacy pool path.
-            if getattr(pool, 'backend_tls_hostname', None) is not None:
+            if utils.is_protected_backend_tls_pool(pool):
                 continue
             pool_certs_dict[pool.id] = self._process_pool_certs(
                 listener, pool, amphora, obj_id)
@@ -635,7 +675,7 @@ class HaproxyAmphoraLoadBalancerDriver(
         if utils.is_disabled_backend_tls_pool(pool):
             return pool_cert_dict
         hostname = getattr(pool, 'backend_tls_hostname', None)
-        if hostname is not None and (
+        if utils.is_protected_backend_tls_pool(pool) and (
                 not validate.is_exact_sni_name(hostname) or
                 pool.protocol != consts.PROTOCOL_HTTP or
                 pool.tls_enabled is not True or

@@ -107,6 +107,21 @@ class HAProxyCompatTestCase(base.TestCase):
         self.assertEqual(2, major)
         self.assertEqual(3, minor)
 
+    @mock.patch.object(haproxy_compatibility.subprocess, 'check_output')
+    def test_backend_tls_capabilities(self, check_output):
+        hostname = constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME
+        h2_alpn = constants.GATEWAY_CAPABILITY_BACKEND_TLS_H2_ALPN
+        strict_dns = 'HAProxy version 3.0.19-ade9c1262-octavia-strict-dns-v1'
+        for version, expected in (
+                ('HAProxy version 3.0.19-ade9c1262 ', {}),
+                (f'{strict_dns} ', {hostname: True}),
+                (f'{strict_dns}-h2-alpn-v1 ',
+                 {hostname: True, h2_alpn: True})):
+            with self.subTest(version=version):
+                check_output.return_value = version
+                result = haproxy_compatibility.get_backend_tls_capabilities()
+                self.assertEqual(expected, result)
+
     @mock.patch('octavia.amphorae.backends.agent.api_server.'
                 'haproxy_compatibility.get_haproxy_versions')
     def test_process_cfg_for_version_compat(self, mock_get_version):

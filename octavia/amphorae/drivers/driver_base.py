@@ -53,6 +53,16 @@ class AmphoraLoadBalancerDriver(metaclass=abc.ABCMeta):
         add more function along with the development.
         """
 
+    def update_failover_listeners(self, loadbalancer, amphora_index,
+                                  amphorae_status, timeout_dict=None):
+        """Handle a coordinated listener update during amphora failover.
+
+        A driver that needs to update the peers together uses index zero as
+        the coordinator and returns True at every index. By default the
+        worker updates each reachable amphora independently.
+        """
+        return False
+
     @abc.abstractmethod
     def start(self, loadbalancer, amphora, timeout_dict=None):
         """Start the listeners on the amphora.

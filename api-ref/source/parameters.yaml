@@ -247,6 +247,17 @@ backend-tls-hostname:
   in: body
   required: false
   type: string
+backend-tls-require-h2:
+  description: |
+    Require the backend TLS peer to negotiate HTTP/2 through ALPN before
+    sending application data. Defaults to false. Requires
+    ``backend_tls_hostname`` and the regional provider capability
+    ``backend_tls_h2_alpn_v1``. When true, the pool offers only ``h2``,
+    regardless of its ``alpn_protocols`` setting. A partial update preserves
+    the option when omitted. Disable the pool before setting it to false.
+  in: body
+  required: false
+  type: boolean
 amphora-id:
   description: |
     The associated amphora ID.

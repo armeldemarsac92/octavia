@@ -275,7 +275,9 @@ class JinjaTemplater:
                                 'isolation requires 3.0')
                 for pool in listener['pools']:
                     hostname = pool.get('backend_tls_hostname')
-                    if not pool['enabled'] or hostname is None:
+                    require_h2 = pool.get('backend_tls_require_h2')
+                    if not pool['enabled'] or (hostname is None and
+                                               not require_h2):
                         continue
                     if (amp_details or {}).get(
                             constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME
@@ -283,7 +285,15 @@ class JinjaTemplater:
                         raise driver_except.AmpVersionUnsupported(
                             version='HAProxy requires strict backend DNS '
                                     'authentication support')
+                    if require_h2 and (amp_details or {}).get(
+                            constants.GATEWAY_CAPABILITY_BACKEND_TLS_H2_ALPN
+                    ) is not True:
+                        raise driver_except.AmpVersionUnsupported(
+                            version='HAProxy requires backend TLS HTTP/2 '
+                                    'ALPN support')
                     if (not validate.is_exact_sni_name(hostname) or
+                            pool['protocol'] !=
+                            PROTOCOL_MAP[constants.PROTOCOL_HTTP] or
                             pool['tls_enabled'] is not True or
                             not pool.get('ca_cert') or
                             pool.get('backend_h2c')):
@@ -750,6 +760,8 @@ class JinjaTemplater:
         hostname = getattr(pool, 'backend_tls_hostname', None)
         if hostname is not None:
             ret_value['backend_tls_hostname'] = hostname
+        if getattr(pool, 'backend_tls_require_h2', False) is True:
+            ret_value['backend_tls_require_h2'] = True
         if (octavia_utils.is_disabled_backend_tls_pool(pool) or
                 (pool_tls_certs and pool_tls_certs.get('closed'))):
             ret_value['closed'] = True

@@ -304,7 +304,7 @@ class Pool(BaseDataModel):
                  ca_tls_certificate_id=None, crl_container_id=None,
                  tls_enabled=None, tls_ciphers=None, tls_versions=None,
                  alpn_protocols=None, backend_h2c=False,
-                 backend_tls_hostname=None):
+                 backend_tls_hostname=None, backend_tls_require_h2=False):
         self.id = id
         self.project_id = project_id
         self.name = name
@@ -333,6 +333,7 @@ class Pool(BaseDataModel):
         self.alpn_protocols = alpn_protocols
         self.backend_h2c = backend_h2c
         self.backend_tls_hostname = backend_tls_hostname
+        self.backend_tls_require_h2 = backend_tls_require_h2
 
     def update(self, update_dict):
         for key, value in update_dict.items():

@@ -922,6 +922,29 @@ class TestHaproxyCfg(base.TestCase):
                       config)
         self.assertNotIn('verify none', config)
 
+    def test_required_h2_only_offers_h2_with_a_capable_amphora(self):
+        listener = sample_configs_combined.sample_listener_tuple()
+        pool = SimpleNamespace(**dict(
+            listener.pools[0]._asdict(), tls_enabled=True,
+            backend_tls_hostname='backend.example.test',
+            backend_tls_require_h2=True,
+            alpn_protocols=['h2', 'http/1.1'],
+            ca_tls_certificate_id='ca-certificate'))
+        args = (sample_configs_combined.sample_amphora_tuple(),
+                [listener._replace(default_pool=pool, pools=[pool])])
+        certs = {pool.id: {'ca_cert': '/path/to/backend-ca.pem'}}
+        details = {constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME: True}
+        self.assertRaises(driver_except.AmpVersionUnsupported,
+                          self.jinja_cfg.render_loadbalancer_obj,
+                          *args, tls_certs=certs, amp_details=details)
+        details[constants.GATEWAY_CAPABILITY_BACKEND_TLS_H2_ALPN] = True
+        config = self.jinja_cfg.render_loadbalancer_obj(
+            *args, tls_certs=certs, amp_details=details)
+        self.assertIn('check-alpn h2 ', config)
+        self.assertIn('verifyhost-strict backend.example.test', config)
+        self.assertIn(' alpn h2 require-alpn-h2', config)
+        self.assertNotIn('h2,http/1.1', config)
+
     def test_disabled_protected_pool_keeps_its_l7_match(self):
         listener = sample_configs_combined.sample_listener_tuple(l7=True)
         healthy, target = listener.pools
