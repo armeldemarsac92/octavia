@@ -47,6 +47,16 @@ def validate_policy_options_on_create(
         driver, listener, *, creating_load_balancer=False):
     protocol = listener['protocol']
     default_response = listener.get('default_http_response')
+    hosts = listener.get('https_virtual_hosts')
+    if hosts is not None:
+        driver_utils.require_https_listener_isolation(driver)
+        hosts = validate.https_virtual_hosts(hosts)
+        listener['https_virtual_hosts'] = hosts
+        validate.validate_https_listener(
+            protocol, listener.get('tls_certificate_id'),
+            listener.get('sni_containers'),
+            listener.get('default_pool_id') or listener.get('default_pool'),
+            default_response)
     validate.validate_default_http_response(
         protocol, default_response,
         listener.get('default_pool_id') or listener.get('default_pool'))
@@ -55,6 +65,10 @@ def validate_policy_options_on_create(
 
     tcp_policy = driver_utils.uses_tls_sni_policy_path(driver, protocol)
     for policy in listener.get('l7policies') or []:
+        hostname = validate.validate_https_policy_hostname(
+            hosts, policy.get('https_listener_hostname'))
+        if hostname is not None:
+            policy['https_listener_hostname'] = hostname
         action = policy.get('action')
         for rule in policy.get('rules') or []:
             driver_utils.validate_l7rule_context(
@@ -630,6 +644,35 @@ class ListenersController(base.BaseController):
 
         validate.check_hsts_options_put(listener, db_listener)
 
+    def _validate_https_listener_update(
+            self, session, driver, db_listener, updates):
+        old_hosts = db_listener.https_virtual_hosts
+        hosts = updates.get('https_virtual_hosts', old_hosts)
+        if old_hosts is None and hosts is None:
+            return
+        if hosts is None:
+            raise exceptions.ValidationException(detail=_(
+                'Replace the listener to remove HTTPS listener isolation.'))
+
+        hosts = validate.https_virtual_hosts(hosts)
+        if 'https_virtual_hosts' in updates:
+            updates['https_virtual_hosts'] = hosts
+        if hosts != old_hosts or (updates.get('enabled') is True and
+                                  not db_listener.enabled):
+            driver_utils.require_https_listener_isolation(driver)
+        validate.validate_https_listener(
+            db_listener.protocol,
+            updates.get('tls_certificate_id', db_listener.tls_certificate_id),
+            updates.get('sni_containers', db_listener.sni_containers),
+            updates.get('default_pool_id', db_listener.default_pool_id),
+            updates.get('default_http_response',
+                        db_listener.default_http_response))
+        if hosts != old_hosts:
+            policy_repo = self.repositories.l7policy
+            for hostname in policy_repo.get_https_listener_hostnames(
+                    session, db_listener.id):
+                validate.validate_https_policy_hostname(hosts, hostname)
+
     def _set_default_on_none(self, listener):
         """Reset settings to their default values if None/null was passed in
 
@@ -707,6 +750,8 @@ class ListenersController(base.BaseController):
                 context.session, id, show_deleted=False)
 
             listener_dict = listener.to_dict(render_unsets=False)
+            self._validate_https_listener_update(
+                context.session, driver, db_listener, listener_dict)
             default_http_response = listener_dict.get(
                 'default_http_response', db_listener.default_http_response)
             reopening = (listener_dict.get('enabled') is True and
@@ -742,10 +787,9 @@ class ListenersController(base.BaseController):
             db_listener.provisioning_status = constants.PENDING_UPDATE
 
             # Prepare the data for the driver data model
-            listener_dict['id'] = id
-
             provider_listener_dict = (
-                driver_utils.listener_dict_to_provider_dict(listener_dict))
+                driver_utils.listener_dict_to_provider_dict(
+                    dict(listener_dict, id=id)))
 
             # Also prepare the baseline object data
             old_provider_listener = (
@@ -762,7 +806,7 @@ class ListenersController(base.BaseController):
 
             # Update the database to reflect what the driver just accepted
             self.repositories.listener.update(
-                context.session, id, **listener.to_dict(render_unsets=False))
+                context.session, id, **listener_dict)
 
         # Force SQL alchemy to query the DB, otherwise we get inconsistent
         # results

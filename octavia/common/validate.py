@@ -141,6 +141,56 @@ def is_exact_sni_name(value):
     return False
 
 
+def https_listener_hostname(value):
+    if value == '*':
+        return value
+    if isinstance(value, str) and len(value) <= 253:
+        name = value[2:] if value.startswith('*.') else value
+        if is_exact_sni_name(name):
+            return value.lower()
+    raise exceptions.ValidationException(detail=_(
+        'HTTPS listener hostnames must be exact DNS names, wildcard DNS '
+        'suffixes beginning with "*.", or "*".'))
+
+
+def https_virtual_hosts(values):
+    if not isinstance(values, list) or not values:
+        raise exceptions.ValidationException(detail=_(
+            'https_virtual_hosts must contain at least one hostname.'))
+    hosts = [https_listener_hostname(value) for value in values]
+    if len(hosts) != len(set(hosts)):
+        raise exceptions.ValidationException(detail=_(
+            'https_virtual_hosts requires distinct hostnames.'))
+    return sorted(hosts)
+
+
+def validate_https_listener(protocol, certificate, sni_certificates,
+                            default_pool, default_response):
+    if protocol != constants.PROTOCOL_TERMINATED_HTTPS:
+        raise exceptions.ValidationException(detail=_(
+            'https_virtual_hosts requires a TERMINATED_HTTPS listener.'))
+    if not certificate or sni_certificates:
+        raise exceptions.ValidationException(detail=_(
+            'https_virtual_hosts requires one default certificate and '
+            'no SNI certificate references.'))
+    if (default_pool or (default_response is not None and
+                         fixed_http_status_code(default_response) != 404)):
+        raise exceptions.ValidationException(detail=_(
+            'https_virtual_hosts requires an HTTP 404 fallback.'))
+
+
+def validate_https_policy_hostname(hosts, value):
+    if hosts is None and value is None:
+        return None
+    if hosts is not None and value is not None:
+        hostname = https_listener_hostname(value)
+        if hostname in hosts:
+            return hostname
+    raise exceptions.ValidationException(detail=_(
+        'A scoped HTTPS L7 policy must select one hostname configured on '
+        'its listener. Other L7 policies cannot specify a listener hostname.'))
+
+
 def is_tls_sni_rule(rule):
     if (rule.type != constants.L7RULE_TYPE_TLS_SNI or
             rule.key not in (None, wtypes.Unset) or rule.invert):

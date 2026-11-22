@@ -152,6 +152,9 @@ bind {{ lb_vip_address }}:{{ listener.protocol_port }} {{
 
 
 {% macro l7rule_list_macro(l7policy) %}
+    {% if l7policy.https_section is defined %}
+        {{- " { var(txn.octavia_https_authority_section) -m str %s }"|format(l7policy.https_section) -}}
+    {% endif %}
     {% for l7rule in l7policy.l7rules %}
         {{- " " -}}{{- l7rule_invert_macro(l7rule.invert) -}}{{- l7rule.id -}}
     {% endfor %}
@@ -239,6 +242,30 @@ backend {{ pool.id }}:{{ listener.id }}
 {% endmacro %}
 
 
+{% macro https_section_condition(fetch, dns_acl, hostname) -%}
+    {%- if hostname == '*' -%}
+        {%- if fetch != 'ssl_fc_sni' %} { {{ fetch }} -m found }{% endif -%}
+    {%- elif hostname.startswith('*.') %} { {{ fetch }} -m end -i {{ hostname[1:] }} } {{ dns_acl }}
+    {%- else %} { {{ fetch }} -m str -i {{ hostname }} }
+    {%- endif -%}
+{%- endmacro %}
+
+
+{% macro https_listener_isolation_macro(sections) %}
+    {% set dns_label = '[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?' %}
+    {% set dns_name = '^(' ~ dns_label ~ '[.])+' ~ dns_label ~ '$' %}
+    acl octavia_https_sni_dns ssl_fc_sni -m reg -i {{ dns_name }}
+    acl octavia_https_authority_dns var(txn.octavia_https_authority) -m reg -i {{ dns_name }}
+    http-request set-var(txn.octavia_https_authority) req.fhdr(host),host_only
+    {% for hostname, section in sections.items() %}
+    http-request set-var(txn.octavia_https_sni_section) str({{ section }}) if !{ var(txn.octavia_https_sni_section) -m found }{{ https_section_condition('ssl_fc_sni', 'octavia_https_sni_dns', hostname) }}
+    http-request set-var(txn.octavia_https_authority_section) str({{ section }}) if !{ var(txn.octavia_https_authority_section) -m found }{{ https_section_condition('var(txn.octavia_https_authority)', 'octavia_https_authority_dns', hostname) }}
+    {% endfor %}
+    http-request return status 404 unless { var(txn.octavia_https_authority_section) -m found }
+    http-request return status 421 unless { var(txn.octavia_https_authority_section),strcmp(txn.octavia_https_sni_section) -m int eq 0 }
+{% endmacro %}
+
+
 {% macro frontend_macro(constants, lib_consts, listener, lb_vip_address, additional_vips) %}
 frontend {{ listener.id }}
     {% if listener.connection_limit is defined %}
@@ -246,7 +273,9 @@ frontend {{ listener.id }}
     {% endif %}
     {% if (listener.protocol.lower() ==
        constants.PROTOCOL_TERMINATED_HTTPS.lower()) %}
+        {% if listener.https_sections is not defined %}
     redirect scheme https if !{ ssl_fc }
+        {% endif %}
         {% if listener.hsts_directives is defined %}
     http-response set-header Strict-Transport-Security "{{ listener.hsts_directives }}"
         {% endif %}
@@ -259,6 +288,9 @@ frontend {{ listener.id }}
     {% if listener.inspect_tls_sni is defined %}
     tcp-request inspect-delay {{ listener.timeout_tcp_inspect }}
     tcp-request content accept if { req.ssl_hello_type 1 }
+    {% endif %}
+    {% if listener.https_sections is defined %}
+        {{- https_listener_isolation_macro(listener.https_sections) -}}
     {% endif %}
     {% set policies = listener.l7policies|selectattr('enabled')|selectattr('l7rules')|list %}
     {% set select_policy = listener.weighted_response_codes is defined or

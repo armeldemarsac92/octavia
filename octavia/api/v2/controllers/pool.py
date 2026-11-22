@@ -352,6 +352,9 @@ class PoolsController(base.BaseController):
             if listener_id:
                 listener = self.repositories.listener.get_for_update(
                     context.session, listener_id, show_deleted=False)
+                if listener.https_virtual_hosts is not None:
+                    raise exceptions.ValidationException(detail=_(
+                        'A scoped HTTPS listener cannot have a default pool.'))
                 if listener.default_pool_id:
                     raise exceptions.DuplicatePoolEntry()
                 validate.validate_default_http_response(

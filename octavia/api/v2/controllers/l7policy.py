@@ -196,6 +196,14 @@ class L7PolicyController(base.BaseController):
             self._test_lb_and_listener_statuses(
                 lock_session, lb_id=load_balancer_id,
                 listener_ids=[listener_id])
+            listener = self.repositories.listener.get_for_update(
+                lock_session, listener_id, show_deleted=False)
+            hostname = validate.validate_https_policy_hostname(
+                listener.https_virtual_hosts,
+                l7policy_dict.get('https_listener_hostname'))
+            if hostname is not None:
+                driver_utils.require_https_listener_isolation(driver)
+                l7policy_dict['https_listener_hostname'] = hostname
             pool_id = l7policy_dict.get('redirect_pool_id')
             if driver_utils.uses_tls_sni_policy_path(
                     driver, listener.protocol):
@@ -275,10 +283,8 @@ class L7PolicyController(base.BaseController):
             l7policy_dict = validate.sanitize_l7policy_api_args(
                 l7policy.to_dict(render_unsets=False), old_policy=db_l7policy)
 
-            listener = self._get_db_listener(
-                context.session,
-                db_l7policy.listener_id
-            )
+            listener = self.repositories.listener.get_for_update(
+                lock_session, db_l7policy.listener_id, show_deleted=False)
             # Load the driver early as it also provides validation
             driver = driver_factory.get_driver(provider)
             action = l7policy_dict.get('action', db_l7policy.action)
@@ -297,6 +303,20 @@ class L7PolicyController(base.BaseController):
                     lock_session, listener, pool_id)
             enabled = l7policy_dict.get('enabled', db_l7policy.enabled)
             reopening = enabled and not db_l7policy.enabled
+            hostname = validate.validate_https_policy_hostname(
+                listener.https_virtual_hosts, l7policy_dict.get(
+                    'https_listener_hostname',
+                    db_l7policy.https_listener_hostname))
+            if 'https_listener_hostname' in l7policy_dict:
+                l7policy_dict['https_listener_hostname'] = hostname
+            https_routing_changed = routing_changed | {
+                'position', 'redirect_pool_id', 'redirect_url',
+                'redirect_prefix', 'redirect_http_code',
+                'request_header_operations', 'https_listener_hostname'}
+            if (hostname is not None and
+                    (reopening or
+                     https_routing_changed.intersection(l7policy_dict))):
+                driver_utils.require_https_listener_isolation(driver)
             policy_repo = self.repositories.l7policy
             if reopening and not tcp_policy:
                 driver_utils.require_active_http_l7rule_capabilities(

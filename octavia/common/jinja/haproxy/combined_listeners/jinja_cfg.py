@@ -212,6 +212,12 @@ class JinjaTemplater:
             for listener in loadbalancer['listeners']:
                 if not listener['enabled']:
                     continue
+                if ('https_sections' in listener and haproxy_version and
+                        not versionutils.is_compatible(
+                            '3.0.0', haproxy_version, same_major=False)):
+                    raise driver_except.AmpVersionUnsupported(
+                        version=f'HAProxy {haproxy_version}; HTTPS listener '
+                                'isolation requires 3.0')
                 for pool in listener['pools']:
                     hostname = pool.get('backend_tls_hostname')
                     if not pool['enabled'] or hostname is None:
@@ -458,13 +464,25 @@ class JinjaTemplater:
             pools.append(self._transform_pool(
                 pool, feature_compatibility, tls_enabled, **kwargs))
         ret_value['pools'] = pools
-        if listener.default_http_response is not None:
+        https_sections = None
+        if listener.https_virtual_hosts is not None:
+            hosts = validate.https_virtual_hosts(listener.https_virtual_hosts)
+            validate.validate_https_listener(
+                listener.protocol, listener.tls_certificate_id,
+                listener.sni_containers, listener.default_pool_id,
+                listener.default_http_response)
+            ordered_hosts = sorted(hosts, key=self._https_hostname_priority)
+            https_sections = {host: index for index, host in
+                              enumerate(ordered_hosts, start=1)}
+            ret_value['https_sections'] = https_sections
+            ret_value['default_http_status_code'] = 404
+        elif listener.default_http_response is not None:
             ret_value['default_http_status_code'] = (
                 validate.fixed_http_status_code(
                     listener.default_http_response))
         policy_gen = (policy for policy in listener.l7policies if
                       policy.provisioning_status != constants.PENDING_DELETE)
-        if listener.default_pool:
+        if https_sections is None and listener.default_pool:
             for pool in pools:
                 if pool['id'] == listener.default_pool.id:
                     ret_value['default_pool'] = pool
@@ -479,9 +497,22 @@ class JinjaTemplater:
             policy_gen = (policy for policy in policy_gen if not any(
                 rule.enabled and rule.type == constants.L7RULE_TYPE_TLS_SNI
                 for rule in policy.l7rules))
-        l7policies = [self._transform_l7policy(
-            policy, feature_compatibility, tls_enabled, tls_certs,
-            available_pool_ids) for policy in policy_gen]
+        l7policies = []
+        for policy in policy_gen:
+            hostname = policy.https_listener_hostname
+            if https_sections is None:
+                if hostname is not None:
+                    continue
+            elif (hostname not in https_sections or
+                  policy.provisioning_status == constants.DELETED):
+                # A stale or unscoped policy must never handle another host.
+                continue
+            transformed = self._transform_l7policy(
+                policy, feature_compatibility, tls_enabled, tls_certs,
+                available_pool_ids)
+            if https_sections is not None:
+                transformed['https_section'] = https_sections[hostname]
+            l7policies.append(transformed)
         if listener.protocol == constants.PROTOCOL_TCP and l7policies:
             l7policies.sort(key=self._sni_policy_priority)
             ret_value['inspect_tls_sni'] = True
@@ -689,6 +720,14 @@ class JinjaTemplater:
             return False
         rules = self._active_l7rules(policy)
         return bool(rules) and all(validate.is_tls_sni_rule(r) for r in rules)
+
+    @staticmethod
+    def _https_hostname_priority(hostname):
+        if hostname == '*':
+            return 2, 0
+        if hostname.startswith('*.'):
+            return 1, -len(hostname)
+        return 0, 0
 
     @staticmethod
     def _sni_policy_priority(policy):
