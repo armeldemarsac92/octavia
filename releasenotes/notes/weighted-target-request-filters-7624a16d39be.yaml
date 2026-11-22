@@ -1,0 +1,10 @@
+---
+features:
+  - |
+    Octavia Amphora supports request header operations and URL rewrites on
+    individual weighted L7 policy pool targets. The selected occurrence
+    applies its own filters after the policy has matched the original HTTP
+    request. To advertise and admit the versioned extension, enable
+    ``[api_settings] enabled_weighted_target_request_filter_providers`` for
+    the provider after upgrading the region. The provider also needs
+    ``enabled_gateway_action_providers`` for weighted targets.

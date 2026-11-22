@@ -65,6 +65,7 @@ VALID_L7POLICY_LISTENER_PROTOCOLS = [
 class AmphoraProviderDriver(driver_base.ProviderDriver):
     supports_fixed_http_responses = True
     supports_weighted_targets = True
+    supports_weighted_target_request_filters = True
     supports_request_header_operations = True
     supports_response_header_operations = True
     supports_http_request_redirect = True

@@ -101,6 +101,12 @@ api_opts = [
                        'support the corresponding action. Enable only after '
                        'all relevant components and Amphora images have '
                        'been upgraded.')),
+    cfg.ListOpt('enabled_weighted_target_request_filter_providers', default=[],
+                help=_('Provider driver names whose regional fleets support '
+                       'request filters on weighted pool targets. Requires '
+                       'enabled_gateway_action_providers. Enable after '
+                       'upgrading the database, API, workers and Amphora '
+                       'images.')),
     cfg.ListOpt('enabled_request_header_operation_providers', default=[],
                 help=_('Provider driver names whose fleets support L7 request '
                        'header operations. Enable only after the Octavia '

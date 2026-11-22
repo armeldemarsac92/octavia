@@ -2173,8 +2173,9 @@ class L7PolicyRepository(BaseRepository):
 
     def get_active_url_rewrites(self, session, *, listener_id=None,
                                 load_balancer_id=None, reopening=None,
-                                restoring_pool=None, removed_pool=None):
-        """Read rewrites with an enabled predicate and forwarding target.
+                                restoring_pool=None, removed_pool=None,
+                                target_filters=False):
+        """Read request transforms with a predicate and forwarding target.
 
         Use current reads inside the load balancer provisioning lock.
         A parent or pool being reopened is treated as enabled.
@@ -2185,12 +2186,20 @@ class L7PolicyRepository(BaseRepository):
         target = models.L7PolicyTarget
         pool = self._active_pool(restoring_pool=restoring_pool,
                                  removed_pool=removed_pool)
-        query = self._active_http_policies(session).filter(
-            policy.request_url_rewrite.isnot(None),
-            ((policy.action == consts.L7POLICY_ACTION_REDIRECT_TO_POOL) &
-             policy.redirect_pool.has(pool)) |
-            ((policy.action == consts.L7POLICY_ACTION_WEIGHTED_TARGETS) &
-             policy._targets.any((target.weight > 0) & target.pool.has(pool))))
+        active_target = (target.weight > 0) & target.pool.has(pool)
+        query = self._active_http_policies(session)
+        if target_filters:
+            query = query.filter(
+                policy.action == consts.L7POLICY_ACTION_WEIGHTED_TARGETS,
+                policy._targets.any(
+                    active_target & target.request_filters.isnot(None)))
+        else:
+            query = query.filter(
+                policy.request_url_rewrite.isnot(None),
+                ((policy.action == consts.L7POLICY_ACTION_REDIRECT_TO_POOL) &
+                 policy.redirect_pool.has(pool)) |
+                ((policy.action == consts.L7POLICY_ACTION_WEIGHTED_TARGETS) &
+                 policy._targets.any(active_target)))
         if listener_id is not None:
             query = query.filter(policy.listener_id == listener_id)
         if load_balancer_id is not None:
@@ -2204,8 +2213,9 @@ class L7PolicyRepository(BaseRepository):
                 if self._in_https_section(row)]
 
     def get_rewrite_exposed_by_policy(self, session, *, policy_id=None,
-                                      disabling_pool=None, new_position=None):
-        """Find a rewrite a request could reach if another policy changes."""
+                                      disabling_pool=None, new_position=None,
+                                      target_filters=False):
+        """Find a transform a request could reach if another policy changes."""
         policy = self.model_class
         listener = models.Listener
         blockers = (self._active_http_policies(session)
@@ -2232,7 +2242,8 @@ class L7PolicyRepository(BaseRepository):
                 consts.L7POLICY_ACTION_REDIRECT_PREFIX)
             for rewrite in self.get_active_url_rewrites(
                     session, listener_id=blocker.listener_id,
-                    removed_pool=disabling_pool):
+                    removed_pool=disabling_pool,
+                    target_filters=target_filters):
                 if (rewrite.id != blocker.id and
                         rewrite.https_listener_hostname ==
                         blocker.https_listener_hostname and
@@ -2243,11 +2254,13 @@ class L7PolicyRepository(BaseRepository):
                     return rewrite.protocol
 
     def get_rewrite_exposed_by_ordered_redirect(
-            self, session, listener_id, hostname, position, *, policy_id=None):
+            self, session, listener_id, hostname, position, *, policy_id=None,
+            target_filters=False):
         """Check whether entry into the ordered phase can expose a rewrite."""
         rewrites = [
             rewrite for rewrite in self.get_active_url_rewrites(
-                session, listener_id=listener_id)
+                session, listener_id=listener_id,
+                target_filters=target_filters)
             if (rewrite.https_listener_hostname == hostname and
                 rewrite.position < position)]
         if not rewrites:

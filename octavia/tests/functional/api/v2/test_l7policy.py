@@ -148,6 +148,27 @@ class TestInitialL7Rules(base.BaseAPITest):
         self.rpc.cast.reset_mock()
         getattr(endpoints.Endpoints(), operation)({}, **call.kwargs)
 
+    def test_weighted_target_filters_with_initial_rules(self):
+        self.conf.config(
+            group='api_settings', enabled_gateway_action_providers=['amphora'],
+            enabled_weighted_target_request_filter_providers=['amphora'])
+        pool = self.create_pool(self.lb_id, 'HTTP', 'ROUND_ROBIN')['pool']
+        self.set_lb_status(self.lb_id)
+        self.rpc.cast.reset_mock()
+        targets = [{'weight': 1, 'pool_id': pool['id'],
+                    'request_url_rewrite': {'hostname': 'backend.example'}}]
+        policy = self.create_l7policy(
+            self.listener_id, 'WEIGHTED_TARGETS', admin_state_up=False,
+            rules=self.rules, targets=targets)['l7policy']
+        self.assertEqual(targets, self.rpc.cast.call_args.kwargs[
+            constants.L7POLICY]['targets'])
+        self._dispatch('create_l7policy')
+        path = self.L7POLICY_PATH.format(l7policy_id=policy['id'])
+        stored = self.get(path).json['l7policy']
+        self.assertEqual('ACTIVE', stored['provisioning_status'])
+        self.assertEqual(targets, stored['targets'])
+        self.assertEqual(2, len(stored['rules']))
+
     def test_rewrite_and_initial_rules_require_independent_enrollment(self):
         pool = self.create_pool(self.lb_id, 'HTTP', 'ROUND_ROBIN')['pool']['id']
         self.set_lb_status(self.lb_id)
@@ -1424,6 +1445,140 @@ class TestL7Policy(base.BaseAPITest):
         self.delete(policy_path)
 
     @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
+    def test_weighted_target_filters_round_trip_and_cleanup(self, rpc):
+        self.conf.config(
+            group='api_settings', enabled_gateway_action_providers=['amphora'])
+        lb = self.create_load_balancer(
+            uuidutils.generate_uuid(), provider='amphora')['loadbalancer']
+        lb = lb['id']
+        self.set_lb_status(lb)
+        pool = self.create_pool(lb, 'HTTP', 'ROUND_ROBIN')['pool']['id']
+        self.set_lb_status(lb)
+        listener = self.create_listener('HTTP', 80, lb)['listener']['id']
+        self.set_lb_status(lb)
+        action = 'WEIGHTED_TARGETS'
+        ordinary = {'weight': 1, 'pool_id': pool}
+        stock = self.create_l7policy(listener, action, targets=[ordinary])
+        self.assertEqual([ordinary], stock['l7policy']['targets'])
+        self.set_lb_status(lb)
+
+        operations = [{'operation': 'SET', 'name': 'x-filter',
+                       'value': 'second'}]
+        targets = [
+            ordinary | {'request_url_rewrite': {'hostname': 'first.example'}},
+            ordinary | {'request_header_operations': operations},
+            {'weight': 1, 'fixed_response': {'status_code': 500}}]
+        rpc.return_value.cast.reset_mock()
+        self.create_l7policy(listener, action, targets=targets, status=501)
+        self.conf.config(group='api_settings',
+                         enabled_weighted_target_request_filter_providers=[
+                             'amphora'])
+        self.create_l7policy(
+            listener, action, status=400,
+            targets=[targets[2] | {'request_header_operations': operations}])
+        self.create_l7policy(
+            listener, action, status=400,
+            targets=[ordinary | {'request_url_rewrite': {
+                'hostname': '*.invalid'}}])
+        self.create_l7policy(
+            listener, action, status=400,
+            targets=[targets[0] | {'request_header_operations': [
+                {'operation': 'ADD', 'name': 'HOST', 'value': 'other.test'}]}])
+        rpc.return_value.cast.assert_not_called()
+
+        policy = self.create_l7policy(
+            listener, action, targets=targets)['l7policy']
+        path = self.L7POLICY_PATH.format(l7policy_id=policy['id'])
+        self.assertEqual(targets, self.get(path).json['l7policy']['targets'])
+        self.set_lb_status(lb)
+        # Both scopes can rewrite different parts of the URL.
+        rewrite = {'replace_full_path': '/policy'}
+        self.conf.config(group='api_settings',
+                         enabled_request_url_rewrite_providers=['amphora'])
+        updated = self.put(path, {'l7policy': {
+            'request_url_rewrite': rewrite, 'targets': targets}}).json
+        self.assertEqual(rewrite, updated['l7policy']['request_url_rewrite'])
+        self.assertEqual(targets, rpc.return_value.cast.call_args.kwargs[
+            constants.L7POLICY_UPDATES]['targets'])
+        self.set_lb_status(lb)
+        rpc.return_value.cast.reset_mock()
+        self.put(path, {'l7policy': {'targets': [
+            ordinary | {'request_url_rewrite': {'replace_prefix': {
+                'match': '/', 'replacement': '/target'}}}]}}, status=400)
+        self.put(path, {'l7policy': {'request_url_rewrite': {
+            'hostname': 'second.example'}}}, status=400)
+        rpc.return_value.cast.assert_not_called()
+
+        self.conf.config(group='api_settings',
+                         enabled_weighted_target_request_filter_providers=[])
+        self.put(path, {'l7policy': {'targets': [targets[0]]}}, status=501)
+        self.assertEqual(targets, self.get(path).json['l7policy']['targets'])
+        cleared = self.put(path, {'l7policy': {'targets': [ordinary]}}).json
+        self.assertEqual([ordinary], cleared['l7policy']['targets'])
+        self.assertEqual(
+            [ordinary], self.get(path).json['l7policy']['targets'])
+        self.set_lb_status(lb)
+        self.delete(path)
+
+    @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
+    def test_weighted_target_filters_withdrawal_preserves_routing(self, rpc):
+        self.conf.config(
+            group='api_settings', enabled_gateway_action_providers=['amphora'],
+            enabled_weighted_target_request_filter_providers=['amphora'])
+        lb = self.create_load_balancer(
+            uuidutils.generate_uuid(), provider='amphora')['loadbalancer']
+        lb = lb['id']
+        self.set_lb_status(lb)
+
+        def pool():
+            pool_id = self.create_pool(lb, 'HTTP', 'ROUND_ROBIN')['pool']['id']
+            self.set_lb_status(lb)
+            return pool_id
+
+        default_pool, filtered_pool = pool(), pool()
+        listener = self.create_listener('HTTP', 80, lb)['listener']['id']
+        self.set_lb_status(lb)
+
+        def policy(action, **options):
+            policy_id = self.create_l7policy(
+                listener, action, **options)['l7policy']['id']
+            self.set_lb_status(lb)
+            rule = self.create_l7rule(
+                policy_id, 'PATH', 'STARTS_WITH', '/original')['rule']
+            self.set_lb_status(lb)
+            return (self.L7POLICY_PATH.format(l7policy_id=policy_id),
+                    self.L7RULE_PATH.format(l7policy_id=policy_id,
+                                            l7rule_id=rule['id']))
+
+        blocker, blocker_rule = policy(
+            'REDIRECT_TO_POOL', redirect_pool_id=default_pool)
+        filtered, filtered_rule = policy(
+            'WEIGHTED_TARGETS', targets=[
+                {'weight': 1, 'pool_id': filtered_pool,
+                 'request_url_rewrite': {'replace_full_path': '/new'}}])
+        self.conf.config(group='api_settings',
+                         enabled_weighted_target_request_filter_providers=[])
+        rpc.return_value.cast.reset_mock()
+        self.delete(blocker_rule, status=501)
+        self.delete(blocker, status=501)
+        self.put(blocker, {'l7policy': {'position': 2}}, status=501)
+        self.put(filtered_rule, {'rule': {'value': '/other'}}, status=501)
+        rpc.return_value.cast.assert_not_called()
+
+        pool_path = self.POOL_PATH.format(pool_id=filtered_pool)
+        self.put(pool_path, {'pool': {'admin_state_up': False}})
+        self.set_lb_status(lb)
+        self.put(pool_path, {'pool': {'admin_state_up': True}}, status=501)
+        self.put(filtered, {'l7policy': {'admin_state_up': False}})
+        self.set_lb_status(lb)
+        self.put(filtered, {'l7policy': {'admin_state_up': True}}, status=501)
+        self.delete(filtered_rule)
+        self.set_lb_status(lb)
+        self.delete(filtered)
+        self.set_lb_status(lb)
+        self.delete(blocker)
+
+    @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
     def test_request_url_rewrite_round_trip_and_withdrawal(self, rpc):
         lb = self.create_load_balancer(
             uuidutils.generate_uuid(), provider='amphora')['loadbalancer']['id']
@@ -1827,6 +1982,25 @@ class TestL7Policy(base.BaseAPITest):
         path = self.L7POLICY_PATH.format(l7policy_id=policy['id'])
         self.assertEqual({'status_code': 500},
                          self.get(path).json['l7policy']['fixed_response'])
+
+    @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
+    def test_nested_filtered_pool_requires_existing_lb(self, rpc):
+        self.conf.config(group='api_settings',
+                         enabled_gateway_action_providers=['amphora'])
+        listener = {'protocol': 'HTTP', 'protocol_port': 80, 'l7policies': [
+            {'action': 'WEIGHTED_TARGETS', 'targets': [
+                {'weight': 1, 'pool_id': uuidutils.generate_uuid(),
+                 'request_url_rewrite': {'hostname': 'backend.example'}}]}]}
+        body = {'loadbalancer': {'project_id': self.project_id,
+                                 'provider': 'amphora',
+                                 'vip_subnet_id': uuidutils.generate_uuid(),
+                                 'listeners': [listener]}}
+        self.post(self.LBS_PATH, body, status=501)
+        self.conf.config(group='api_settings',
+                         enabled_weighted_target_request_filter_providers=[
+                             'amphora'])
+        self.post(self.LBS_PATH, body, status=400)
+        rpc.return_value.cast.assert_not_called()
 
     def test_nested_fixed_responses_validated_before_vip_creation(self):
         default = {'default_http_response': {'status_code': 404}}

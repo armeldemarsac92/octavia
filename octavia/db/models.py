@@ -39,6 +39,7 @@ from octavia.api.v2.types import pool
 from octavia.api.v2.types import quotas
 from octavia.common import constants
 from octavia.common import data_models
+from octavia.common import validate
 from octavia.db import base_models
 from octavia.db import types as db_types
 from octavia.i18n import _
@@ -900,6 +901,8 @@ class L7Policy(base_models.BASE, base_models.IdMixin, base_models.ProjectMixin,
             row.pool = pools.get(row.pool_id)
             response = target.get('fixed_response')
             row.status_code = response['status_code'] if response else None
+            filters = validate.target_request_filters(target)
+            row.request_filters = filters or None
         del self._targets[len(targets):]
 
     def __str__(self):
@@ -932,12 +935,14 @@ class L7PolicyTarget(base_models.BASE):
         sa.ForeignKey("pool.id", name="fk_l7policy_target_pool_id"),
         index=True)
     status_code = sa.Column(sa.Integer)
+    request_filters = sa.Column(sa.JSON(none_as_null=True))
     l7policy = orm.relationship("L7Policy", back_populates="_targets")
     pool = orm.relationship("Pool", back_populates="_l7policy_targets")
 
     def as_target(self):
         if self.pool_id is not None:
-            return {'weight': self.weight, 'pool_id': self.pool_id}
+            return dict(self.request_filters or {}, weight=self.weight,
+                        pool_id=self.pool_id)
         return {'weight': self.weight,
                 'fixed_response': {'status_code': self.status_code}}
 

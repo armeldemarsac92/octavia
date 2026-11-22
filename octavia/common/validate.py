@@ -441,6 +441,15 @@ def validate_weighted_l7policy_protocol(protocol):
                      'TERMINATED_HTTPS listener.'))
 
 
+TARGET_REQUEST_FILTER_FIELDS = (
+    'request_header_operations', 'request_url_rewrite')
+
+
+def target_request_filters(target):
+    return {field: target[field] for field in TARGET_REQUEST_FILTER_FIELDS
+            if target.get(field)}
+
+
 def weighted_l7policy_targets(targets):
     if (not isinstance(targets, list) or
             not 1 <= len(targets) <= constants.MAX_L7POLICY_TARGETS):
@@ -450,11 +459,13 @@ def weighted_l7policy_targets(targets):
     normalized = []
     for target in targets:
         if (not isinstance(target, dict) or
-                target.keys() not in ({'weight', 'pool_id'},
-                                      {'weight', 'fixed_response'})):
+                (target.keys() != {'weight', 'fixed_response'} and
+                 target.keys() - set(TARGET_REQUEST_FILTER_FIELDS) !=
+                 {'weight', 'pool_id'})):
             raise exceptions.InvalidL7PolicyArgs(
                 msg=_('Each target requires weight and exactly one of '
-                      'pool_id or fixed_response.'))
+                      'pool_id or fixed_response. Request filters are '
+                      'available only on pool targets.'))
 
         weight = target['weight']
         if (type(weight) is not int or
@@ -468,7 +479,17 @@ def weighted_l7policy_targets(targets):
             except (AttributeError, TypeError, ValueError) as e:
                 raise exceptions.InvalidL7PolicyArgs(
                     msg=_('Target pool_id must be a UUID.')) from e
-            normalized.append({'weight': weight, 'pool_id': pool_id})
+            result = {'weight': weight, 'pool_id': pool_id}
+            if 'request_header_operations' in target:
+                operations = header_operations(
+                    target['request_header_operations'],
+                    'request_header_operations')
+                if operations:
+                    result['request_header_operations'] = operations
+            if 'request_url_rewrite' in target:
+                result['request_url_rewrite'] = http_request_url_rewrite(
+                    target['request_url_rewrite'])
+            normalized.append(result)
         else:
             status = fixed_http_status_code(target['fixed_response'])
             normalized.append({'weight': weight,
@@ -570,6 +591,33 @@ def http_request_url_rewrite(rewrite):
                   'replacement.'))
     _validate_http_url_modifiers(rewrite, 'request_url_rewrite')
     return rewrite
+
+
+def validate_target_request_filter_composition(targets, operations, rewrite):
+    rewrite = rewrite or {}
+    operations = operations or []
+    path_fields = {'replace_full_path', 'replace_prefix'}
+    for target in targets or []:
+        filters = target_request_filters(target)
+        if not filters:
+            continue
+        target_rewrite = filters.get('request_url_rewrite', {})
+        if (rewrite.keys() & path_fields and
+                target_rewrite.keys() & path_fields):
+            raise exceptions.InvalidL7PolicyArgs(
+                msg=_('A rule and a pool target cannot both rewrite the '
+                      'request path.'))
+        if 'hostname' in rewrite and 'hostname' in target_rewrite:
+            raise exceptions.InvalidL7PolicyArgs(
+                msg=_('A rule and a pool target cannot both rewrite the '
+                      'request hostname.'))
+        target_ops = filters.get('request_header_operations', [])
+        if ('hostname' in rewrite or 'hostname' in target_rewrite) and any(
+                operation['name'].lower() == 'host'
+                for operation in (*operations, *target_ops)):
+            raise exceptions.InvalidL7PolicyArgs(
+                msg=_('A hostname rewrite and a Host header operation '
+                      'cannot be combined on a filtered pool target.'))
 
 
 def _validate_http_url_modifiers(modifiers, field):
@@ -812,6 +860,13 @@ def sanitize_l7policy_api_args(l7policy, create=False, old_policy=None):
         if operations and l7policy.get('action', old_action) not in actions:
             raise exceptions.InvalidL7PolicyArgs(
                 msg=_('%s is unavailable for this policy action.') % field)
+
+    if l7policy.get('action', old_action) == weighted_action:
+        validate_target_request_filter_composition(
+            l7policy.get('targets', getattr(old_policy, 'targets', None)),
+            l7policy.get('request_header_operations', getattr(
+                old_policy, 'request_header_operations', None)),
+            rewrite)
 
     # If we are creating, we need an action at this point
     if create and 'action' not in l7policy.keys():
