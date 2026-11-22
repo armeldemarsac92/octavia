@@ -1096,7 +1096,8 @@ def sample_l7policy_tuple(id,
                                          'request_header_operations, '
                                          'response_header_operations, '
                                          'https_listener_hostname, '
-                                         'redirect_request')
+                                         'redirect_request, '
+                                         'request_url_rewrite')
     l7rules = []
     if sample_policy == 1:
         action = constants.L7POLICY_ACTION_REDIRECT_TO_POOL
@@ -1148,7 +1149,8 @@ def sample_l7policy_tuple(id,
         provisioning_status=provisioning_status, fixed_response=None,
         targets=None, request_header_operations=None,
         response_header_operations=None,
-        https_listener_hostname=None, redirect_request=None)
+        https_listener_hostname=None, redirect_request=None,
+        request_url_rewrite=None)
 
 
 def sample_l7rule_tuple(id,

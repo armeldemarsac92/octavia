@@ -621,6 +621,14 @@ class PoolsController(base.BaseController):
             self._validate_pool_PUT(pool, current)
             self._validate_tcp_listener_pool_update(
                 context.session, id, current, pool, driver)
+            if (pool.admin_state_up is True and not current.enabled and
+                    constants.GATEWAY_CAPABILITY_REQUEST_URL_REWRITE not in
+                    driver_utils.gateway_capabilities(driver)):
+                policy_repo = self.repositories.l7policy
+                protocol = policy_repo.get_active_rewrite_protocol(
+                    context.session, id)
+                if protocol:
+                    driver_utils.require_request_url_rewrite(driver, protocol)
 
             # Prepare the data for the driver data model
             pool_dict = pool.to_dict(render_unsets=False)

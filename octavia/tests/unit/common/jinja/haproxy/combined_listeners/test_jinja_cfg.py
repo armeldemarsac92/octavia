@@ -1846,6 +1846,25 @@ class TestHaproxyCfg(base.TestCase):
             self.assertIn(f'http-request {action} {guard}', backends)
         self.assertEqual(3, backends.count(guard))
 
+    def test_request_url_rewrite_runs_only_in_selected_backend(self):
+        amp = sample_configs_combined.sample_amphora_tuple()
+        listener = sample_configs_combined.sample_listener_tuple(l7=True)
+        policy = listener.l7policies[0]._replace(
+            id='rewrite', request_url_rewrite={
+                'hostname': 'next.example', 'replace_full_path': '/new'})
+        listener = listener._replace(l7policies=[policy])
+        rendered = self.jinja_cfg.build_config(
+            amp, [listener], None, haproxy_versions=['3', '0', '19'],
+            amp_details=None)
+        frontend, backends = rendered.split('\nbackend ', 1)
+        self.assertIn('set-var(txn.octavia_l7_policy) str(rewrite)', frontend)
+        self.assertNotIn('http-request set-path', frontend)
+        self.assertNotIn('http-request set-header host', frontend)
+        guard = 'if { var(txn.octavia_l7_policy) -m str rewrite }'
+        self.assertIn(f'http-request set-path "/new" {guard}', backends)
+        self.assertIn(f'http-request set-header host "next.example" {guard}',
+                      backends)
+
     def test_response_headers_follow_policy_to_pool_or_fixed_response(self):
         amp = sample_configs_combined.sample_amphora_tuple()
         listener = sample_configs_combined.sample_listener_tuple(l7=True)

@@ -198,6 +198,7 @@ class L7RuleController(base.BaseController):
                         db_l7policy.request_header_operations),
                     response_header_operations=(
                         db_l7policy.response_header_operations),
+                    request_url_rewrite=db_l7policy.request_url_rewrite,
                     tcp_tls_termination=tcp_tls_termination)
             if tcp_policy:
                 driver_utils.require_tls_sni_rule_comparison(
@@ -255,9 +256,10 @@ class L7RuleController(base.BaseController):
         except Exception as e:
             raise exceptions.L7RuleValidation(error=e)
 
-    def _require_redirect_capability_for_rule_removal(
+    def _require_url_capability_for_rule_removal(
             self, session, driver, policy, rule):
-        if (policy.action != constants.L7POLICY_ACTION_REDIRECT_REQUEST or
+        redirect = policy.action == constants.L7POLICY_ACTION_REDIRECT_REQUEST
+        if (not (redirect or policy.request_url_rewrite) or
                 not policy.enabled or not rule.enabled or
                 rule.provisioning_status in (constants.PENDING_DELETE,
                                              constants.DELETED)):
@@ -269,7 +271,11 @@ class L7RuleController(base.BaseController):
         if (listener.enabled and
                 self.repositories.l7rule.has_other_enabled_rules(
                     session, rule)):
-            driver_utils.require_http_request_redirect(driver)
+            if redirect:
+                driver_utils.require_http_request_redirect(driver)
+            if policy.request_url_rewrite:
+                driver_utils.require_request_url_rewrite(
+                    driver, listener.protocol)
 
     @wsme_pecan.wsexpose(l7rule_types.L7RuleRootResponse,
                          wtypes.text, body=l7rule_types.L7RuleRootPUT,
@@ -314,7 +320,7 @@ class L7RuleController(base.BaseController):
             match_fields = {'type', 'compare_type', 'key', 'value', 'invert'}
             enabled = l7rule_dict.get('enabled', db_l7rule.enabled)
             if not enabled:
-                self._require_redirect_capability_for_rule_removal(
+                self._require_url_capability_for_rule_removal(
                     context.session, driver, db_l7policy, db_l7rule)
             match_changed = any(
                 field in l7rule_dict and
@@ -341,6 +347,7 @@ class L7RuleController(base.BaseController):
                         db_l7policy.request_header_operations),
                     response_header_operations=(
                         db_l7policy.response_header_operations),
+                    request_url_rewrite=db_l7policy.request_url_rewrite,
                     tcp_tls_termination=tcp_tls_termination)
                 if tcp_policy:
                     compare_type = l7rule_dict.get(
@@ -412,7 +419,7 @@ class L7RuleController(base.BaseController):
             db_l7policy = self._test_lb_listener_policy_statuses(
                 context.session)
             context.session.refresh(db_l7rule, with_for_update=True)
-            self._require_redirect_capability_for_rule_removal(
+            self._require_url_capability_for_rule_removal(
                 context.session, driver, db_l7policy, db_l7rule)
 
             self.repositories.l7rule.update(

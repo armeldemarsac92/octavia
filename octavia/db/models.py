@@ -841,6 +841,7 @@ class L7Policy(base_models.BASE, base_models.IdMixin, base_models.ProjectMixin,
     redirect_http_code = sa.Column(sa.Integer, nullable=True)
     fixed_response = sa.Column(sa.JSON(none_as_null=True))
     redirect_request = sa.Column(sa.JSON(none_as_null=True))
+    request_url_rewrite = sa.Column(sa.JSON(none_as_null=True))
     request_header_operations = sa.Column(sa.JSON(none_as_null=True))
     response_header_operations = sa.Column(sa.JSON(none_as_null=True))
     https_listener_hostname = sa.Column(sa.String(253), nullable=True)

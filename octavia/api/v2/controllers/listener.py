@@ -101,6 +101,7 @@ def validate_policy_options_on_create(
                                constants.L7POLICY_ACTION_REDIRECT_REQUEST) and
                 policy.get('fixed_response') is None and
                 policy.get('redirect_request') is None and
+                policy.get('request_url_rewrite') is None and
                 policy.get('targets') is None and
                 'request_header_operations' not in policy and
                 'response_header_operations' not in policy):
@@ -109,7 +110,8 @@ def validate_policy_options_on_create(
             policy.copy(), create=True)
         driver_utils.require_gateway_policy_action(
             driver, checked['action'], protocol,
-            tcp_tls_termination=tcp_tls_termination)
+            tcp_tls_termination=tcp_tls_termination,
+            request_url_rewrite=checked.get('request_url_rewrite'))
         l7policy.validate_policy_headers(checked, protocol, driver)
         if not creating_load_balancer:
             raise exceptions.ValidationException(
@@ -861,11 +863,12 @@ class ListenersController(base.BaseController):
                         driver, policy_repo, context.session, listener_id=id)
                 policies = policy_repo.get_enabled_gateway_policies(
                     context.session, id, db_listener.protocol)
-                for action, request_ops, response_ops in policies:
+                for action, request_ops, response_ops, rewrite in policies:
                     driver_utils.require_gateway_policy_action(
                         driver, action, db_listener.protocol,
                         request_header_operations=request_ops,
                         response_header_operations=response_ops,
+                        request_url_rewrite=rewrite,
                         tcp_tls_termination=db_listener.tcp_tls_termination)
                 if (not db_listener.tcp_tls_termination and
                         driver_utils.uses_tls_sni_policy_path(

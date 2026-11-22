@@ -2042,6 +2042,10 @@ class L7PolicyRepository(BaseRepository):
 
     def _validate_l7policy_pool_data(self, session, l7policy):
         """Does validations on a given L7 policy."""
+        if l7policy.request_url_rewrite is not None:
+            listener = session.get(models.Listener, l7policy.listener_id)
+            validate.validate_http_request_url_rewrite_protocol(
+                listener.protocol)
         if (l7policy.request_header_operations or
                 l7policy.response_header_operations):
             listener = session.get(models.Listener, l7policy.listener_id)
@@ -2101,6 +2105,34 @@ class L7PolicyRepository(BaseRepository):
                 .limit(1)
                 .scalar())
 
+    def get_active_rewrite_protocol(self, session, pool_id):
+        """Find a live rewrite which would forward if this pool reopened."""
+        policy = self.model_class
+        listener = models.Listener
+        load_balancer = models.LoadBalancer
+        rule = models.L7Rule
+        target = models.L7PolicyTarget
+        removed = (consts.PENDING_DELETE, consts.DELETED)
+        return (
+            session.query(listener.protocol)
+            .select_from(policy)
+            .join(policy.listener)
+            .join(listener.load_balancer)
+            .join(policy.l7rules)
+            .outerjoin(target, (target.l7policy_id == policy.id) &
+                       (target.pool_id == pool_id) & (target.weight > 0))
+            .filter(policy.request_url_rewrite.isnot(None),
+                    policy.enabled.is_(True), rule.enabled.is_(True),
+                    listener.enabled.is_(True), load_balancer.enabled.is_(True),
+                    policy.provisioning_status.notin_(removed),
+                    rule.provisioning_status.notin_(removed),
+                    listener.provisioning_status.notin_(removed),
+                    ((policy.action == consts.L7POLICY_ACTION_REDIRECT_TO_POOL) &
+                     (policy.redirect_pool_id == pool_id)) |
+                    ((policy.action == consts.L7POLICY_ACTION_WEIGHTED_TARGETS) &
+                     target.pool_id.isnot(None)))
+            .with_for_update().limit(1).scalar())
+
     def get_all(self, session, pagination_helper=None, **filters):
         deleted = filters.pop('show_deleted', True)
         query = session.query(self.model_class).filter_by(
@@ -2148,7 +2180,7 @@ class L7PolicyRepository(BaseRepository):
         return data_model_list, links
 
     def get_active_http_policy_extensions(self, session, load_balancer_id):
-        """Read enabled redirects and header operations under the LB lock."""
+        """Read enabled HTTP policy extensions under the LB lock."""
         policy = self.model_class
         listener = models.Listener
         removed = (consts.PENDING_DELETE, consts.DELETED)
@@ -2156,7 +2188,8 @@ class L7PolicyRepository(BaseRepository):
         return (
             session.query(listener.protocol, policy.action,
                           policy.request_header_operations,
-                          policy.response_header_operations)
+                          policy.response_header_operations,
+                          policy.request_url_rewrite)
             .select_from(policy)
             .join(listener, listener.id == policy.listener_id)
             .filter(listener.load_balancer_id == load_balancer_id,
@@ -2166,7 +2199,8 @@ class L7PolicyRepository(BaseRepository):
                     listener.provisioning_status.notin_(removed),
                     policy.provisioning_status.notin_(removed),
                     redirect | policy.request_header_operations.isnot(None) |
-                    policy.response_header_operations.isnot(None))
+                    policy.response_header_operations.isnot(None) |
+                    policy.request_url_rewrite.isnot(None))
             .with_for_update().all())
 
     def get_enabled_gateway_policies(self, session, listener_id, protocol):
@@ -2179,11 +2213,13 @@ class L7PolicyRepository(BaseRepository):
             actions.append(consts.L7POLICY_ACTION_REDIRECT_TO_POOL)
         return (
             session.query(model.action, model.request_header_operations,
-                          model.response_header_operations)
+                          model.response_header_operations,
+                          model.request_url_rewrite)
             .filter_by(listener_id=listener_id, enabled=True)
             .filter(model.action.in_(actions) |
                     model.request_header_operations.isnot(None) |
-                    model.response_header_operations.isnot(None))
+                    model.response_header_operations.isnot(None) |
+                    model.request_url_rewrite.isnot(None))
             .filter(model.provisioning_status.notin_((
                 consts.PENDING_DELETE, consts.DELETED)))
             .with_for_update().all())

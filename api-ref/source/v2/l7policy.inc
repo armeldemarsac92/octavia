@@ -60,6 +60,7 @@ Response Parameters
    - redirect_pool_id: l7policy-redirect-pool_id
    - redirect_prefix: l7policy-redirect-prefix
    - redirect_request: l7policy-redirect-request
+   - request_url_rewrite: l7policy-request-url-rewrite
    - redirect_url: l7policy-redirect-url
    - rules: l7policy-rule-ids
    - tags: tags
@@ -117,6 +118,10 @@ The regional ``http_request_redirect_v1`` provider capability enables
 ``REDIRECT_REQUEST`` and its structured ``redirect_request`` field.
 See the provider Gateway API capabilities for the fields and defaults.
 
+The regional ``request_url_rewrite_v1`` provider capability enables
+``request_url_rewrite`` on forwarding policies. The winning policy can
+replace the hostname, path or both before forwarding.
+
 L7 policies with ``action`` of ``REJECT`` will return a ``Forbidden (403)``
 response code to the requester.
 
@@ -156,6 +161,7 @@ Request
    - redirect_pool_id: l7policy-redirect-pool_id-optional
    - redirect_prefix: l7policy-redirect-prefix-optional
    - redirect_request: l7policy-redirect-request
+   - request_url_rewrite: l7policy-request-url-rewrite
    - redirect_url: l7policy-redirect-url-optional
    - tags: tags-optional
 
@@ -191,6 +197,7 @@ Response Parameters
    - redirect_pool_id: l7policy-redirect-pool_id
    - redirect_prefix: l7policy-redirect-prefix
    - redirect_request: l7policy-redirect-request
+   - request_url_rewrite: l7policy-request-url-rewrite
    - redirect_url: l7policy-redirect-url
    - rules: l7policy-rule-ids
    - tags: tags
@@ -260,6 +267,7 @@ Response Parameters
    - redirect_pool_id: l7policy-redirect-pool_id
    - redirect_prefix: l7policy-redirect-prefix
    - redirect_request: l7policy-redirect-request
+   - request_url_rewrite: l7policy-request-url-rewrite
    - redirect_url: l7policy-redirect-url
    - rules: l7policy-rule-ids
    - tags: tags
@@ -319,6 +327,7 @@ Request
    - redirect_pool_id: l7policy-redirect-pool_id-optional
    - redirect_prefix: l7policy-redirect-prefix-optional
    - redirect_request: l7policy-redirect-request
+   - request_url_rewrite: l7policy-request-url-rewrite
    - redirect_url: l7policy-redirect-url-optional
    - tags: tags-optional
 
@@ -354,6 +363,7 @@ Response Parameters
    - redirect_pool_id: l7policy-redirect-pool_id
    - redirect_prefix: l7policy-redirect-prefix
    - redirect_request: l7policy-redirect-request
+   - request_url_rewrite: l7policy-request-url-rewrite
    - redirect_url: l7policy-redirect-url
    - rules: l7policy-rule-ids
    - tags: tags

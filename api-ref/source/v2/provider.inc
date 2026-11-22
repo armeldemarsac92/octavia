@@ -228,6 +228,20 @@ their usual priority on other requests. Use ``REDIRECT_REQUEST`` with an
 explicit DNS hostname and effective scheme and port for a fixed destination
 that needs position-order precedence with forwarding.
 
+``request_url_rewrite_v1`` enables ``request_url_rewrite`` on
+``REDIRECT_TO_POOL`` and ``WEIGHTED_TARGETS`` policies. Amphora evaluates
+the L7 rules on the original request and applies the rewrite after selecting
+the destination pool. A rewrite on a weighted policy applies to each
+selected pool. Fixed responses and individual target filters are outside
+the rewrite contract.
+
+Set ``hostname`` to replace the HTTP authority with a DNS name.
+``replace_full_path`` and ``replace_prefix`` have the same shape and
+replacement encoding as in ``redirect_request``. A prefix changes only an
+exact path or a descendant on a segment boundary. The original query
+travels with the rewritten path. Send ``request_url_rewrite: null`` to clear
+the settings. Omission in an update preserves the settings.
+
 These fields require HTTP or terminated HTTPS. Create extended policies
 through the L7 policy endpoint or in the initial load balancer graph. To
 add one to a standalone listener, create the listener first.
