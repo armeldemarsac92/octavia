@@ -1513,6 +1513,37 @@ class TestL7Policy(base.BaseAPITest):
                          enabled_weighted_target_request_filter_providers=[])
         self.put(path, {'l7policy': {'targets': [targets[0]]}}, status=501)
         self.assertEqual(targets, self.get(path).json['l7policy']['targets'])
+        # Withdrawing A's rewrite leaves B's selected range and headers intact.
+        remaining = [ordinary, targets[1], targets[2]]
+        self.put(path, {'l7policy': {'targets': remaining}})
+        self.set_lb_status(lb)
+        self.assertEqual(remaining, self.get(path).json['l7policy']['targets'])
+        self.put(path, {'l7policy': {'targets': [
+            targets[1], ordinary, targets[2]]}}, status=501)
+
+        narrower = [ordinary | {'weight': 2}, targets[1],
+                    targets[2] | {'weight': 2}]
+        self.put(path, {'l7policy': {'targets': narrower}})
+        self.set_lb_status(lb)
+        self.put(path, {'l7policy': {'targets': remaining}}, status=501)
+
+        # A filter on a zero-weight occurrence stays dormant on activation.
+        self.conf.config(group='api_settings',
+                         enabled_weighted_target_request_filter_providers=[
+                             'amphora'])
+        dormant = [ordinary, targets[1] | {'weight': 0}]
+        self.put(path, {'l7policy': {'targets': dormant,
+                                     'admin_state_up': False}})
+        self.set_lb_status(lb)
+        self.conf.config(group='api_settings',
+                         enabled_weighted_target_request_filter_providers=[])
+        self.put(path, {'l7policy': {'admin_state_up': True}})
+        self.set_lb_status(lb)
+        state = self.get(path).json['l7policy']
+        self.assertTrue(state['admin_state_up'])
+        self.assertEqual(dormant, state['targets'])
+        self.put(path, {'l7policy': {'targets': [ordinary, targets[1]]}},
+                 status=501)
         cleared = self.put(path, {'l7policy': {'targets': [ordinary]}}).json
         self.assertEqual([ordinary], cleared['l7policy']['targets'])
         self.assertEqual(

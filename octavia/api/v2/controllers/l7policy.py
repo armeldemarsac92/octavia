@@ -58,6 +58,35 @@ def validate_policy_headers(policy, protocol, driver, old_policy=None):
             validate.validate_header_protocol(protocol)
 
 
+def _requires_target_filter_capability(previous, targets, expands_scope):
+    """Allow removal of existing filters after regional withdrawal."""
+    previous, targets = previous or [], targets or []
+    if previous == targets and not expands_scope:
+        return False
+
+    # The draw selects an occurrence by its ordered weight. An unchanged
+    # positive filter may remain in the same or a narrower selection interval.
+    previous_total = sum(target['weight'] for target in previous)
+    total = sum(target['weight'] for target in targets)
+    previous_start = start = 0
+    for index, target in enumerate(targets):
+        old = previous[index] if index < len(previous) else {}
+        previous_end = previous_start + old.get('weight', 0)
+        end = start + target['weight']
+        filters = validate.target_request_filters(target)
+        if filters:
+            if (target.get('pool_id') != old.get('pool_id') or
+                    any(old.get(field) != value
+                        for field, value in filters.items())):
+                return True
+            extends_draw = (start * previous_total < previous_start * total or
+                            end * previous_total > previous_end * total)
+            if target['weight'] and (expands_scope or extends_draw):
+                return True
+        previous_start, start = previous_end, end
+    return False
+
+
 class L7PolicyController(base.BaseController):
     RBAC_TYPE = constants.RBAC_L7POLICY
 
@@ -392,12 +421,11 @@ class L7PolicyController(base.BaseController):
                 l7policy_dict.get(field) and
                 l7policy_dict[field] != getattr(db_l7policy, field)
                 for field in validate.TARGET_REQUEST_FILTER_FIELDS)
-            if (any(validate.target_request_filters(target)
-                    for target in targets or []) and
-                    (targets != old_targets or
-                     (enabled and (
-                         activates_policy or updated_request_transform or
-                         hostname != db_l7policy.https_listener_hostname)))):
+            expands_filter_scope = enabled and (
+                activates_policy or updated_request_transform or
+                hostname != db_l7policy.https_listener_hostname)
+            if _requires_target_filter_capability(
+                    old_targets, targets, expands_filter_scope):
                 driver_utils.require_weighted_target_request_filters(
                     driver, listener.protocol)
             routing_changed_or_disabled = (
