@@ -167,10 +167,20 @@ bind {{ lb_vip_address }}:{{ listener.protocol_port }} {{
 {%- endmacro %}
 
 
+{% macro policy_response_headers(listener, backend_kind, backend_id) %}
+    {% for policy_id, operations in listener.get('response_header_operations_by_backend', {}).get((backend_kind, backend_id), []) %}
+        {% for operation in operations %}
+    http-after-response {{ operation|safe }} if {{ selected_policy_match_macro(policy_id) }}
+        {% endfor %}
+    {% endfor %}
+{% endmacro %}
+
+
 {% macro fixed_response_backend_macro(constants, listener, response_id, status_code) %}
 backend {{ fixed_response_backend_name(constants, listener, response_id) }}
     mode http
     http-request return status {{ status_code }}
+{{ policy_response_headers(listener, 'fixed', response_id) -}}
 
 {% endmacro %}
 
@@ -181,6 +191,7 @@ backend {{ pool.id }}:{{ listener.id }}
     mode {{ listener.protocol_mode }}
     timeout connect {{ listener.timeout_member_connect }}
     timeout server {{ listener.timeout_member_data }}
+{{ policy_response_headers(listener, 'pool', pool.id) -}}
 
 {% endmacro %}
 
@@ -295,7 +306,8 @@ frontend {{ listener.id }}
     {% endif %}
     {% set policies = listener.l7policies|selectattr('enabled')|selectattr('l7rules')|list %}
     {% set select_policy = listener.weighted_response_codes is defined or
-                           listener.request_header_operations_by_pool is defined %}
+                           listener.request_header_operations_by_pool is defined or
+                           listener.response_header_operations_by_backend is defined %}
     {% if select_policy %}
         {# Match the first eligible switching policy before sampling. Only a
            weighted winner draws, and txn variables are reset per request. #}
@@ -481,6 +493,7 @@ backend {{ pool.id }}:{{ listener.id }}
                constants.PROTOCOL_HTTP.lower()))%}
     http-reuse safe
     {% endif %}
+{{ policy_response_headers(listener, 'pool', pool.id) -}}
     {% for policy_id, operations in listener.get('request_header_operations_by_pool', {}).get(pool.id, []) %}
         {% for operation in operations %}
     http-request {{ operation|safe }} if {{ selected_policy_match_macro(policy_id) }}

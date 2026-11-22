@@ -190,6 +190,16 @@ required for ``SET`` and ``ADD``. The operations run on requests forwarded
 by the selected policy to a pool. Send an empty list to clear a stored
 list.
 
+``response_header_operations_v1`` enables the independent L7 policy field
+``response_header_operations``. The same list format applies to responses
+returned by a pool or by a selected ``FIXED_RESPONSE`` or ``WEIGHTED_TARGETS``
+policy. ``ADD`` appends a field, ``SET`` replaces its values and ``REMOVE``
+removes the field. Connection management and message framing stay with the
+listener. Operations on ``Connection``, ``Content-Length``, ``Keep-Alive``,
+``Proxy-Connection``, ``TE``, ``Trailer``, ``Transfer-Encoding`` and ``Upgrade``
+return HTTP 400. A policy update preserves omitted fields. Send an empty
+list to clear the response operations.
+
 These fields require HTTP or terminated HTTPS. Create extended policies
 through the L7 policy endpoint or in the initial load balancer graph. To
 add one to a standalone listener, create the listener first.

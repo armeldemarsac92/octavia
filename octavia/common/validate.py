@@ -451,11 +451,17 @@ _HEADER_NAME_RE = re.compile(r"[!#$%&'*+\-.^_\x60|~0-9A-Za-z]{1,256}")
 _HEADER_VALUE_CONTROL_RE = re.compile(r'[\x00-\x08\x0a-\x1f\x7f\ud800-\udfff]')
 
 
-def request_header_operations(operations):
+# Connection management and framing are controlled by HAProxy.
+_RESPONSE_TRANSPORT_HEADERS = frozenset({
+    'connection', 'content-length', 'keep-alive', 'proxy-connection', 'te',
+    'trailer', 'transfer-encoding', 'upgrade',
+})
+
+
+def header_operations(operations, field):
     if not isinstance(operations, list) or len(operations) > 48:
         raise exceptions.InvalidL7PolicyArgs(
-            msg=_('request_header_operations must be an array of up to '
-                  '48 entries.'))
+            msg=_('%s must be an array of up to 48 entries.') % field)
 
     names = set()
     normalized = []
@@ -470,11 +476,16 @@ def request_header_operations(operations):
         name = item['name']
         if not isinstance(name, str) or not _HEADER_NAME_RE.fullmatch(name):
             raise exceptions.InvalidL7PolicyArgs(
-                msg=_('Invalid request header name.'))
+                msg=_('Invalid header name.'))
         name = name.lower()
+        if (field == 'response_header_operations' and
+                name in _RESPONSE_TRANSPORT_HEADERS):
+            raise exceptions.InvalidL7PolicyArgs(
+                msg=_('Response framing and connection headers are managed '
+                      'by the listener.'))
         if name in names:
             raise exceptions.InvalidL7PolicyArgs(
-                msg=_('Request header operation names must be unique '
+                msg=_('Header operation names must be unique '
                       'regardless of case.'))
         names.add(name)
         result = {'operation': operation, 'name': name}
@@ -483,17 +494,17 @@ def request_header_operations(operations):
             if (not isinstance(value, str) or len(value) > 4096 or
                     _HEADER_VALUE_CONTROL_RE.search(value)):
                 raise exceptions.InvalidL7PolicyArgs(
-                    msg=_('Invalid request header value.'))
+                    msg=_('Invalid header value.'))
             result['value'] = value
         normalized.append(result)
     return normalized
 
 
-def validate_request_header_protocol(protocol):
+def validate_header_protocol(protocol):
     if protocol not in (constants.PROTOCOL_HTTP,
                         constants.PROTOCOL_TERMINATED_HTTPS):
         raise exceptions.ValidationException(
-            detail=_('Request header operations require an HTTP or '
+            detail=_('Header operations require an HTTP or '
                      'TERMINATED_HTTPS listener.'))
 
 
@@ -620,16 +631,18 @@ def sanitize_l7policy_api_args(l7policy, create=False, old_policy=None):
         if not l7policy.get('redirect_http_code'):
             l7policy.update({'redirect_http_code': 302})
 
-    field = 'request_header_operations'
-    if field in l7policy:
-        l7policy[field] = request_header_operations(l7policy[field])
-    operations = l7policy.get(
-        field, getattr(old_policy, field, None))
-    if (operations and l7policy.get('action', old_action) not in (
-            constants.L7POLICY_ACTION_REDIRECT_TO_POOL,
-            constants.L7POLICY_ACTION_WEIGHTED_TARGETS)):
-        raise exceptions.InvalidL7PolicyArgs(
-            msg=_('Request header operations require a forwarding action.'))
+    forwarding_actions = (constants.L7POLICY_ACTION_REDIRECT_TO_POOL,
+                          constants.L7POLICY_ACTION_WEIGHTED_TARGETS)
+    for field, actions in (
+            ('request_header_operations', forwarding_actions),
+            ('response_header_operations',
+             (*forwarding_actions, constants.L7POLICY_ACTION_FIXED_RESPONSE))):
+        if field in l7policy:
+            l7policy[field] = header_operations(l7policy[field], field)
+        operations = l7policy.get(field, getattr(old_policy, field, None))
+        if operations and l7policy.get('action', old_action) not in actions:
+            raise exceptions.InvalidL7PolicyArgs(
+                msg=_('%s is unavailable for this policy action.') % field)
 
     # If we are creating, we need an action at this point
     if create and 'action' not in l7policy.keys():

@@ -26,8 +26,10 @@ class BaseL7PolicyType(types.BaseType):
 
     def to_dict(self, render_unsets=False):
         data = super().to_dict(render_unsets=render_unsets)
-        if self.request_header_operations is wtypes.Unset:
-            data.pop('request_header_operations', None)
+        for field in ('request_header_operations',
+                      'response_header_operations'):
+            if getattr(self, field) is wtypes.Unset:
+                data.pop(field, None)
         return data
 
 
@@ -47,6 +49,8 @@ class L7PolicyResponse(BaseL7PolicyType):
     fixed_response = wtypes.wsattr(types.FixedHTTPResponse)
     targets = wtypes.wsattr(types.WeightedL7PolicyTargets())
     request_header_operations = wtypes.wsattr(types.RequestHeaderOperations())
+    response_header_operations = wtypes.wsattr(
+        types.ResponseHeaderOperations())
     https_listener_hostname = wtypes.wsattr(wtypes.StringType(max_length=253))
     redirect_prefix = wtypes.wsattr(wtypes.StringType())
     position = wtypes.wsattr(wtypes.IntegerType())
@@ -66,8 +70,10 @@ class L7PolicyResponse(BaseL7PolicyType):
             result.fixed_response = wtypes.Unset
         if db_obj.https_listener_hostname is None:
             result.https_listener_hostname = wtypes.Unset
-        if db_obj.request_header_operations is None:
-            result.request_header_operations = wtypes.Unset
+        for field in ('request_header_operations',
+                      'response_header_operations'):
+            if getattr(db_obj, field) is None:
+                setattr(result, field, wtypes.Unset)
         if not db_obj.targets:
             result.targets = wtypes.Unset
 
@@ -117,6 +123,8 @@ class L7PolicyPOST(BaseL7PolicyType):
     fixed_response = wtypes.wsattr(types.FixedHTTPResponse)
     targets = wtypes.wsattr(types.WeightedL7PolicyTargets())
     request_header_operations = wtypes.wsattr(types.RequestHeaderOperations())
+    response_header_operations = wtypes.wsattr(
+        types.ResponseHeaderOperations())
     https_listener_hostname = wtypes.wsattr(wtypes.StringType(max_length=253))
     redirect_prefix = wtypes.wsattr(types.URLType())
     position = wtypes.wsattr(wtypes.IntegerType(
@@ -146,6 +154,8 @@ class L7PolicyPUT(BaseL7PolicyType):
     fixed_response = wtypes.wsattr(types.FixedHTTPResponse)
     targets = wtypes.wsattr(types.WeightedL7PolicyTargets())
     request_header_operations = wtypes.wsattr(types.RequestHeaderOperations())
+    response_header_operations = wtypes.wsattr(
+        types.ResponseHeaderOperations())
     https_listener_hostname = wtypes.wsattr(wtypes.StringType(max_length=253))
     redirect_prefix = wtypes.wsattr(types.URLType())
     position = wtypes.wsattr(wtypes.IntegerType(
@@ -173,6 +183,8 @@ class L7PolicySingleCreate(BaseL7PolicyType):
     fixed_response = wtypes.wsattr(types.FixedHTTPResponse)
     targets = wtypes.wsattr(types.WeightedL7PolicyTargets())
     request_header_operations = wtypes.wsattr(types.RequestHeaderOperations())
+    response_header_operations = wtypes.wsattr(
+        types.ResponseHeaderOperations())
     https_listener_hostname = wtypes.wsattr(wtypes.StringType(max_length=253))
     redirect_prefix = wtypes.wsattr(types.URLType())
     position = wtypes.wsattr(wtypes.IntegerType(

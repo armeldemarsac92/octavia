@@ -1094,6 +1094,7 @@ def sample_l7policy_tuple(id,
                                          'provisioning_status, '
                                          'fixed_response, targets, '
                                          'request_header_operations, '
+                                         'response_header_operations, '
                                          'https_listener_hostname')
     l7rules = []
     if sample_policy == 1:
@@ -1145,6 +1146,7 @@ def sample_l7policy_tuple(id,
             redirect_http_code) else None,
         provisioning_status=provisioning_status, fixed_response=None,
         targets=None, request_header_operations=None,
+        response_header_operations=None,
         https_listener_hostname=None)
 
 

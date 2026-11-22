@@ -40,18 +40,22 @@ CONF = cfg.CONF
 LOG = logging.getLogger(__name__)
 
 
-def validate_policy_request_headers(policy, protocol, driver, old_policy=None):
-    if 'request_header_operations' not in policy:
-        return
-    operations = policy['request_header_operations']
-    clearing = (not operations and old_policy is not None and
-                old_policy.request_header_operations is not None and
-                getattr(driver, 'supports_request_header_operations',
-                        False) is True)
-    if not clearing:
-        driver_utils.require_request_header_operations(driver)
-    if operations:
-        validate.validate_request_header_protocol(protocol)
+def validate_policy_headers(policy, protocol, driver, old_policy=None):
+    for field, require in (
+            ('request_header_operations',
+             driver_utils.require_request_header_operations),
+            ('response_header_operations',
+             driver_utils.require_response_header_operations)):
+        if field not in policy:
+            continue
+        operations = policy[field]
+        clearing = (not operations and old_policy is not None and
+                    getattr(old_policy, field) is not None and
+                    getattr(driver, 'supports_' + field, False) is True)
+        if not clearing:
+            require(driver)
+        if operations:
+            validate.validate_header_protocol(protocol)
 
 
 class L7PolicyController(base.BaseController):
@@ -191,7 +195,7 @@ class L7PolicyController(base.BaseController):
             driver_utils.require_gateway_policy_action(
                 driver, l7policy_dict['action'], listener.protocol,
                 tcp_tls_termination=listener.tcp_tls_termination)
-            validate_policy_request_headers(
+            validate_policy_headers(
                 l7policy_dict, listener.protocol, driver)
 
             self._test_lb_and_listener_statuses(
@@ -313,7 +317,8 @@ class L7PolicyController(base.BaseController):
             https_routing_changed = routing_changed | {
                 'position', 'redirect_pool_id', 'redirect_url',
                 'redirect_prefix', 'redirect_http_code',
-                'request_header_operations', 'https_listener_hostname'}
+                'request_header_operations', 'response_header_operations',
+                'https_listener_hostname'}
             if (hostname is not None and
                     (reopening or
                      https_routing_changed.intersection(l7policy_dict))):
@@ -327,13 +332,15 @@ class L7PolicyController(base.BaseController):
                 l7policy_dict.get('position', db_l7policy.position) !=
                 db_l7policy.position)
             if activates_policy or routing_changed.intersection(l7policy_dict):
-                retained_operations = None
-                if 'request_header_operations' not in l7policy_dict:
-                    retained_operations = db_l7policy.request_header_operations
+                retained_headers = {
+                    field: getattr(db_l7policy, field)
+                    for field in ('request_header_operations',
+                                  'response_header_operations')
+                    if field not in l7policy_dict}
                 driver_utils.require_gateway_policy_action(
                     driver, action, listener.protocol,
-                    request_header_operations=retained_operations,
-                    tcp_tls_termination=listener.tcp_tls_termination)
+                    tcp_tls_termination=listener.tcp_tls_termination,
+                    **retained_headers)
                 if tcp_policy:
                     if (not listener.tcp_tls_termination and
                             policy_repo.has_enabled_tls_sni_suffix_rule(
@@ -343,7 +350,7 @@ class L7PolicyController(base.BaseController):
                         'redirect_pool_id', db_l7policy.redirect_pool_id)
                     self.repositories.l7policy.validate_tcp_redirect_pool(
                         lock_session, listener, target)
-            validate_policy_request_headers(
+            validate_policy_headers(
                 l7policy_dict, listener.protocol, driver,
                 old_policy=db_l7policy)
 

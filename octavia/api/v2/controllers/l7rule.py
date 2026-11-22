@@ -196,6 +196,8 @@ class L7RuleController(base.BaseController):
                     driver, db_l7policy.action, db_l7policy.listener.protocol,
                     request_header_operations=(
                         db_l7policy.request_header_operations),
+                    response_header_operations=(
+                        db_l7policy.response_header_operations),
                     tcp_tls_termination=tcp_tls_termination)
             if tcp_policy:
                 driver_utils.require_tls_sni_rule_comparison(
@@ -307,6 +309,8 @@ class L7RuleController(base.BaseController):
                     driver, db_l7policy.action, db_l7policy.listener.protocol,
                     request_header_operations=(
                         db_l7policy.request_header_operations),
+                    response_header_operations=(
+                        db_l7policy.response_header_operations),
                     tcp_tls_termination=tcp_tls_termination)
                 if tcp_policy:
                     compare_type = l7rule_dict.get(
