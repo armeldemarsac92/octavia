@@ -20,6 +20,7 @@ from oslo_config import fixture as oslo_fixture
 from oslo_utils import uuidutils
 
 from octavia.api.drivers.noop_driver import driver as noop_driver
+from octavia.api.drivers import utils as driver_utils
 from octavia.common import constants
 import octavia.common.context
 from octavia.common import data_models
@@ -2834,6 +2835,127 @@ class TestPool(base.BaseAPITest):
         result = self.post(self.LBS_PATH, body).json['loadbalancer']
         selected, = result['pools']
         self.assertIs(True, selected['backend_h2c'])
+
+    @mock.patch.object(noop_driver.NoopProviderDriver,
+                       'supports_backend_tls_hostname', True, create=True)
+    @mock.patch.object(noop_driver.NoopProviderDriver,
+                       'supports_backend_tls_h2_alpn', True, create=True)
+    def test_backend_tls_require_h2_enrollment_and_drain(self):
+        args = (self.lb_id, constants.PROTOCOL_HTTP,
+                constants.LB_ALGORITHM_ROUND_ROBIN)
+        options = {
+            'backend_tls_hostname': 'backend.example.test',
+            'tls_enabled': True,
+            'ca_tls_container_ref': uuidutils.generate_uuid(),
+            'backend_tls_require_h2': True,
+        }
+        self.cert_manager_mock().get_secret.return_value = (
+            sample_certs.X509_CA_CERT)
+        self.conf.config(
+            group='api_settings',
+            enabled_backend_tls_hostname_providers=['noop_driver'])
+        self.create_pool(*args, **options, status=501)
+        self.conf.config(
+            group='api_settings',
+            enabled_backend_tls_h2_alpn_providers=['noop_driver'])
+        self.create_pool(*args, backend_tls_require_h2=True, status=400)
+
+        pool = self.create_pool(*args, **options)['pool']
+        self.assertIs(True, pool['backend_tls_require_h2'])
+        self.set_lb_status(self.lb_id)
+        path = self.POOL_PATH.format(pool_id=pool['id'])
+        self.put(path, {'pool': {'backend_tls_require_h2': False}}, status=400)
+        self.put(path, {'pool': {'backend_tls_hostname': None}}, status=400)
+        self.conf.config(group='api_settings',
+                         enabled_backend_tls_h2_alpn_providers=[])
+        update = self.put(path, {'pool': {'admin_state_up': False}}).json
+        self.assertIs(True, update['pool']['backend_tls_require_h2'])
+        self.set_lb_status(self.lb_id)
+        self.put(path, {'pool': {'admin_state_up': True}}, status=501)
+        update = self.put(
+            path, {'pool': {'backend_tls_require_h2': False}}).json['pool']
+        self.assertIs(False, update['backend_tls_require_h2'])
+
+    @mock.patch.object(noop_driver.NoopProviderDriver,
+                       'supports_backend_tls_hostname', True, create=True)
+    @mock.patch.object(noop_driver.NoopProviderDriver,
+                       'supports_backend_tls_h2_alpn', True, create=True)
+    def test_backend_tls_require_h2_upgrade_revalidates_hostname_and_ca(self):
+        self.conf.config(
+            group='api_settings',
+            enabled_backend_tls_hostname_providers=['noop_driver'],
+            enabled_backend_tls_h2_alpn_providers=['noop_driver'])
+        secret = self.cert_manager_mock().get_secret
+        secret.return_value = sample_certs.X509_CA_CERT
+        ca_ref = uuidutils.generate_uuid()
+        pool = self.create_pool(
+            self.lb_id, constants.PROTOCOL_HTTP,
+            constants.LB_ALGORITHM_ROUND_ROBIN,
+            backend_tls_hostname='backend.example.test', tls_enabled=True,
+            ca_tls_container_ref=ca_ref)['pool']
+        self.set_lb_status(self.lb_id)
+        path = self.POOL_PATH.format(pool_id=pool['id'])
+        update = {'pool': {'backend_tls_require_h2': True}}
+
+        self.conf.config(group='api_settings',
+                         enabled_backend_tls_hostname_providers=[])
+        self.put(path, update, status=501)
+
+        self.conf.config(
+            group='api_settings',
+            enabled_backend_tls_hostname_providers=['noop_driver'])
+        secret.side_effect = KeyError('missing CA')
+        self.put(path, update, status=400)
+        self.assertFalse(self.get(path).json['pool']['backend_tls_require_h2'])
+        self.assertEqual(ca_ref, secret.call_args.args[1])
+
+        secret.side_effect = None
+        updated = self.put(path, update).json['pool']
+        self.assertIs(True, updated['backend_tls_require_h2'])
+        self.assertEqual(ca_ref, updated['ca_tls_container_ref'])
+
+    @mock.patch.object(noop_driver.NoopProviderDriver,
+                       'supports_backend_tls_hostname', True, create=True)
+    @mock.patch.object(noop_driver.NoopProviderDriver,
+                       'supports_backend_tls_h2_alpn', True, create=True)
+    @mock.patch.object(driver_utils, 'BACKEND_TLS_H2_ALPN_PAYLOAD_AVAILABLE',
+                       False)
+    @mock.patch.object(noop_driver.NoopProviderDriver, 'pool_update',
+                       autospec=True)
+    @mock.patch.object(noop_driver.NoopProviderDriver, 'pool_delete',
+                       autospec=True)
+    def test_legacy_provider_dto_can_drain_and_delete_h2_pool(
+            self, provider_delete, provider_update):
+        self.conf.config(
+            group='api_settings',
+            enabled_backend_tls_hostname_providers=['noop_driver'],
+            enabled_backend_tls_h2_alpn_providers=['noop_driver'])
+        secret = self.cert_manager_mock().get_secret
+        secret.return_value = sample_certs.X509_CA_CERT
+        pool = self.create_pool(
+            self.lb_id, constants.PROTOCOL_HTTP,
+            constants.LB_ALGORITHM_ROUND_ROBIN,
+            backend_tls_hostname='backend.example.test', tls_enabled=True,
+            ca_tls_container_ref=uuidutils.generate_uuid())['pool']
+        # Simulate a pool enrolled before the provider DTO was downgraded.
+        with db_api.session().begin() as session:
+            self.pool_repo.update(session, pool['id'],
+                                  backend_tls_require_h2=True)
+        self.set_lb_status(self.lb_id)
+        path = self.POOL_PATH.format(pool_id=pool['id'])
+
+        secret.side_effect = KeyError('missing CA')
+        drained = self.put(path, {'pool': {'admin_state_up': False}}).json
+        self.assertIs(False, drained['pool']['admin_state_up'])
+        self.assertIs(True, drained['pool']['backend_tls_require_h2'])
+        self.assertNotIn('backend_tls_require_h2',
+                         provider_update.call_args.args[1].to_dict())
+
+        self.set_lb_status(self.lb_id)
+        self.put(path, {'pool': {'admin_state_up': True}}, status=501)
+        self.delete(path)
+        self.assertNotIn('backend_tls_require_h2',
+                         provider_delete.call_args.args[1].to_dict())
 
     @mock.patch.object(noop_driver.NoopProviderDriver,
                        'supports_backend_tls_hostname', True, create=True)

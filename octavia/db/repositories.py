@@ -28,6 +28,7 @@ from oslo_log import log as logging
 from oslo_serialization import jsonutils
 from oslo_utils import timeutils
 from oslo_utils import uuidutils
+from sqlalchemy import and_
 from sqlalchemy import or_
 from sqlalchemy.orm import attributes
 from sqlalchemy.orm import lazyload
@@ -991,7 +992,8 @@ class PoolRepository(BaseRepository):
     def set_backend_tls_pool_statuses(self, session, *, closed, recovered):
         pool = self.model_class
         protected = session.query(pool).filter(
-            pool.backend_tls_hostname.is_not(None), pool.enabled.is_(True))
+            or_(pool.backend_tls_hostname.is_not(None),
+                pool.backend_tls_require_h2.is_(True)), pool.enabled.is_(True))
         if closed:
             protected.filter(
                 pool.id.in_(closed),
@@ -1010,7 +1012,8 @@ class PoolRepository(BaseRepository):
         # the safe configuration. A flow must not turn those errors ACTIVE.
         session.query(pool).filter(
             pool.id == id,
-            or_(pool.backend_tls_hostname.is_(None),
+            or_(and_(pool.backend_tls_hostname.is_(None),
+                     pool.backend_tls_require_h2.is_(False)),
                 pool.enabled.is_(False),
                 pool.provisioning_status != consts.ERROR)).update(
                     {'provisioning_status': consts.ACTIVE})
@@ -1021,6 +1024,7 @@ class PoolRepository(BaseRepository):
         pool = self.model_class
         row = (session.query(pool.protocol, pool.backend_h2c, pool.tls_enabled,
                              pool.enabled, pool.backend_tls_hostname,
+                             pool.backend_tls_require_h2,
                              pool.ca_tls_certificate_id,
                              pool.crl_container_id,
                              _pool_has_gateway_backend_tls_tag().label(

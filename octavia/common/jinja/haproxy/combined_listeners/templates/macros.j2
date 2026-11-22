@@ -531,7 +531,9 @@ frontend {{ listener.id }}
         {% else %}
             {% set monitor_port_opt = "" %}
         {% endif %}
-        {% if pool.alpn_protocols is defined %}
+        {% if pool.backend_tls_require_h2 %}
+            {% set alpn_opt = " check-alpn h2" %}
+        {% elif pool.alpn_protocols is defined %}
             {% set alpn_opt = " check-alpn %s"|format(pool.alpn_protocols) %}
         {% else %}
             {% set alpn_opt = "" %}
@@ -634,7 +636,9 @@ frontend {{ listener.id }}
             {% set tls_versions_opt = tls_versions_opt + " no-tlsv13" %}
         {% endif %}
     {% endif %}
-    {% if pool.alpn_protocols is defined %}
+    {% if pool.backend_tls_require_h2 %}
+        {% set alpn_opt = " alpn h2 require-alpn-h2" %}
+    {% elif pool.alpn_protocols is defined %}
         {% set alpn_opt = " alpn %s"|format(pool.alpn_protocols) %}
     {% else %}
         {% set alpn_opt = "" %}

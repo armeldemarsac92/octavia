@@ -694,9 +694,9 @@ class LoadBalancerFlows:
                     rebind={constants.NEW_AMPHORA_ID: constants.AMPHORA_ID},
                     provides=constants.AMPHORAE_STATUS))
 
-            # Listeners update needs to be run on all amphora to update
-            # their peer configurations. So parallelize this with an
-            # unordered subflow.
+            # Update peer configurations on all amphorae. The driver can
+            # coordinate updates that must use the same decision on both
+            # peers.
             update_amps_subflow = unordered_flow.Flow(
                 constants.UPDATE_AMPS_SUBFLOW)
 

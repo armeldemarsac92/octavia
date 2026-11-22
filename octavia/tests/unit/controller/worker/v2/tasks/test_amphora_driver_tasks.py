@@ -180,6 +180,15 @@ class TestAmphoraDriverTasks(base.TestCase):
 
         mock_amphora_repo_update.assert_not_called()
 
+        mock_driver.reset_mock()
+        mock_driver.update_failover_listeners.return_value = True
+        amp_list_update_obj.execute(_LB_mock, 0, [_amphora_mock],
+                                    amphorae_status, AMP_ID,
+                                    self.timeout_dict)
+        mock_driver.update_failover_listeners.assert_called_once_with(
+            _db_load_balancer_mock, 0, amphorae_status, self.timeout_dict)
+        mock_driver.update_amphora_listeners.assert_not_called()
+
     @mock.patch('octavia.db.repositories.LoadBalancerRepository.get')
     @mock.patch('octavia.db.api.session')
     def test_listeners_update(self,

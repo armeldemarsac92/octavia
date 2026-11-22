@@ -1,0 +1,92 @@
+--- a/include/haproxy/server-t.h
++++ b/include/haproxy/server-t.h
+@@ -192,6 +192,7 @@
+ #define SRV_SSL_O_NO_REUSE       0x200  /* disable session reuse */
+ #define SRV_SSL_O_EARLY_DATA     0x400  /* Allow using early data */
+ #define SRV_SSL_O_STRICT_DNS     0x800  /* Verify the static DNS ID using SAN only */
++#define SRV_SSL_O_REQUIRE_H2     0x1000 /* Require h2 over a fresh TLS handshake */
+ 
+ /* log servers ring's protocols options */
+ enum srv_log_proto {
+--- a/src/cfgparse-ssl.c
++++ b/src/cfgparse-ssl.c
+@@ -1586,6 +1586,18 @@
+ #endif
+ }
+ 
++/* parse the "require-alpn-h2" server keyword */
++static int srv_parse_require_alpn_h2(char **args, int *cur_arg, struct proxy *px, struct server *newsrv, char **err)
++{
++#ifdef TLSEXT_TYPE_application_layer_protocol_negotiation
++	newsrv->ssl_ctx.options |= SRV_SSL_O_REQUIRE_H2;
++	return 0;
++#else
++	memprintf(err, "'%s' : library does not support TLS ALPN extension", args[*cur_arg]);
++	return ERR_ALERT | ERR_FATAL;
++#endif
++}
++
+ /* parse the "check-alpn" server keyword */
+ static int srv_parse_check_alpn(char **args, int *cur_arg, struct proxy *px, struct server *newsrv, char **err)
+ {
+@@ -2315,6 +2327,7 @@
+ 	{ "ssl",                     srv_parse_ssl,                0, 1, 1 }, /* enable SSL processing */
+ 	{ "ssl-min-ver",             srv_parse_tls_method_minmax,  1, 1, 1 }, /* minimum version */
+ 	{ "ssl-max-ver",             srv_parse_tls_method_minmax,  1, 1, 1 }, /* maximum version */
++	{ "require-alpn-h2",         srv_parse_require_alpn_h2,    0, 1, 1 }, /* Require negotiated HTTP/2 */
+ 	{ "ssl-reuse",               srv_parse_ssl_reuse,          0, 1, 0 }, /* enable session reuse */
+ 	{ "tls-tickets",             srv_parse_tls_tickets,        0, 1, 1 }, /* enable session resumption tickets */
+ 	{ "verify",                  srv_parse_verify,             1, 1, 1 }, /* set SSL verify method */
+--- a/src/backend.c
++++ b/src/backend.c
+@@ -1887,6 +1887,7 @@
+ 
+ 	if (!reuse && cli_conn && srv && srv_conn->mux &&
+ 	    (srv->ssl_ctx.options & SRV_SSL_O_EARLY_DATA) &&
++	    !(srv->ssl_ctx.options & SRV_SSL_O_REQUIRE_H2) &&
+ 	    /* Only attempt to use early data if either the client sent
+ 	     * early data, so that we know it can handle a 425, or if
+ 	     * we are allowed to retry requests on early data failure, and
+--- a/src/ssl_sock.c
++++ b/src/ssl_sock.c
+@@ -4255,7 +4255,7 @@
+ 	 */
+ 
+ 	if (!(conn->flags & CO_FL_SSL_NO_CACHED_INFO) &&
+-	    !(s->ssl_ctx.options & SRV_SSL_O_NO_REUSE)) {
++	    !(s->ssl_ctx.options & (SRV_SSL_O_NO_REUSE | SRV_SSL_O_REQUIRE_H2))) {
+ 		int len;
+ 		unsigned char *ptr;
+ 
+@@ -5743,6 +5743,12 @@
+ 
+ 		SSL_set_connect_state(ctx->ssl);
+ 
++		/* A strict h2 connection must authenticate and negotiate
++		 * its application protocol afresh.
++		 */
++		if (srv->ssl_ctx.options & SRV_SSL_O_REQUIRE_H2)
++			goto skip_resume;
++
+ 		/*
+ 		 * Always fail for check connections
+ 		 */
+@@ -6213,6 +6219,18 @@
+ 
+ reneg_ok:
+ 
++#ifdef TLSEXT_TYPE_application_layer_protocol_negotiation
++	/* Reject before clearing the handshake flags and selecting a mux. */
++	if (srv && (srv->ssl_ctx.options & SRV_SSL_O_REQUIRE_H2)) {
++		const unsigned char *alpn;
++		unsigned int alpn_len;
++
++		SSL_get0_alpn_selected(ctx->ssl, &alpn, &alpn_len);
++		if (alpn_len != 2 || memcmp(alpn, "h2", 2) != 0)
++			goto out_error;
++	}
++#endif
++
+ #ifdef SSL_MODE_ASYNC
+ 	/* ASYNC engine API doesn't support moving read/write
+ 	 * buffers. So we disable ASYNC mode right after

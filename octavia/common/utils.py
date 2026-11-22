@@ -45,9 +45,14 @@ def get_hostname():
     return socket.gethostname()
 
 
+def is_protected_backend_tls_pool(pool):
+    return (getattr(pool, 'backend_tls_hostname', None) is not None or
+            getattr(pool, 'backend_tls_require_h2', False) is True)
+
+
 def is_disabled_backend_tls_pool(pool):
     return not pool.enabled and (
-        getattr(pool, 'backend_tls_hostname', None) is not None or
+        is_protected_backend_tls_pool(pool) or
         (pool.protocol == constants.PROTOCOL_HTTP and
          constants.GATEWAY_BACKEND_TLS_POOL_TAG in
          (getattr(pool, 'tags', None) or ())))

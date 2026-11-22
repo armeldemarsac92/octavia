@@ -13,11 +13,12 @@ other Octavia deployments.
 Build the binary on the target image distribution and architecture, using
 HAProxy 3.0.19 with the published tarball SHA-256
 ``85f2743a44e4226a0176926fbc8eebfa5551d22fe5f44366877570b6e18c6664``.
-Apply ``haproxy-3.0.19-strict-dns.patch`` from this element with ``patch -p1``
+Apply ``haproxy-3.0.19-strict-dns.patch`` and then
+``haproxy-3.0.19-require-alpn-h2.patch`` from this element with ``patch -p1``
 inside the extracted source directory. Build with::
 
     make TARGET=linux-glibc USE_OPENSSL=1 USE_SYSTEMD=1 \
-        EXTRAVERSION=-octavia-strict-dns-v1
+        EXTRAVERSION=-octavia-strict-dns-v1-h2-alpn-v1
 
 Set ``DIB_OCTAVIA_HAPROXY_BINARY`` to the absolute path of the resulting binary
 when running Octavia's ``diskimage-create.sh``. The element checks the binary in
@@ -31,3 +32,10 @@ Octavia database, octavia-lib, API and workers before adding the provider to
 leave the upgraded workers and Amphora binaries in place while traffic drains
 from protected pools. A package upgrade that replaces the patched HAProxy
 requires a new verified build before that image can serve protected pools.
+
+The ``backend_tls_h2_alpn_v1`` pool capability additionally verifies negotiated
+HTTP/2 before sending application data, including TLS health checks. It uses
+a full handshake on every new TLS connection and disables TLS early data.
+Enable ``[api_settings] enabled_backend_tls_h2_alpn_providers`` after those same
+upgrades with the combined binary. Older strict DNS binaries remain compatible
+with pools which only require hostname authentication.

@@ -18,19 +18,31 @@ import subprocess
 from oslo_config import cfg
 from oslo_log import log as logging
 
+from octavia.common import constants
+
 LOG = logging.getLogger(__name__)
 CONF = cfg.CONF
 
 
-def supports_backend_tls_hostname():
+def get_backend_tls_capabilities():
     try:
         output = subprocess.check_output(
             [CONF.haproxy_amphora.haproxy_cmd, '-v'],
             stderr=subprocess.STDOUT, encoding='utf-8', timeout=5)
     except (OSError, subprocess.SubprocessError):
-        return False
-    return output.startswith(
-        'HAProxy version 3.0.19-ade9c1262-octavia-strict-dns-v1 ')
+        return {}
+    strict_dns = 'HAProxy version 3.0.19-ade9c1262-octavia-strict-dns-v1'
+    if output.startswith(f'{strict_dns}-h2-alpn-v1 '):
+        return {constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME: True,
+                constants.GATEWAY_CAPABILITY_BACKEND_TLS_H2_ALPN: True}
+    if output.startswith(f'{strict_dns} '):
+        return {constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME: True}
+    return {}
+
+
+def supports_backend_tls_hostname():
+    return (constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME in
+            get_backend_tls_capabilities())
 
 
 def get_haproxy_versions():

@@ -114,6 +114,14 @@ class AmphoraIndexListenerUpdate(BaseAmphoraTask):
 
     def execute(self, loadbalancer, amphora_index, amphorae,
                 amphorae_status: dict, new_amphora_id: str, timeout_dict=()):
+        session = db_apis.get_session()
+        with session.begin():
+            db_lb = self.loadbalancer_repo.get(
+                session, id=loadbalancer[constants.LOADBALANCER_ID])
+        if self.amphora_driver.update_failover_listeners(
+                db_lb, amphora_index, amphorae_status, timeout_dict) is True:
+            return
+
         # Note, we don't want this to cause a revert as it may be used
         # in a failover flow with both amps failing. Skip it and let
         # health manager fix it.
@@ -128,14 +136,10 @@ class AmphoraIndexListenerUpdate(BaseAmphoraTask):
         try:
             # TODO(johnsom) Optimize this to use the dicts and not need the
             #               DB lookups
-            session = db_apis.get_session()
             with session.begin():
                 db_amp = self.amphora_repo.get(
                     session,
                     id=amphorae[amphora_index][constants.ID])
-                db_lb = self.loadbalancer_repo.get(
-                    session,
-                    id=loadbalancer[constants.LOADBALANCER_ID])
             self.amphora_driver.update_amphora_listeners(
                 db_lb, db_amp, timeout_dict)
         except Exception as e:

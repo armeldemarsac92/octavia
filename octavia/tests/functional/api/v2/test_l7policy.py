@@ -1792,6 +1792,7 @@ class TestL7Policy(base.BaseAPITest):
         self.conf.config(
             group='api_settings',
             enabled_backend_tls_hostname_providers=['amphora'],
+            enabled_backend_tls_h2_alpn_providers=['amphora'],
             enabled_request_cors_providers=['amphora'])
         self.cert_manager_mock().get_secret.return_value = (
             sample_certs.X509_CA_CERT)
@@ -1806,7 +1807,9 @@ class TestL7Policy(base.BaseAPITest):
         pool = self.create_pool(
             lb_id, 'HTTP', 'ROUND_ROBIN', tls_enabled=True,
             ca_tls_container_ref=uuidutils.generate_uuid(),
-            backend_tls_hostname='backend.example.test', tags=[tag])['pool']
+            backend_tls_hostname='backend.example.test',
+            backend_tls_require_h2=True, tags=[tag])['pool']
+        self.assertIs(True, pool['backend_tls_require_h2'])
         self.set_lb_status(lb_id)
         sibling = self.create_pool(lb_id, 'HTTP', 'ROUND_ROBIN')['pool']
         self.set_lb_status(lb_id)
@@ -1838,8 +1841,15 @@ class TestL7Policy(base.BaseAPITest):
         self.delete(blocker, status=501)
         remove_tls = dict(backend_tls_hostname=None, tls_enabled=False,
                           ca_tls_container_ref=None)
-        self.put(pool_path, {'pool': dict(remove_tls, tags=[])}, status=501)
+        self.put(pool_path, {'pool': dict(
+            remove_tls, backend_tls_require_h2=False, tags=[])},
+            status=501)
         rpc.return_value.cast.assert_not_called()
+
+        # Draining strict h2 preserves both CORS routing markers.
+        put_pool(backend_tls_require_h2=False)
+        self.assertIs(False, self.get(pool_path).json['pool'][
+            'backend_tls_require_h2'])
 
         # Either marker suffices. Removing the last one changes selection.
         put_pool(**remove_tls)
