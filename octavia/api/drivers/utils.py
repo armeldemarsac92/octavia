@@ -220,6 +220,12 @@ def require_active_http_l7rule_capabilities(driver, policy_repo, session,
             raise _unsupported_http_l7rule(driver, rule_type)
 
 
+def require_http_l7rule_capability(driver, rule_type):
+    capability = HTTP_L7RULE_CAPABILITIES.get(rule_type)
+    if capability and capability not in gateway_capabilities(driver):
+        raise _unsupported_http_l7rule(driver, rule_type)
+
+
 def validate_l7rule_context(driver, rule_type, protocol, *,
                             admit_http_l7rule=True, tcp_tls_termination=False):
     if rule_type in HTTP_L7RULE_CAPABILITIES:
@@ -228,9 +234,8 @@ def validate_l7rule_context(driver, rule_type, protocol, *,
             raise exceptions.L7RuleValidation(error=_(
                 '%(rule_type)s requires an HTTP or TERMINATED_HTTPS '
                 'listener.') % {'rule_type': rule_type})
-        if (admit_http_l7rule and HTTP_L7RULE_CAPABILITIES[rule_type] not in
-                gateway_capabilities(driver)):
-            raise _unsupported_http_l7rule(driver, rule_type)
+        if admit_http_l7rule:
+            require_http_l7rule_capability(driver, rule_type)
     elif rule_type == constants.L7RULE_TYPE_TLS_SNI:
         if protocol != constants.PROTOCOL_TCP:
             raise exceptions.L7RuleValidation(error=_(

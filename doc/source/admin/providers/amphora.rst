@@ -206,9 +206,9 @@ comparing it byte for byte with the configured UTF-8 value.
 
 Apply database migration ``ff81efc318ad`` and upgrade the API and workers.
 Verify that existing and replacement Amphorae support the generated HAProxy
-configuration, including the PCRE regex used to recognize encoded names.
-Local testing used HAProxy 3.0.19 with PCRE2. Configure the database
-connection to use ``utf8mb4`` for four-byte characters.
+configuration. Amphora uses POSIX regular expressions to recognize encoded
+names. Local testing used HAProxy 3.0.19 with libc and PCRE2. Configure the
+database connection to use ``utf8mb4`` for four-byte characters.
 
 Set the provider names on each regional API replica and reload the
 configuration. The opt-in defaults to empty.
