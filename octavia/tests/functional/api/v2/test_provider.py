@@ -116,6 +116,22 @@ class TestGatewayCapabilities(base.BaseAPITest):
         self.assertEqual(empty,
                          self.get(self.capabilities_path('noop_driver')).json)
 
+    def test_initial_rules_require_compatible_opt_in(self):
+        empty = {'gateway_capabilities': []}
+        path = self.capabilities_path()
+        self.assertEqual(empty, self.get(path).json)
+        self.conf.config(
+            group='api_settings',
+            enabled_l7policy_initial_rules_providers=['amphora', 'noop_driver'])
+        self.assertEqual(
+            {'gateway_capabilities': ['l7policy_initial_rules_v1']},
+            self.get(path).json)
+        self.assertEqual(empty,
+                         self.get(self.capabilities_path('noop_driver')).json)
+        self.conf.config(group='api_settings',
+                         enabled_l7policy_initial_rules_providers=[])
+        self.assertEqual(empty, self.get(path).json)
+
     def test_https_listener_isolation_is_independently_enrolled(self):
         empty = {'gateway_capabilities': []}
         self.assertEqual(empty, self.get(self.capabilities_path()).json)

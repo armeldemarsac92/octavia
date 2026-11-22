@@ -108,6 +108,14 @@ creating multiple policies with the same action.
 If a new policy is created with a position that matches that of an existing
 policy, then the new policy is inserted at the given position.
 
+On HTTP and terminated HTTPS listeners whose provider advertises
+``l7policy_initial_rules_v1``, send a non-empty ``rules`` array and
+``admin_state_up: false`` to create the policy and its initial rules in one
+operation. The policy and rules are written in one transaction. The response
+contains the policy and rule IDs. Before enabling the policy with PUT, read
+back the policy and its rule list, confirm that both the policy and every rule
+are ``ACTIVE``, and verify that the full rule set matches the intended scope.
+
 L7 policies with ``action`` of ``REDIRECT_TO_URL`` will return the default HTTP
 ``Found (302)`` response code with the ``redirect_url``. Also, specify
 ``redirect_http_code`` to configure the needed HTTP response code, such as,
@@ -157,6 +165,7 @@ Request
    - redirect_prefix: l7policy-redirect-prefix-optional
    - redirect_request: l7policy-redirect-request
    - redirect_url: l7policy-redirect-url-optional
+   - rules: l7policy-initial-rules
    - tags: tags-optional
 
 Request Example

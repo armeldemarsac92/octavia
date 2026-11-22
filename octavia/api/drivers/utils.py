@@ -77,6 +77,11 @@ def gateway_capabilities(driver):
             driver.name in redirect_providers and
             getattr(driver, 'supports_http_request_redirect', False) is True):
         capabilities.append(constants.GATEWAY_CAPABILITY_HTTP_REQUEST_REDIRECT)
+    initial_rules_providers = (
+        api_settings.enabled_l7policy_initial_rules_providers)
+    if (driver.name in initial_rules_providers and
+            getattr(driver, 'supports_l7policy_initial_rules', False) is True):
+        capabilities.append(constants.GATEWAY_CAPABILITY_L7POLICY_INITIAL_RULES)
     if (driver.name in api_settings.enabled_http_header_exact_providers and
             getattr(driver, 'supports_http_header_exact', False) is True):
         capabilities.append(constants.GATEWAY_CAPABILITY_HTTP_HEADER_EXACT)

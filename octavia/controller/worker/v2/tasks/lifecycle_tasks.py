@@ -82,6 +82,9 @@ class L7PolicyToErrorOnRevertTask(BaseLifecycleTask):
         try:
             self.task_utils.mark_l7policy_prov_status_error(
                 l7policy[constants.L7POLICY_ID])
+            for rule in l7policy.get('rules', ()):
+                self.task_utils.mark_l7rule_prov_status_error(
+                    rule[constants.L7RULE_ID])
             for listener in listeners:
                 self.task_utils.mark_listener_prov_status_active(
                     listener[constants.LISTENER_ID])

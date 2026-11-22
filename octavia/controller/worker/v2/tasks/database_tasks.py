@@ -2035,6 +2035,15 @@ class MarkL7PolicyActiveInDB(BaseDatabaseTask):
                                       l7policy[constants.L7POLICY_ID],
                                       provisioning_status=constants.ACTIVE,
                                       operating_status=op_status)
+            # The create RPC can carry initial rules. Publish their readiness
+            # in the same transaction as the parent policy.
+            for rule in l7policy.get('rules', ()):
+                rule_id = rule[constants.L7RULE_ID]
+                db_rule = self.l7rule_repo.get(session, id=rule_id)
+                self.l7rule_repo.update(
+                    session, rule_id, provisioning_status=constants.ACTIVE,
+                    operating_status=(constants.ONLINE if db_rule.enabled
+                                      else constants.OFFLINE))
 
     def revert(self, l7policy, *args, **kwargs):
         """Mark the l7policy as broken
