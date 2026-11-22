@@ -23,6 +23,7 @@ from wsme import types as wtypes
 
 from octavia.common import constants
 from octavia.common import exceptions
+from octavia.common import validate
 from octavia.common import policy
 from octavia.db import models
 from octavia.db import repositories
@@ -317,12 +318,5 @@ class BaseController(pecan_rest.RestController):
 
     @staticmethod
     def _validate_protocol(listener_protocol, pool_protocol):
-        proto_map = constants.VALID_LISTENER_POOL_PROTOCOL_MAP
-        for valid_pool_proto in proto_map[listener_protocol]:
-            if pool_protocol == valid_pool_proto:
-                return
-        detail = _("The pool protocol '%(pool_protocol)s' is invalid while "
-                   "the listener protocol is '%(listener_protocol)s'.") % {
-                       "pool_protocol": pool_protocol,
-                       "listener_protocol": listener_protocol}
-        raise exceptions.ValidationException(detail=detail)
+        validate.validate_listener_pool_protocol(listener_protocol,
+                                                 pool_protocol)

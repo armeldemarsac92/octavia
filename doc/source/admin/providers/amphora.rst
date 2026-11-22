@@ -179,8 +179,11 @@ operations run on the selected backend, followed by any URL rewrite.
 
 Removing regional enrollment stops new settings and changes that
 reactivate or expand a stored rewrite. Stored active rewrites continue
-to run on patched workers. Disable or delete a policy, or clear
-``request_url_rewrite`` with ``null``, during retirement. Clear existing
+to run on patched workers. If a routing change could expose a retained
+rewrite, first clear that rewrite with ``request_url_rewrite: null`` or
+disable the listener and retire the affected settings before reopening it.
+A disabled listener or load balancer can reopen with a stored rewrite
+that has no enabled match or forwarding destination. Clear existing
 settings before rolling back the services or provider library.
 
 

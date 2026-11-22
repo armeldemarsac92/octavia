@@ -918,16 +918,20 @@ class LoadBalancersController(base.BaseController):
                 policy_repo = self.repositories.l7policy
                 driver_utils.require_active_http_l7rule_capabilities(
                     driver, policy_repo, context.session, load_balancer_id=id)
-                for protocol, action, request_ops, response_ops, rewrite in (
+                for protocol, action, request_ops, response_ops in (
                         policy_repo.get_active_http_policy_extensions(
                             context.session, id)):
                     if action == constants.L7POLICY_ACTION_REDIRECT_REQUEST:
                         driver_utils.require_http_request_redirect(driver)
-                    if rewrite:
-                        driver_utils.require_request_url_rewrite(
-                            driver, protocol)
                     driver_utils.require_policy_header_operations(
                         driver, protocol, request_ops, response_ops)
+                if not driver_utils.request_url_rewrite_available(driver):
+                    rewrites = policy_repo.get_active_url_rewrites(
+                        context.session, load_balancer_id=id,
+                        reopening='load_balancer')
+                    if rewrites:
+                        driver_utils.require_request_url_rewrite(
+                            driver, rewrites[0].protocol)
             if (reopening and
                     driver_utils.uses_tls_sni_policy_path(
                         driver, constants.PROTOCOL_TCP) and
