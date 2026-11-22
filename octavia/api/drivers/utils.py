@@ -177,14 +177,37 @@ def require_response_header_operations(driver):
                 'this provider.'))
 
 
+def request_url_rewrite_available(driver):
+    return (constants.GATEWAY_CAPABILITY_REQUEST_URL_REWRITE in
+            gateway_capabilities(driver))
+
+
 def require_request_url_rewrite(driver, protocol):
     validate.validate_http_request_url_rewrite_protocol(protocol)
-    if (constants.GATEWAY_CAPABILITY_REQUEST_URL_REWRITE not in
-            gateway_capabilities(driver)):
+    if not request_url_rewrite_available(driver):
         raise exceptions.ProviderUnsupportedOptionError(
             prov=driver.name, user_msg=_(
                 'HTTP request URL rewrites are unavailable for this '
                 'provider.'))
+
+
+def require_no_exposed_request_url_rewrite(driver, policy_repo, session,
+                                           **changes):
+    if not request_url_rewrite_available(driver):
+        protocol = policy_repo.get_rewrite_exposed_by_policy(
+            session, **changes)
+        if protocol:
+            require_request_url_rewrite(driver, protocol)
+
+
+def require_no_rewrite_exposed_by_ordered_redirect(
+        driver, policy_repo, session, listener_id, hostname, position,
+        *, policy_id=None):
+    if not request_url_rewrite_available(driver):
+        protocol = policy_repo.get_rewrite_exposed_by_ordered_redirect(
+            session, listener_id, hostname, position, policy_id=policy_id)
+        if protocol:
+            require_request_url_rewrite(driver, protocol)
 
 
 def uses_tls_sni_policy_path(driver, protocol, tcp_tls_termination=False):

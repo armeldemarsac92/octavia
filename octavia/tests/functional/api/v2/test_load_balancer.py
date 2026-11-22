@@ -3692,6 +3692,54 @@ class TestLoadBalancerGraph(base.BaseAPITest):
         api_lb = response.json.get(self.root_tag)
         self._assert_graphs_equal(expected_lb, api_lb)
 
+    @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
+    def test_request_url_rewrite_requires_compatible_named_pool(self, rpc):
+        self.conf.config(group='api_settings',
+                         enabled_request_url_rewrite_providers=['amphora'])
+        field = 'request_url_rewrite'
+        rewrite = {'hostname': 'next.example'}
+        policy = {
+            'action': 'REDIRECT_TO_POOL', 'redirect_pool': {'name': 'target'},
+            'rules': [{'type': 'PATH', 'compare_type': 'STARTS_WITH',
+                       'value': '/'}],
+        }
+        pool = {'name': 'target', 'protocol': 'UDP',
+                'lb_algorithm': 'ROUND_ROBIN'}
+        body = self._build_body({
+            'provider': 'amphora', 'vip_subnet_id': uuidutils.generate_uuid(),
+            'project_id': self._project_id,
+            'pools': [pool], 'listeners': [{
+                'protocol': 'HTTP', 'protocol_port': 80,
+                'l7policies': [policy | {field: rewrite}],
+            }],
+        })
+        rpc.return_value.cast.reset_mock()
+        invalid = self.post(self.LBS_PATH, body, status=400)
+        self.assertIn("pool protocol 'UDP'", invalid.json['faultstring'])
+        rpc.return_value.cast.assert_not_called()
+        lb_body = body[self.root_tag]
+        lb_body['listeners'][0]['l7policies'] = [policy]
+        lb_body['pools'][0]['protocol'] = 'HTTP'
+        lb = self.post(self.LBS_PATH, body).json[self.root_tag]
+        self.set_lb_status(lb['id'])
+        listener, = lb['listeners']
+        attached, = listener['l7policies']
+        path = self.L7POLICY_PATH.format(l7policy_id=attached['id'])
+        with self.get_session() as session, session.begin():
+            # Represent a legacy graph that already has an incompatible
+            # pool. The update includes only the rewrite field.
+            self.pool_repo.update(
+                session, attached['redirect_pool_id'], protocol='UDP')
+        rpc.return_value.cast.reset_mock()
+        self.put(path, {'l7policy': {field: rewrite}}, status=400)
+        rpc.return_value.cast.assert_not_called()
+        self.assertNotIn(field, self.get(path).json['l7policy'])
+        with self.get_session() as session, session.begin():
+            self.pool_repo.update(
+                session, attached['redirect_pool_id'], protocol='HTTP')
+        response = self.put(path, {'l7policy': {field: rewrite}})
+        self.assertEqual(rewrite, response.json['l7policy'][field])
+
     def test_with_l7policies_one_redirect_pool_one_rule(self):
         create_pool, expected_pool = self._get_pool_bodies(create_members=[],
                                                            expected_members=[])

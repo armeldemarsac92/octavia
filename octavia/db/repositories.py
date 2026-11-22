@@ -2040,12 +2040,20 @@ class L7PolicyRepository(BaseRepository):
                     (consts.PENDING_DELETE, consts.DELETED)))
                 .with_for_update().limit(1).scalar())
 
-    def _validate_l7policy_pool_data(self, session, l7policy):
+    def _validate_l7policy_pool_data(self, session, l7policy, old_policy=None):
         """Does validations on a given L7 policy."""
         if l7policy.request_url_rewrite is not None:
             listener = session.get(models.Listener, l7policy.listener_id)
             validate.validate_http_request_url_rewrite_protocol(
                 listener.protocol)
+            action = l7policy.action or getattr(old_policy, 'action', None)
+            if action == consts.L7POLICY_ACTION_REDIRECT_TO_POOL:
+                pool_id = l7policy.redirect_pool_id or getattr(
+                    old_policy, 'redirect_pool_id', None)
+                pool = self.get_redirect_pool_for_update(
+                    session, listener, pool_id)
+                validate.validate_listener_pool_protocol(
+                    listener.protocol, pool.protocol)
         if (l7policy.request_header_operations or
                 l7policy.response_header_operations):
             listener = session.get(models.Listener, l7policy.listener_id)
@@ -2088,12 +2096,8 @@ class L7PolicyRepository(BaseRepository):
             if pool is None:
                 raise exceptions.NotFound(
                     resource=data_models.Pool._name(), id=pool_id)
-            if pool.protocol not in consts.VALID_LISTENER_POOL_PROTOCOL_MAP[
-                    listener.protocol]:
-                raise exceptions.ValidationException(
-                    detail="The pool protocol '%s' is invalid while the "
-                           "listener protocol is '%s'." %
-                           (pool.protocol, listener.protocol))
+            validate.validate_listener_pool_protocol(
+                listener.protocol, pool.protocol)
         return pools_by_id
 
     def get_weighted_policy_using_pool(self, session, pool_id):
@@ -2105,33 +2109,148 @@ class L7PolicyRepository(BaseRepository):
                 .limit(1)
                 .scalar())
 
-    def get_active_rewrite_protocol(self, session, pool_id):
-        """Find a live rewrite which would forward if this pool reopened."""
+    def _active_http_policies(self, session):
         policy = self.model_class
         listener = models.Listener
-        load_balancer = models.LoadBalancer
         rule = models.L7Rule
-        target = models.L7PolicyTarget
         removed = (consts.PENDING_DELETE, consts.DELETED)
         return (
-            session.query(listener.protocol)
+            session.query(policy.id, policy.position, policy.action,
+                          policy.https_listener_hostname, policy.listener_id,
+                          listener.protocol, listener.https_virtual_hosts)
             .select_from(policy)
             .join(policy.listener)
-            .join(listener.load_balancer)
-            .join(policy.l7rules)
-            .outerjoin(target, (target.l7policy_id == policy.id) &
-                       (target.pool_id == pool_id) & (target.weight > 0))
-            .filter(policy.request_url_rewrite.isnot(None),
-                    policy.enabled.is_(True), rule.enabled.is_(True),
-                    listener.enabled.is_(True), load_balancer.enabled.is_(True),
+            .filter(listener.protocol.in_((consts.PROTOCOL_HTTP,
+                                           consts.PROTOCOL_TERMINATED_HTTPS)),
+                    policy.enabled.is_(True),
                     policy.provisioning_status.notin_(removed),
-                    rule.provisioning_status.notin_(removed),
                     listener.provisioning_status.notin_(removed),
-                    ((policy.action == consts.L7POLICY_ACTION_REDIRECT_TO_POOL) &
-                     (policy.redirect_pool_id == pool_id)) |
-                    ((policy.action == consts.L7POLICY_ACTION_WEIGHTED_TARGETS) &
-                     target.pool_id.isnot(None)))
-            .with_for_update().limit(1).scalar())
+                    policy.l7rules.any(
+                        rule.enabled.is_(True) &
+                        rule.provisioning_status.notin_(removed)),
+                    ~policy.l7rules.any(
+                        rule.enabled.is_(True) &
+                        (rule.type == consts.L7RULE_TYPE_TLS_SNI))))
+
+    @staticmethod
+    def _active_pool(*, restoring_pool=None, removed_pool=None):
+        pool = models.Pool
+        condition = pool.provisioning_status.notin_(
+            (consts.PENDING_DELETE, consts.DELETED))
+        if restoring_pool is not None:
+            return condition & (pool.id == restoring_pool)
+        condition &= pool.enabled.is_(True)
+        if removed_pool is not None:
+            condition &= pool.id != removed_pool
+        return condition
+
+    @staticmethod
+    def _in_https_section(row):
+        if row.https_virtual_hosts is None:
+            return row.https_listener_hostname is None
+        return row.https_listener_hostname in row.https_virtual_hosts
+
+    def get_active_url_rewrites(self, session, *, listener_id=None,
+                                load_balancer_id=None, reopening=None,
+                                restoring_pool=None, removed_pool=None):
+        """Read rewrites with an enabled predicate and forwarding target.
+
+        Use current reads inside the load balancer provisioning lock.
+        A parent or pool being reopened is treated as enabled.
+        """
+        policy = self.model_class
+        listener = models.Listener
+        lb = models.LoadBalancer
+        target = models.L7PolicyTarget
+        pool = self._active_pool(restoring_pool=restoring_pool,
+                                 removed_pool=removed_pool)
+        query = self._active_http_policies(session).filter(
+            policy.request_url_rewrite.isnot(None),
+            ((policy.action == consts.L7POLICY_ACTION_REDIRECT_TO_POOL) &
+             policy.redirect_pool.has(pool)) |
+            ((policy.action == consts.L7POLICY_ACTION_WEIGHTED_TARGETS) &
+             policy._targets.any((target.weight > 0) & target.pool.has(pool))))
+        if listener_id is not None:
+            query = query.filter(policy.listener_id == listener_id)
+        if load_balancer_id is not None:
+            query = query.filter(listener.load_balancer_id == load_balancer_id)
+        if reopening != 'listener':
+            query = query.filter(listener.enabled.is_(True))
+        if reopening != 'load_balancer':
+            query = query.join(listener.load_balancer).filter(
+                lb.enabled.is_(True))
+        return [row for row in query.with_for_update().all()
+                if self._in_https_section(row)]
+
+    def get_rewrite_exposed_by_policy(self, session, *, policy_id=None,
+                                      disabling_pool=None, new_position=None):
+        """Find a rewrite a request could reach if another policy changes."""
+        policy = self.model_class
+        listener = models.Listener
+        blockers = (self._active_http_policies(session)
+                    .join(listener.load_balancer)
+                    .filter(listener.enabled.is_(True),
+                            models.LoadBalancer.enabled.is_(True)))
+        if policy_id is not None:
+            blockers = blockers.filter(
+                policy.id == policy_id,
+                (policy.action != consts.L7POLICY_ACTION_REDIRECT_TO_POOL) |
+                policy.redirect_pool.has(self._active_pool()))
+        else:
+            # A weighted policy still wins and generates 503 for an
+            # unavailable member of its target set.
+            blockers = blockers.filter(
+                policy.action == consts.L7POLICY_ACTION_REDIRECT_TO_POOL,
+                policy.redirect_pool_id == disabling_pool)
+        for blocker in blockers.with_for_update().all():
+            if not self._in_https_section(blocker):
+                continue
+            terminal = blocker.action in (
+                consts.L7POLICY_ACTION_REJECT,
+                consts.L7POLICY_ACTION_REDIRECT_TO_URL,
+                consts.L7POLICY_ACTION_REDIRECT_PREFIX)
+            for rewrite in self.get_active_url_rewrites(
+                    session, listener_id=blocker.listener_id,
+                    removed_pool=disabling_pool):
+                if (rewrite.id != blocker.id and
+                        rewrite.https_listener_hostname ==
+                        blocker.https_listener_hostname and
+                        ((terminal and new_position is None) or
+                         blocker.position < rewrite.position) and
+                        (new_position is None or
+                         new_position >= rewrite.position)):
+                    return rewrite.protocol
+
+    def get_rewrite_exposed_by_ordered_redirect(
+            self, session, listener_id, hostname, position, *, policy_id=None):
+        """Check whether entry into the ordered phase can expose a rewrite."""
+        rewrites = [
+            rewrite for rewrite in self.get_active_url_rewrites(
+                session, listener_id=listener_id)
+            if (rewrite.https_listener_hostname == hostname and
+                rewrite.position < position)]
+        if not rewrites:
+            return
+        # Policy edits need an existing predicate. A new or changed rule
+        # supplied by a rule endpoint is already accounted for by the caller.
+        if policy_id is not None:
+            rule = models.L7Rule
+            if not (session.query(rule.id)
+                    .filter_by(l7policy_id=policy_id, enabled=True)
+                    .filter(rule.provisioning_status.notin_(
+                        (consts.PENDING_DELETE, consts.DELETED)))
+                    .with_for_update().limit(1).scalar()):
+                return
+        policy = self.model_class
+        first = min(rewrites, key=lambda rewrite: rewrite.position)
+        legacy = self._active_http_policies(session).filter(
+            policy.listener_id == listener_id,
+            policy.https_listener_hostname == hostname,
+            policy.position > first.position,
+            policy.action.in_((consts.L7POLICY_ACTION_REDIRECT_TO_URL,
+                               consts.L7POLICY_ACTION_REDIRECT_PREFIX)))
+        if legacy.with_for_update().first():
+            return first.protocol
 
     def get_all(self, session, pagination_helper=None, **filters):
         deleted = filters.pop('show_deleted', True)
@@ -2188,8 +2307,7 @@ class L7PolicyRepository(BaseRepository):
         return (
             session.query(listener.protocol, policy.action,
                           policy.request_header_operations,
-                          policy.response_header_operations,
-                          policy.request_url_rewrite)
+                          policy.response_header_operations)
             .select_from(policy)
             .join(listener, listener.id == policy.listener_id)
             .filter(listener.load_balancer_id == load_balancer_id,
@@ -2199,8 +2317,7 @@ class L7PolicyRepository(BaseRepository):
                     listener.provisioning_status.notin_(removed),
                     policy.provisioning_status.notin_(removed),
                     redirect | policy.request_header_operations.isnot(None) |
-                    policy.response_header_operations.isnot(None) |
-                    policy.request_url_rewrite.isnot(None))
+                    policy.response_header_operations.isnot(None))
             .with_for_update().all())
 
     def get_enabled_gateway_policies(self, session, listener_id, protocol):
@@ -2213,13 +2330,11 @@ class L7PolicyRepository(BaseRepository):
             actions.append(consts.L7POLICY_ACTION_REDIRECT_TO_POOL)
         return (
             session.query(model.action, model.request_header_operations,
-                          model.response_header_operations,
-                          model.request_url_rewrite)
+                          model.response_header_operations)
             .filter_by(listener_id=listener_id, enabled=True)
             .filter(model.action.in_(actions) |
                     model.request_header_operations.isnot(None) |
-                    model.response_header_operations.isnot(None) |
-                    model.request_url_rewrite.isnot(None))
+                    model.response_header_operations.isnot(None))
             .filter(model.provisioning_status.notin_((
                 consts.PENDING_DELETE, consts.DELETED)))
             .with_for_update().all())
@@ -2266,7 +2381,7 @@ class L7PolicyRepository(BaseRepository):
         update_targets = 'targets' in model_kwargs
         targets = model_kwargs.pop('targets', None) or []
         l7policy = self.model_class(**model_kwargs)
-        self._validate_l7policy_pool_data(session, l7policy)
+        self._validate_l7policy_pool_data(session, l7policy, l7policy_db)
         if update_targets:
             pools = self._weighted_target_pools(
                 session, l7policy.listener_id, targets) if targets else {}

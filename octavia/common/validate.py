@@ -628,6 +628,16 @@ def validate_http_request_url_rewrite_protocol(protocol):
                      'TERMINATED_HTTPS listener.'))
 
 
+def validate_listener_pool_protocol(listener_protocol, pool_protocol):
+    if pool_protocol not in constants.VALID_LISTENER_POOL_PROTOCOL_MAP[
+            listener_protocol]:
+        raise exceptions.ValidationException(detail=_(
+            "The pool protocol '%(pool_protocol)s' is invalid while the "
+            "listener protocol is '%(listener_protocol)s'.") % {
+                'pool_protocol': pool_protocol,
+                'listener_protocol': listener_protocol})
+
+
 def sanitize_l7policy_api_args(l7policy, create=False, old_policy=None):
     """Validate and make consistent L7Policy API arguments.
 

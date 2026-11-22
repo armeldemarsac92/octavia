@@ -200,6 +200,12 @@ class L7RuleController(base.BaseController):
                         db_l7policy.response_header_operations),
                     request_url_rewrite=db_l7policy.request_url_rewrite,
                     tcp_tls_termination=tcp_tls_termination)
+            if l7rule_dict['enabled']:
+                driver_utils.require_no_exposed_request_url_rewrite(
+                    driver, self.repositories.l7policy, context.session,
+                    policy_id=db_l7policy.id)
+                self._require_no_rewrite_exposed_by_ordered_redirect(
+                    context.session, driver, db_l7policy)
             if tcp_policy:
                 driver_utils.require_tls_sni_rule_comparison(
                     driver, l7rule.compare_type, tcp_tls_termination)
@@ -256,26 +262,42 @@ class L7RuleController(base.BaseController):
         except Exception as e:
             raise exceptions.L7RuleValidation(error=e)
 
+    def _require_no_rewrite_exposed_by_ordered_redirect(
+            self, session, driver, policy):
+        if (policy.enabled and
+                policy.action == constants.L7POLICY_ACTION_REDIRECT_REQUEST):
+            driver_utils.require_no_rewrite_exposed_by_ordered_redirect(
+                driver, self.repositories.l7policy, session,
+                policy.listener_id, policy.https_listener_hostname,
+                policy.position)
+
     def _require_url_capability_for_rule_removal(
             self, session, driver, policy, rule):
         redirect = policy.action == constants.L7POLICY_ACTION_REDIRECT_REQUEST
-        if (not (redirect or policy.request_url_rewrite) or
-                not policy.enabled or not rule.enabled or
+        if (not policy.enabled or not rule.enabled or
                 rule.provisioning_status in (constants.PENDING_DELETE,
                                              constants.DELETED)):
             return
-        listener = self.repositories.listener.get_for_update(
-            session, policy.listener_id, show_deleted=False)
         # Policies with no enabled rules are inactive. Removing a predicate
         # when another remains widens the scope of an enabled policy.
-        if (listener.enabled and
-                self.repositories.l7rule.has_other_enabled_rules(
-                    session, rule)):
-            if redirect:
+        policy_repo = self.repositories.l7policy
+        if self.repositories.l7rule.has_other_enabled_rules(session, rule):
+            listener = self.repositories.listener.get_for_update(
+                session, policy.listener_id, show_deleted=False)
+            if redirect and listener.enabled:
                 driver_utils.require_http_request_redirect(driver)
-            if policy.request_url_rewrite:
-                driver_utils.require_request_url_rewrite(
-                    driver, listener.protocol)
+                self._require_no_rewrite_exposed_by_ordered_redirect(
+                    session, driver, policy)
+            if (policy.request_url_rewrite and
+                    not driver_utils.request_url_rewrite_available(driver) and
+                    any(rewrite.id == policy.id for rewrite in
+                        policy_repo.get_active_url_rewrites(
+                            session, listener_id=listener.id))):
+                driver_utils.require_request_url_rewrite(driver,
+                                                         listener.protocol)
+        else:
+            driver_utils.require_no_exposed_request_url_rewrite(
+                driver, policy_repo, session, policy_id=policy.id)
 
     @wsme_pecan.wsexpose(l7rule_types.L7RuleRootResponse,
                          wtypes.text, body=l7rule_types.L7RuleRootPUT,
@@ -349,6 +371,12 @@ class L7RuleController(base.BaseController):
                         db_l7policy.response_header_operations),
                     request_url_rewrite=db_l7policy.request_url_rewrite,
                     tcp_tls_termination=tcp_tls_termination)
+                if enabled:
+                    driver_utils.require_no_exposed_request_url_rewrite(
+                        driver, self.repositories.l7policy, context.session,
+                        policy_id=db_l7policy.id)
+                    self._require_no_rewrite_exposed_by_ordered_redirect(
+                        context.session, driver, db_l7policy)
                 if tcp_policy:
                     compare_type = l7rule_dict.get(
                         'compare_type', db_l7rule.compare_type)
