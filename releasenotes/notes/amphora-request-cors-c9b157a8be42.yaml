@@ -1,0 +1,14 @@
+---
+features:
+  - |
+    Amphora can apply Gateway API v1.7.0 CORS settings to a selected HTTP
+    or terminated HTTPS forwarding L7 policy. Use the optional
+    ``request_cors`` field when the provider advertises
+    ``request_cors_v1``. Send ``null`` to clear stored settings.
+upgrade:
+  - |
+    Apply migration ``c9b157a8be42`` and upgrade the API, octavia-lib,
+    workers and Amphora fleet before enrolling the provider in
+    ``[api_settings] enabled_request_cors_providers``. The list is
+    empty by default. After withdrawal, existing filters are readable
+    and can be removed. Clear them before rolling back the fleet.

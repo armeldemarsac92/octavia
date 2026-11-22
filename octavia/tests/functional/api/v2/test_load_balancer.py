@@ -3740,6 +3740,35 @@ class TestLoadBalancerGraph(base.BaseAPITest):
         response = self.put(path, {'l7policy': {field: rewrite}})
         self.assertEqual(rewrite, response.json['l7policy'][field])
 
+    @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
+    def test_nested_request_cors_requires_opt_in_and_persists(self, rpc):
+        body = self._build_body({
+            'provider': 'amphora', 'vip_subnet_id': uuidutils.generate_uuid(),
+            'project_id': self._project_id,
+            'pools': [{'name': 'target', 'protocol': 'HTTP',
+                       'lb_algorithm': 'ROUND_ROBIN'}],
+            'listeners': [{
+                'protocol': 'HTTP', 'protocol_port': 80,
+                'l7policies': [{
+                    'action': 'REDIRECT_TO_POOL',
+                    'redirect_pool': {'name': 'target'},
+                    'request_cors': {},
+                    'rules': [{'type': 'PATH', 'compare_type': 'STARTS_WITH',
+                               'value': '/'}],
+                }],
+            }],
+        })
+        self.post(self.LBS_PATH, body, status=501)
+        rpc.return_value.cast.assert_not_called()
+        self.conf.config(group='api_settings',
+                         enabled_request_cors_providers=['amphora'])
+        lb = self.post(self.LBS_PATH, body).json[self.root_tag]
+        listener, = lb['listeners']
+        attached, = listener['l7policies']
+        path = self.L7POLICY_PATH.format(l7policy_id=attached['id'])
+        self.assertEqual({}, attached['request_cors'])
+        self.assertEqual({}, self.get(path).json['l7policy']['request_cors'])
+
     def test_with_l7policies_one_redirect_pool_one_rule(self):
         create_pool, expected_pool = self._get_pool_bodies(create_members=[],
                                                            expected_members=[])

@@ -38,6 +38,7 @@ HTTP_REQUEST_REDIRECT_PAYLOAD_AVAILABLE = hasattr(
     driver_dm.L7Policy(), 'redirect_request')
 REQUEST_URL_REWRITE_PAYLOAD_AVAILABLE = hasattr(
     driver_dm.L7Policy(), 'request_url_rewrite')
+REQUEST_CORS_PAYLOAD_AVAILABLE = hasattr(driver_dm.L7Policy(), 'request_cors')
 WEIGHTED_TARGET_PAYLOAD_AVAILABLE = hasattr(driver_dm.L7Policy(), 'targets')
 
 HTTP_L7RULE_CAPABILITIES = {
@@ -92,6 +93,10 @@ def gateway_capabilities(driver):
             driver.name in api_settings.enabled_request_url_rewrite_providers
             and getattr(driver, 'supports_request_url_rewrite', False) is True):
         capabilities.append(constants.GATEWAY_CAPABILITY_REQUEST_URL_REWRITE)
+    if (REQUEST_CORS_PAYLOAD_AVAILABLE and
+            driver.name in api_settings.enabled_request_cors_providers and
+            getattr(driver, 'supports_request_cors', False) is True):
+        capabilities.append(constants.GATEWAY_CAPABILITY_REQUEST_CORS)
     initial_rules_providers = (
         api_settings.enabled_l7policy_initial_rules_providers)
     if (driver.name in initial_rules_providers and
@@ -205,6 +210,15 @@ def require_request_url_rewrite(driver, protocol):
                 'provider.'))
 
 
+def require_request_cors(driver, protocol):
+    validate.validate_http_request_cors_protocol(protocol)
+    if (constants.GATEWAY_CAPABILITY_REQUEST_CORS not in
+            gateway_capabilities(driver)):
+        raise exceptions.ProviderUnsupportedOptionError(
+            prov=driver.name, user_msg=_(
+                'L7 policy CORS is unavailable for this provider.'))
+
+
 def require_weighted_target_request_filters(driver, protocol):
     validate.validate_weighted_l7policy_protocol(protocol)
     if (constants.GATEWAY_CAPABILITY_WEIGHTED_TARGET_FILTERS not in
@@ -218,17 +232,19 @@ def require_weighted_target_request_filters(driver, protocol):
 def _withdrawn_request_transforms(driver):
     capabilities = gateway_capabilities(driver)
     if constants.GATEWAY_CAPABILITY_REQUEST_URL_REWRITE not in capabilities:
-        yield False, require_request_url_rewrite
+        yield 'request_url_rewrite', require_request_url_rewrite
     if (constants.GATEWAY_CAPABILITY_WEIGHTED_TARGET_FILTERS not in
             capabilities):
-        yield True, require_weighted_target_request_filters
+        yield 'target_filters', require_weighted_target_request_filters
+    if constants.GATEWAY_CAPABILITY_REQUEST_CORS not in capabilities:
+        yield 'request_cors', require_request_cors
 
 
 def require_no_exposed_request_transforms(driver, policy_repo, session,
                                           **changes):
-    for target_filters, require in _withdrawn_request_transforms(driver):
-        protocol = policy_repo.get_rewrite_exposed_by_policy(
-            session, target_filters=target_filters, **changes)
+    for transform, require in _withdrawn_request_transforms(driver):
+        protocol = policy_repo.get_transform_exposed_by_policy(
+            session, transform=transform, **changes)
         if protocol:
             require(driver, protocol)
 
@@ -236,10 +252,10 @@ def require_no_exposed_request_transforms(driver, policy_repo, session,
 def require_no_transform_exposed_by_ordered_redirect(
         driver, policy_repo, session, listener_id, hostname, position,
         *, policy_id=None):
-    for target_filters, require in _withdrawn_request_transforms(driver):
-        protocol = policy_repo.get_rewrite_exposed_by_ordered_redirect(
+    for transform, require in _withdrawn_request_transforms(driver):
+        protocol = policy_repo.get_transform_exposed_by_ordered_redirect(
             session, listener_id, hostname, position, policy_id=policy_id,
-            target_filters=target_filters)
+            transform=transform)
         if protocol:
             require(driver, protocol)
 
@@ -247,9 +263,9 @@ def require_no_transform_exposed_by_ordered_redirect(
 def require_no_active_request_transforms(
         driver, policy_repo, session, *, policy_id=None,
         removed_https_hosts=(), **scope):
-    for target_filters, require in _withdrawn_request_transforms(driver):
-        for row in policy_repo.get_active_url_rewrites(
-                session, target_filters=target_filters, **scope):
+    for transform, require in _withdrawn_request_transforms(driver):
+        for row in policy_repo.get_active_request_transforms(
+                session, transform=transform, **scope):
             if policy_id is not None and row.id != policy_id:
                 continue
             section = row.https_listener_hostname
@@ -358,7 +374,10 @@ def require_gateway_policy_action(driver, action, protocol, *,
                                   request_header_operations=None,
                                   tcp_tls_termination=False,
                                   response_header_operations=None,
-                                  request_url_rewrite=None, targets=None):
+                                  request_url_rewrite=None, targets=None,
+                                  request_cors=None):
+    if request_cors is not None:
+        require_request_cors(driver, protocol)
     if request_url_rewrite:
         require_request_url_rewrite(driver, protocol)
     if action == constants.L7POLICY_ACTION_FIXED_RESPONSE:
@@ -906,7 +925,8 @@ def db_l7policy_to_provider_l7policy(db_l7policy):
     for field in ('request_header_operations', 'response_header_operations'):
         if not new_l7policy_dict.get(field):
             new_l7policy_dict.pop(field, None)
-    for field in ('fixed_response', 'redirect_request', 'request_url_rewrite'):
+    for field in ('fixed_response', 'redirect_request', 'request_url_rewrite',
+                  'request_cors'):
         if new_l7policy_dict.get(field) is None:
             new_l7policy_dict.pop(field, None)
     return driver_dm.L7Policy.from_dict(new_l7policy_dict)
@@ -919,6 +939,8 @@ def l7policy_dict_to_provider_dict(l7policy_dict):
     # Allow ordinary policies and cleanup with an older provider library.
     if not REQUEST_URL_REWRITE_PAYLOAD_AVAILABLE:
         new_l7policy_dict.pop('request_url_rewrite', None)
+    if not REQUEST_CORS_PAYLOAD_AVAILABLE:
+        new_l7policy_dict.pop('request_cors', None)
     for attribute in ('request_header_operations',
                       'response_header_operations', 'https_listener_hostname'):
         if new_l7policy_dict.get(attribute) is None:

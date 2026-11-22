@@ -61,6 +61,7 @@ Response Parameters
    - redirect_prefix: l7policy-redirect-prefix
    - redirect_request: l7policy-redirect-request
    - request_url_rewrite: l7policy-request-url-rewrite
+   - request_cors: l7policy-request-cors
    - redirect_url: l7policy-redirect-url
    - rules: l7policy-rule-ids
    - tags: tags
@@ -130,6 +131,11 @@ The regional ``request_url_rewrite_v1`` provider capability enables
 ``request_url_rewrite`` on forwarding policies. The winning policy can
 replace the hostname, path or both before forwarding.
 
+The regional ``request_cors_v1`` provider capability enables
+``request_cors`` on ``REDIRECT_TO_POOL`` and ``WEIGHTED_TARGETS``
+policies. See the provider Gateway API capabilities for the fields,
+limits and defaults.
+
 L7 policies with ``action`` of ``REJECT`` will return a ``Forbidden (403)``
 response code to the requester.
 
@@ -170,6 +176,7 @@ Request
    - redirect_prefix: l7policy-redirect-prefix-optional
    - redirect_request: l7policy-redirect-request
    - request_url_rewrite: l7policy-request-url-rewrite
+   - request_cors: l7policy-request-cors
    - redirect_url: l7policy-redirect-url-optional
    - rules: l7policy-initial-rules
    - tags: tags-optional
@@ -207,6 +214,7 @@ Response Parameters
    - redirect_prefix: l7policy-redirect-prefix
    - redirect_request: l7policy-redirect-request
    - request_url_rewrite: l7policy-request-url-rewrite
+   - request_cors: l7policy-request-cors
    - redirect_url: l7policy-redirect-url
    - rules: l7policy-rule-ids
    - tags: tags
@@ -277,6 +285,7 @@ Response Parameters
    - redirect_prefix: l7policy-redirect-prefix
    - redirect_request: l7policy-redirect-request
    - request_url_rewrite: l7policy-request-url-rewrite
+   - request_cors: l7policy-request-cors
    - redirect_url: l7policy-redirect-url
    - rules: l7policy-rule-ids
    - tags: tags
@@ -337,6 +346,7 @@ Request
    - redirect_prefix: l7policy-redirect-prefix-optional
    - redirect_request: l7policy-redirect-request
    - request_url_rewrite: l7policy-request-url-rewrite
+   - request_cors: l7policy-request-cors
    - redirect_url: l7policy-redirect-url-optional
    - tags: tags-optional
 
@@ -373,6 +383,7 @@ Response Parameters
    - redirect_prefix: l7policy-redirect-prefix
    - redirect_request: l7policy-redirect-request
    - request_url_rewrite: l7policy-request-url-rewrite
+   - request_cors: l7policy-request-cors
    - redirect_url: l7policy-redirect-url
    - rules: l7policy-rule-ids
    - tags: tags

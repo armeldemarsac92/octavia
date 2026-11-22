@@ -79,6 +79,18 @@ def _http_url_path(value):
 _HTTP_TOKEN = r"[A-Za-z0-9!#$%&'*+.^_`|~-]+"
 _HTTP_OWS = '[ \t]*'
 _HTTP_QUOTED_STRING = '"([^"\\\\[:cntrl:]]|\t|\\\\([^[:cntrl:]]|\t))*"'
+_CORS_DNS_LABEL = '[a-z0-9-]+'
+_CORS_ANY_HOST = r"([a-z0-9.!$&'()*+,;=_~-]+|\[[a-f0-9:.]+\])"
+# Match decimal ports in 1..65535, including zero-padded ports.
+_CORS_PORT = (
+    '0*([1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|'
+    '655[0-2][0-9]|6553[0-5])'
+)
+# HAProxy defaults. Keep the existing ingress capacity when reserving space
+# for larger configured CORS response fields.
+_HAPROXY_BUFFER_SIZE = 16384
+_HAPROXY_REWRITE_RESERVE = 1024
+_CORS_RESPONSE_OVERHEAD = 512
 _GRPC_CONTENT_TYPE_PATTERN = (
     f'^{_HTTP_OWS}{constants.GRPC_CONTENT_TYPE}([+]{_HTTP_TOKEN})?{_HTTP_OWS}'
     f'(;{_HTTP_OWS}'
@@ -248,6 +260,9 @@ class JinjaTemplater:
                     raise driver_except.AmpVersionUnsupported(
                         version=f'HAProxy {haproxy_version}; request URL '
                                 'rewrites require 2.2')
+                if listener['enabled'] and 'cors_by_backend' in listener:
+                    raise driver_except.AmpVersionUnsupported(
+                        version=f'HAProxy {haproxy_version}; CORS requires 2.2')
         if loadbalancer['enabled']:
             for listener in loadbalancer['listeners']:
                 if not listener['enabled']:
@@ -308,6 +323,23 @@ class JinjaTemplater:
             'enable_prometheus': enable_prometheus,
             'require_insecure_fork': require_insecure_fork,
         }
+        if loadbalancer['enabled']:
+            cors_reserve = max((
+                cors['response_headroom']
+                for listener in loadbalancer['listeners']
+                if listener['enabled']
+                for policies in listener.get('cors_by_backend', {}).values()
+                for _, cors in policies
+            ), default=0)
+            if cors_reserve > _HAPROXY_REWRITE_RESERVE:
+                # HAProxy clamps maxrewrite to half of bufsize. Round up
+                # to the 64-bit HAProxy buffer alignment before calculating.
+                reserve = (cors_reserve + 15) // 16 * 16
+                jinja_dict['cors_buffer_tuning'] = {
+                    'size': max(_HAPROXY_BUFFER_SIZE - _HAPROXY_REWRITE_RESERVE
+                                + reserve, 2 * reserve),
+                    'rewrite_reserve': reserve,
+                }
         try:
             # Enable cpu-pinning only if the amphora TuneD profile is active
             if "amphora" in amp_details["active_tuned_profiles"].split():
@@ -611,11 +643,13 @@ class JinjaTemplater:
         ret_value['l7policies'] = l7policies
         requests_by_pool = {}
         responses_by_backend = {}
+        cors_by_backend = {}
         rewrites_by_pool = {}
         target_filters_by_pool = {}
         for policy in l7policies:
             request_ops = policy.get('request_header_operations')
             response_ops = policy.get('response_header_operations')
+            cors = policy.get('request_cors')
             rewrite = policy.get('request_url_rewrite')
             pool_ids = set()
             fixed_responses = set()
@@ -632,9 +666,14 @@ class JinjaTemplater:
                         fixed_responses.add(f'weighted-{code}')
             elif 'fixed_http_status_code' in policy:
                 fixed_responses.add(policy['id'])
-            elif (policy['redirect_pool'] and
-                  policy['redirect_pool']['id'] in available_pool_ids):
-                pool_ids.add(policy['redirect_pool']['id'])
+            elif policy['redirect_pool']:
+                redirect_pool = policy['redirect_pool']
+                pool_id = redirect_pool['id']
+                if pool_id in available_pool_ids:
+                    pool_ids.add(pool_id)
+                elif cors is not None and redirect_pool.get('closed'):
+                    cors_by_backend.setdefault(('pool', pool_id), []).append(
+                        (policy['id'], cors))
             for pool_id in pool_ids:
                 if rewrite:
                     rewrites_by_pool.setdefault(pool_id, []).append(
@@ -646,11 +685,18 @@ class JinjaTemplater:
                     responses_by_backend.setdefault(('pool', pool_id),
                                                     []).append(
                         (policy['id'], response_ops))
+                if cors is not None:
+                    cors_by_backend.setdefault(('pool', pool_id), []).append(
+                        (policy['id'], cors))
             if response_ops:
                 for response_id in fixed_responses:
                     responses_by_backend.setdefault(('fixed', response_id),
                                                     []).append(
                         (policy['id'], response_ops))
+            if cors is not None:
+                for response_id in fixed_responses:
+                    cors_by_backend.setdefault(('fixed', response_id),
+                                              []).append((policy['id'], cors))
         if target_filters_by_pool:
             ret_value['target_filters_by_pool'] = target_filters_by_pool
         if requests_by_pool:
@@ -660,6 +706,8 @@ class JinjaTemplater:
         if responses_by_backend:
             ret_value['response_header_operations_by_backend'] = (
                 responses_by_backend)
+        if cors_by_backend:
+            ret_value['cors_by_backend'] = cors_by_backend
 
         weighted_policies = [policy for policy in l7policies
                              if 'weighted_targets' in policy]
@@ -919,6 +967,11 @@ class JinjaTemplater:
                 ret_value['request_url_rewrite'] = (
                     self._transform_request_url_rewrite(
                         l7policy.request_url_rewrite))
+            cors = getattr(l7policy, 'request_cors', None)
+            if (cors is not None and l7policy.action in
+                    (constants.L7POLICY_ACTION_REDIRECT_TO_POOL,
+                     constants.L7POLICY_ACTION_WEIGHTED_TARGETS)):
+                ret_value['request_cors'] = self._transform_request_cors(cors)
             for field in ('request_header_operations',
                           'response_header_operations'):
                 operations = getattr(l7policy, field)
@@ -926,6 +979,77 @@ class JinjaTemplater:
                     ret_value[field] = self._transform_header_operations(
                         operations, field)
         return ret_value
+
+    @staticmethod
+    def _cors_origin_pattern(origin):
+        if origin == '*':
+            # Opaque browser origins serialize to "null".
+            return rf'^(null|https?://{_CORS_ANY_HOST}(:{_CORS_PORT})?)$'
+
+        scheme, authority = origin.split('://', 1)
+        host, separator, configured_port = authority.partition(':')
+        default_port = 80 if scheme == 'http' else 443
+        port = int(configured_port) if separator else default_port
+        port_match = f'(:0*{port})' + ('?' if port == default_port else '')
+        if host == '*':
+            host_match = _CORS_ANY_HOST
+        elif host.startswith('*.'):
+            host_match = rf'({_CORS_DNS_LABEL}[.])+' + re.escape(host[2:])
+        else:
+            host_match = re.escape(host)
+        return f'^{scheme}://{host_match}{port_match}$'
+
+    @classmethod
+    def _transform_request_cors(cls, cors):
+        origins = cors.get('allow_origins', [])
+        methods = cors.get('allow_methods', [])
+        headers = cors.get('allow_headers', [])
+        expose = cors.get('expose_headers', [])
+        credentials = cors.get('allow_credentials', False)
+        allowed_methods = sorted({'GET', 'HEAD', 'POST'}.union(methods))
+        header_name = (_HTTP_TOKEN if '*' in headers else
+                       '(' + '|'.join(map(re.escape, headers)) + ')')
+        # Include the allow-list alternatives once so the largest CRD list
+        # fits HAProxy's PCRE2 compiled-pattern limit.
+        header_list = f'^({_HTTP_OWS}{header_name}{_HTTP_OWS}(,|$))+$'
+        response_headers = {
+            name: ', '.join(values)
+            for name, values in (
+                ('Access-Control-Allow-Methods', methods),
+                ('Access-Control-Allow-Headers', headers),
+                ('Access-Control-Expose-Headers', expose),
+            ) if values and '*' not in values
+        }
+        # Static lists dominate the response cost at the CRD bounds. Add
+        # space for each HTX field and for Origin, Vary and the scalar fields.
+        response_headroom = _CORS_RESPONSE_OVERHEAD + sum(
+            len(name) + len(value) + 16
+            for name, value in response_headers.items()
+        )
+        return {
+            'origin_patterns': [
+                _quote_config_arg(cls._cors_origin_pattern(origin))
+                for origin in origins
+            ],
+            'origin_response': ('"*"' if '*' in origins and not credentials
+                                else '"%[var(txn.octavia_cors_origin)]"'),
+            'credentials': credentials,
+            'methods_wildcard': '*' in methods,
+            'method_token_pattern': _quote_config_arg(f'^{_HTTP_TOKEN}$'),
+            'accepted_methods': ' '.join(map(_quote_config_arg,
+                                             allowed_methods)),
+            'headers_wildcard': '*' in headers,
+            'header_list_pattern': (_quote_config_arg(header_list)
+                                    if headers else None),
+            'expose_wildcard': '*' in expose,
+            # The literals also pass through HAProxy's log-format parser.
+            'response_headers': {
+                name: _quote_config_arg(value.replace('%', '%%'))
+                for name, value in response_headers.items()
+            },
+            'response_headroom': response_headroom,
+            'max_age': int(cors.get('max_age', 5)),
+        }
 
     @staticmethod
     def _transform_request_redirect(redirect):

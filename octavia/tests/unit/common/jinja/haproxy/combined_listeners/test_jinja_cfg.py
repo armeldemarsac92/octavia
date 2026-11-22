@@ -947,10 +947,12 @@ class TestHaproxyCfg(base.TestCase):
                     target._asdict(), enabled=False, tls_enabled=True,
                     backend_tls_hostname=hostname,
                     ca_tls_certificate_id='unavailable-ca'))
+                filtered = SimpleNamespace(
+                    **dict(policy._asdict(), redirect_pool=disabled),
+                    request_cors={'allow_origins': ['https://client.test']})
                 updated = listener._replace(
                     pools=[healthy, disabled], default_pool=healthy,
-                    l7policies=[policy._replace(redirect_pool=disabled),
-                                fallback])
+                    l7policies=[filtered, fallback])
                 rendered = self.jinja_cfg.build_config(
                     amp, [updated], None, haproxy_versions=['3', '0', '19'],
                     amp_details={})
@@ -971,10 +973,13 @@ class TestHaproxyCfg(base.TestCase):
                     _, _, section = backends.partition(f'{backend}\n')
                     section = section.partition('\nbackend ')[0]
                     self.assertIn('mode http', section)
+                    self.assertIn('http-request return status 204', section)
+                    self.assertIn('Access-Control-Allow-Origin', section)
                     self.assertNotIn('\n    server ', section)
                 else:
                     self.assertNotIn(protected_route, frontend)
                     self.assertNotIn(f'{backend}\n', backends)
+                    self.assertNotIn('Access-Control-Allow-Origin', backends)
 
     def test_render_template_https_real_monitor(self):
         fe = ("frontend sample_listener_id_1\n"
@@ -1864,6 +1869,99 @@ class TestHaproxyCfg(base.TestCase):
         self.assertIn(f'http-request set-path "/new" {guard}', backends)
         self.assertIn(f'http-request set-header host "next.example" {guard}',
                       backends)
+
+    def test_cors_follows_the_selected_weighted_policy_to_its_targets(self):
+        amp = sample_configs_combined.sample_amphora_tuple()
+        listener = sample_configs_combined.sample_listener_tuple(l7=True)
+        ordinary = listener.l7policies[0]
+        pool = ordinary.redirect_pool
+        weighted = ordinary._replace(
+            id='with-cors', action=constants.L7POLICY_ACTION_WEIGHTED_TARGETS,
+            redirect_pool=None,
+            l7rules=[sample_configs_combined.sample_l7rule_tuple(
+                'cors-rule', value='/cors')],
+            targets=[{'weight': 3, 'pool_id': pool.id},
+                     {'weight': 1, 'fixed_response': {'status_code': 500}}],
+            request_header_operations=[
+                {'operation': 'REMOVE', 'name': 'Origin'}],
+            response_header_operations=[
+                {'operation': 'SET', 'name': 'Access-Control-Allow-Origin',
+                 'value': 'https://backend.example'}],
+        )
+        weighted = SimpleNamespace(**weighted._asdict())
+        weighted.request_cors = {
+            'allow_origins': ['https://*.example.com:443'],
+            'allow_headers': ['x-%debug'],
+        }
+        listener = listener._replace(l7policies=[ordinary, weighted])
+        config = self.jinja_cfg.build_config(
+            amp, [listener], None, haproxy_versions=['3', '0', '19'],
+            amp_details=None)
+        frontend, *backends = config.split('\nbackend ')
+        self.assertLess(frontend.index(f'str({ordinary.id})'),
+                        frontend.index('str(with-cors)'))
+        self.assertNotIn('octavia_cors_', frontend)
+        guard = 'if { var(txn.octavia_l7_policy) -m str with-cors }'
+        targets = {
+            backend.splitlines()[0]: backend for backend in backends
+            if 'http-request return status 204 ' + guard in backend
+        }
+        self.assertEqual({
+            f'{pool.id}:{listener.id}',
+            f'{constants.HAPROXY_FIXED_RESPONSE_BACKEND_PREFIX}'
+            f'{listener.id}-weighted-500',
+        }, targets.keys())
+        for backend in targets.values():
+            self.assertIn('Access-Control-Allow-Headers "x-%%debug"', backend)
+            self.assertIn('Access-Control-Max-Age 5', backend)
+            self.assertLess(
+                backend.index('https://backend.example'),
+                backend.index('del-header Access-Control-Allow-Origin'))
+        pool_config = targets[f'{pool.id}:{listener.id}']
+        self.assertLess(pool_config.index('http-request return status 204'),
+                        pool_config.index('http-request del-header "origin"'))
+
+    def test_present_empty_cors_enables_preflight_denial(self):
+        amp = sample_configs_combined.sample_amphora_tuple()
+        listener = sample_configs_combined.sample_listener_tuple(l7=True)
+        policy = SimpleNamespace(**listener.l7policies[0]._asdict())
+        policy.request_cors = {}
+        listener = listener._replace(l7policies=[policy])
+        config = self.jinja_cfg.build_config(
+            amp, [listener], None, haproxy_versions=['3', '0', '19'],
+            amp_details=None)
+        self.assertIn('http-request return status 403', config)
+        self.assertNotIn('set-var(txn.octavia_cors_origin)', config)
+        self.assertNotIn('tune.bufsize', config)
+        self.assertRaises(
+            driver_except.AmpVersionUnsupported, self.jinja_cfg.build_config,
+            amp, [listener], None, haproxy_versions=['2', '1', '0'],
+            amp_details=None)
+
+    def test_cors_reserves_space_for_the_largest_configured_header_lists(self):
+        amp = sample_configs_combined.sample_amphora_tuple()
+        listener = sample_configs_combined.sample_listener_tuple(l7=True)
+        names = [f'x-{index:02}-' + 'a' * 251 for index in range(64)]
+        policy = SimpleNamespace(**listener.l7policies[0]._asdict())
+        policy.request_cors = {
+            'allow_origins': ['https://test.example'],
+            'allow_headers': names,
+            'expose_headers': names,
+        }
+        listener = listener._replace(l7policies=[policy])
+        config = self.jinja_cfg.build_config(
+            amp, [listener], None, haproxy_versions=['3', '0', '19'],
+            amp_details=None)
+        settings = {
+            name: int(value)
+            for name, value in (line.split() for line in config.splitlines()
+                                if line.lstrip().startswith('tune.'))
+        }
+        reserve = settings['tune.maxrewrite']
+        size = settings['tune.bufsize']
+        self.assertGreater(reserve, 2 * len(', '.join(names)))
+        self.assertGreaterEqual(size - reserve, 16384 - 1024)
+        self.assertGreaterEqual(size, 2 * reserve)
 
     def test_response_headers_follow_policy_to_pool_or_fixed_response(self):
         amp = sample_configs_combined.sample_amphora_tuple()
