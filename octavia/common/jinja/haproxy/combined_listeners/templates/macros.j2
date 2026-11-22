@@ -193,6 +193,24 @@ backend {{ fixed_response_backend_name(constants, listener, response_id) }}
 {% endmacro %}
 
 
+{% macro request_redirect_backend_name(listener, policy) -%}
+    request-redirect-{{ listener.id }}-{{ policy.id }}
+{%- endmacro %}
+
+
+{% macro request_redirect_backend_macro(listener, policy) %}
+    {% set redirect = policy.request_redirect %}
+    {% set code = policy.redirect_http_code or 302 %}
+backend {{ request_redirect_backend_name(listener, policy) }}
+    mode http
+    {% if redirect.request_hostname %}
+    http-request deny deny_status 400 unless { req.fhdr(host) -m reg '^([A-Za-z0-9.-]+|\[[A-Fa-f0-9:.]+\])(:[0-9]*)?$' }
+    {% endif %}
+    http-request redirect code {{ code }} {{ redirect.mode }} {{ redirect.argument|safe }}
+
+{% endmacro %}
+
+
 {% macro closed_backend_macro(listener, pool) %}
 {# An empty backend returns 503 in HTTP mode and closes TCP connections. #}
 backend {{ pool.id }}:{{ listener.id }}
@@ -208,12 +226,40 @@ backend {{ pool.id }}:{{ listener.id }}
     {% for l7rule in l7policy.l7rules %}
         {{- l7rule_macro(constants, l7rule, listener) -}}
     {% endfor %}
+    {% if l7policy.request_redirect is defined and l7policy.request_redirect.match is defined %}
+    acl redirect-prefix-{{ l7policy.id }} path -m str -- {{ l7policy.request_redirect.match|safe }}
+    acl redirect-prefix-{{ l7policy.id }} path -m beg -- {{ l7policy.request_redirect.descendants|safe }}
+    {% endif %}
 {% endmacro %}
 
 
 {% macro selected_policy_match_macro(policy_id) -%}
     { var(txn.octavia_l7_policy) -m str {{ policy_id }} }
 {%- endmacro %}
+
+
+{% macro request_redirect_match_macro(constants, policy) -%}
+    {{- l7rule_list_macro(constants, policy) -}}
+    {%- if policy.request_redirect.match is defined %} redirect-prefix-{{ policy.id }}{% endif -%}
+{%- endmacro %}
+
+
+{% macro ordered_redirect_match_macro() -%}
+    { var(txn.octavia_ordered_redirect) -m found }
+{%- endmacro %}
+
+
+{% macro stock_redirect_macro(constants, policy, unless_ordered=False) %}
+    {% set code = (" code %s"|format(policy.redirect_http_code)) if policy.redirect_http_code else "" %}
+    {% if policy.action == constants.L7POLICY_ACTION_REDIRECT_TO_URL %}
+        {% set mode = "location" %}
+        {% set destination = policy.redirect_url %}
+    {% else %}
+        {% set mode = "prefix" %}
+        {% set destination = policy.redirect_prefix %}
+    {% endif %}
+    redirect{{ code }} {{ mode }} {{ destination }} if{% if unless_ordered %} !{{ ordered_redirect_match_macro() }}{% endif %}{{ l7rule_list_macro(constants, policy) }}
+{% endmacro %}
 
 
 {% macro select_switching_policy_macro(constants, l7policy) %}
@@ -231,16 +277,12 @@ backend {{ pool.id }}:{{ listener.id }}
 
 
 {% macro l7policy_macro(constants, l7policy, listener) %}
-    {% if l7policy.redirect_http_code %}
-        {% set redirect_http_code_opt = " code %s"|format(
-        l7policy.redirect_http_code) %}
-    {% else %}
-        {% set redirect_http_code_opt = "" %}
-    {% endif %}
     {% if l7policy.action == constants.L7POLICY_ACTION_REJECT %}
     http-request deny if{{ l7rule_list_macro(constants, l7policy) }}
-    {% elif l7policy.action == constants.L7POLICY_ACTION_REDIRECT_TO_URL %}
-    redirect {{- redirect_http_code_opt }} location {{ l7policy.redirect_url }} if{{ l7rule_list_macro(constants, l7policy) }}
+    {% elif l7policy.request_redirect is defined %}
+    use_backend {{ request_redirect_backend_name(listener, l7policy) }} if{% if l7policy.action != constants.L7POLICY_ACTION_REDIRECT_REQUEST %} {{ ordered_redirect_match_macro() }}{% endif %}{{ request_redirect_match_macro(constants, l7policy) }}
+    {% elif l7policy.action in (constants.L7POLICY_ACTION_REDIRECT_TO_URL, constants.L7POLICY_ACTION_REDIRECT_PREFIX) %}
+        {{- stock_redirect_macro(constants, l7policy) -}}
     {% elif l7policy.action == constants.L7POLICY_ACTION_REDIRECT_TO_POOL and
             (l7policy.redirect_pool.enabled or l7policy.redirect_pool.closed) %}
     use_backend {{ l7policy.redirect_pool.id }}:{{ listener.id }} if{{ l7rule_list_macro(constants, l7policy) }}
@@ -256,8 +298,6 @@ backend {{ pool.id }}:{{ listener.id }}
             {% endif %}
     use_backend {{ backend }} if {{ selected_policy_match_macro(l7policy.id) }} { var(txn.octavia_weighted_draw) -m int {{ target.first }}:{{ target.last }} }
         {% endfor %}
-    {% elif l7policy.action == constants.L7POLICY_ACTION_REDIRECT_PREFIX %}
-    redirect {{- redirect_http_code_opt }} prefix {{ l7policy.redirect_prefix }} if{{ l7rule_list_macro(constants, l7policy) }}
     {% endif %}
 {% endmacro %}
 
@@ -313,21 +353,35 @@ frontend {{ listener.id }}
         {{- https_listener_isolation_macro(listener.https_sections) -}}
     {% endif %}
     {% set policies = listener.l7policies|selectattr('enabled')|selectattr('l7rules')|list %}
+    {% set structured = policies|selectattr('action', 'equalto', constants.L7POLICY_ACTION_REDIRECT_REQUEST)|list %}
     {% set select_policy = listener.weighted_response_codes is defined or
                            listener.request_header_operations_by_pool is defined or
                            listener.response_header_operations_by_backend is defined %}
+    {% if select_policy or structured %}
+        {% for l7policy in policies %}
+            {{- l7policy_rules_macro(constants, l7policy, listener) -}}
+        {% endfor %}
+    {% endif %}
+    {% if structured %}
+        {# Enter the ordered phase only for requests with a structured match. #}
+        {% for l7policy in structured %}
+    http-request set-var(txn.octavia_ordered_redirect) bool(true) if !{{ ordered_redirect_match_macro() }}{{ request_redirect_match_macro(constants, l7policy) }}
+        {% endfor %}
+    {% endif %}
     {% if select_policy %}
         {# Match the first eligible switching policy before sampling. Only a
            weighted winner draws, and txn variables are reset per request. #}
         {% for l7policy in policies %}
-            {{- l7policy_rules_macro(constants, l7policy, listener) -}}
-        {% endfor %}
-        {% for l7policy in policies %}
             {{- select_switching_policy_macro(constants, l7policy) -}}
         {% endfor %}
     {% endif %}
+    {% if structured %}
+        {% for l7policy in policies if l7policy.request_redirect is defined and l7policy.action != constants.L7POLICY_ACTION_REDIRECT_REQUEST %}
+            {{- stock_redirect_macro(constants, l7policy, unless_ordered=True) -}}
+        {% endfor %}
+    {% endif %}
     {% for l7policy in policies %}
-        {% if not select_policy %}
+        {% if not (select_policy or structured) %}
             {{- l7policy_rules_macro(constants, l7policy, listener) -}}
         {% endif %}
         {{- l7policy_macro(constants, l7policy, listener) -}}

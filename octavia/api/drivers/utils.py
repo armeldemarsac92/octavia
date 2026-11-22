@@ -34,6 +34,8 @@ from octavia.i18n import _
 
 LOG = logging.getLogger(__name__)
 CONF = cfg.CONF
+HTTP_REQUEST_REDIRECT_PAYLOAD_AVAILABLE = hasattr(
+    driver_dm.L7Policy(), 'redirect_request')
 
 HTTP_L7RULE_CAPABILITIES = {
     constants.L7RULE_TYPE_HTTP_HEADER_EXACT:
@@ -70,6 +72,11 @@ def gateway_capabilities(driver):
                     False) is True):
         capabilities.append(
             constants.GATEWAY_CAPABILITY_RESPONSE_HEADER_OPERATIONS)
+    redirect_providers = api_settings.enabled_http_request_redirect_providers
+    if (HTTP_REQUEST_REDIRECT_PAYLOAD_AVAILABLE and
+            driver.name in redirect_providers and
+            getattr(driver, 'supports_http_request_redirect', False) is True):
+        capabilities.append(constants.GATEWAY_CAPABILITY_HTTP_REQUEST_REDIRECT)
     if (driver.name in api_settings.enabled_http_header_exact_providers and
             getattr(driver, 'supports_http_header_exact', False) is True):
         capabilities.append(constants.GATEWAY_CAPABILITY_HTTP_HEADER_EXACT)
@@ -145,6 +152,14 @@ def require_request_header_operations(driver):
             prov=driver.name, user_msg=_(
                 'L7 policy request header operations are unavailable for '
                 'this provider.'))
+
+
+def require_http_request_redirect(driver):
+    if (constants.GATEWAY_CAPABILITY_HTTP_REQUEST_REDIRECT not in
+            gateway_capabilities(driver)):
+        raise exceptions.ProviderUnsupportedOptionError(
+            prov=driver.name, user_msg=_(
+                'HTTP request redirects are unavailable for this provider.'))
 
 
 def require_response_header_operations(driver):
@@ -257,6 +272,9 @@ def require_gateway_policy_action(driver, action, protocol, *,
     elif action == constants.L7POLICY_ACTION_WEIGHTED_TARGETS:
         validate.validate_weighted_l7policy_protocol(protocol)
         require_weighted_targets(driver)
+    elif action == constants.L7POLICY_ACTION_REDIRECT_REQUEST:
+        validate.validate_http_request_redirect_protocol(protocol)
+        require_http_request_redirect(driver)
     elif uses_tls_sni_policy_path(driver, protocol, tcp_tls_termination):
         if tcp_tls_termination:
             require_tcp_tls_termination(driver)
@@ -790,8 +808,9 @@ def db_l7policy_to_provider_l7policy(db_l7policy):
     for field in ('request_header_operations', 'response_header_operations'):
         if not new_l7policy_dict.get(field):
             new_l7policy_dict.pop(field, None)
-    if new_l7policy_dict.get('fixed_response') is None:
-        new_l7policy_dict.pop('fixed_response', None)
+    for field in ('fixed_response', 'redirect_request'):
+        if new_l7policy_dict.get(field) is None:
+            new_l7policy_dict.pop(field, None)
     return driver_dm.L7Policy.from_dict(new_l7policy_dict)
 
 

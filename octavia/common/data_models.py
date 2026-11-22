@@ -726,12 +726,13 @@ class L7Policy(BaseDataModel):
                  redirect_http_code=None, fixed_response=None,
                  targets=None, request_header_operations=None,
                  https_listener_hostname=None,
-                 response_header_operations=None):
+                 response_header_operations=None, redirect_request=None):
         self.id = id
         self.name = name
         self.description = description
         self.listener_id = listener_id
         self.action = action
+        self.redirect_request = redirect_request
         self.redirect_pool_id = redirect_pool_id
         self.redirect_url = redirect_url
         self.position = position

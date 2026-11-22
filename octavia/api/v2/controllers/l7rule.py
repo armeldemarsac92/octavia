@@ -257,6 +257,22 @@ class L7RuleController(base.BaseController):
         except Exception as e:
             raise exceptions.L7RuleValidation(error=e)
 
+    def _require_redirect_capability_for_rule_removal(
+            self, session, driver, policy, rule):
+        if (policy.action != constants.L7POLICY_ACTION_REDIRECT_REQUEST or
+                not policy.enabled or not rule.enabled or
+                rule.provisioning_status in (constants.PENDING_DELETE,
+                                             constants.DELETED)):
+            return
+        listener = self.repositories.listener.get_for_update(
+            session, policy.listener_id, show_deleted=False)
+        # Policies with no enabled rules are inactive. Removing a predicate
+        # when another remains widens the scope of an enabled policy.
+        if (listener.enabled and
+                self.repositories.l7rule.has_other_enabled_rules(
+                    session, rule)):
+            driver_utils.require_http_request_redirect(driver)
+
     @wsme_pecan.wsexpose(l7rule_types.L7RuleRootResponse,
                          wtypes.text, body=l7rule_types.L7RuleRootPUT,
                          status_code=200)
@@ -299,6 +315,9 @@ class L7RuleController(base.BaseController):
 
             match_fields = {'type', 'compare_type', 'key', 'value', 'invert'}
             enabled = l7rule_dict.get('enabled', db_l7rule.enabled)
+            if not enabled:
+                self._require_redirect_capability_for_rule_removal(
+                    context.session, driver, db_l7policy, db_l7rule)
             match_changed = any(
                 field in l7rule_dict and
                 l7rule_dict[field] != getattr(db_l7rule, field)
@@ -392,7 +411,11 @@ class L7RuleController(base.BaseController):
             # Load the driver early as it also provides validation
             driver = driver_factory.get_driver(provider)
 
-            self._test_lb_listener_policy_statuses(context.session)
+            db_l7policy = self._test_lb_listener_policy_statuses(
+                context.session)
+            context.session.refresh(db_l7rule, with_for_update=True)
+            self._require_redirect_capability_for_rule_removal(
+                context.session, driver, db_l7policy, db_l7rule)
 
             self.repositories.l7rule.update(
                 context.session, db_l7rule.id,

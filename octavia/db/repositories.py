@@ -1851,6 +1851,14 @@ class VRRPGroupRepository(BaseRepository):
 class L7RuleRepository(BaseRepository):
     model_class = models.L7Rule
 
+    def has_other_enabled_rules(self, session, rule):
+        model = self.model_class
+        return (session.query(model.id).filter(
+            model.l7policy_id == rule.l7policy_id, model.id != rule.id,
+            model.enabled.is_(True), model.provisioning_status.notin_(
+                (consts.PENDING_DELETE, consts.DELETED)))
+            .with_for_update().limit(1).scalar() is not None)
+
     def get_all_API_list(self, session, pagination_helper=None, **filters):
         """Get a list of L7 Rules for the API list call.
 
@@ -2053,6 +2061,9 @@ class L7PolicyRepository(BaseRepository):
         if l7policy.action == consts.L7POLICY_ACTION_FIXED_RESPONSE:
             listener = session.get(models.Listener, l7policy.listener_id)
             validate.validate_fixed_http_protocol(listener.protocol)
+        elif l7policy.action == consts.L7POLICY_ACTION_REDIRECT_REQUEST:
+            listener = session.get(models.Listener, l7policy.listener_id)
+            validate.validate_http_request_redirect_protocol(listener.protocol)
         elif l7policy.action == consts.L7POLICY_ACTION_REDIRECT_TO_POOL:
             session.expire(session.query(models.Listener).filter_by(
                 id=l7policy.listener_id).first())
@@ -2134,13 +2145,15 @@ class L7PolicyRepository(BaseRepository):
             session, pagination_helper=pagination_helper,
             query_options=query_options, **filters)
 
-    def get_active_http_policy_headers(self, session, load_balancer_id):
-        """Read enabled HTTP policy headers under the load balancer lock."""
+    def get_active_http_policy_extensions(self, session, load_balancer_id):
+        """Read enabled redirects and header operations under the LB lock."""
         policy = self.model_class
         listener = models.Listener
         removed = (consts.PENDING_DELETE, consts.DELETED)
+        redirect = policy.action == consts.L7POLICY_ACTION_REDIRECT_REQUEST
         return (
-            session.query(listener.protocol, policy.request_header_operations,
+            session.query(listener.protocol, policy.action,
+                          policy.request_header_operations,
                           policy.response_header_operations)
             .select_from(policy)
             .join(listener, listener.id == policy.listener_id)
@@ -2150,7 +2163,7 @@ class L7PolicyRepository(BaseRepository):
                     listener.enabled.is_(True), policy.enabled.is_(True),
                     listener.provisioning_status.notin_(removed),
                     policy.provisioning_status.notin_(removed),
-                    policy.request_header_operations.isnot(None) |
+                    redirect | policy.request_header_operations.isnot(None) |
                     policy.response_header_operations.isnot(None))
             .with_for_update().all())
 
@@ -2158,7 +2171,8 @@ class L7PolicyRepository(BaseRepository):
         """Read current extended actions under the listener write lock."""
         model = self.model_class
         actions = [consts.L7POLICY_ACTION_FIXED_RESPONSE,
-                   consts.L7POLICY_ACTION_WEIGHTED_TARGETS]
+                   consts.L7POLICY_ACTION_WEIGHTED_TARGETS,
+                   consts.L7POLICY_ACTION_REDIRECT_REQUEST]
         if protocol == consts.PROTOCOL_TCP:
             actions.append(consts.L7POLICY_ACTION_REDIRECT_TO_POOL)
         return (

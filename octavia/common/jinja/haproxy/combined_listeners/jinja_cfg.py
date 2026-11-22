@@ -15,6 +15,7 @@
 import os
 import re
 import typing as tp
+from urllib.parse import quote
 
 import jinja2
 from octavia_lib.common import constants as lib_consts
@@ -56,6 +57,21 @@ ACTIVE_PENDING_STATUSES = constants.SUPPORTED_PROVISIONING_STATUSES + (
 
 # HAProxy's rand() reduces a 32-bit draw to the requested interval.
 HAPROXY_MAX_RANDOM_RANGE = 1 << 32
+
+
+def _quote_config_arg(value):
+    value = value.replace('\\', '\\\\')
+    value = value.replace('"', '\\"').replace('$', '\\$')
+    return f'"{value}"'
+
+
+def _redirect_path(value):
+    # Retain existing percent escapes and encode the remaining path text.
+    value = re.sub(r'%(?![a-fA-F0-9]{2})', '%25', value)
+    value = quote(value, safe="/%~!$&'()*+,;=:@")
+    if not value.startswith('/'):
+        value = '/' + value
+    return value.replace('%', '%%')
 
 # Use POSIX ERE for Amphora builds with and without PCRE. A Content-Type
 # field can contain a comma inside a quoted parameter, but cannot be a list.
@@ -555,6 +571,25 @@ class JinjaTemplater:
             if https_sections is not None:
                 transformed['https_section'] = https_sections[hostname]
             l7policies.append(transformed)
+        if any('request_redirect' in policy for policy in l7policies):
+            # For requests matching a structured redirect, give legacy
+            # redirects a backend in the position-ordered switching phase.
+            redirect_modes = {
+                constants.L7POLICY_ACTION_REDIRECT_TO_URL: ('location', 'url'),
+                constants.L7POLICY_ACTION_REDIRECT_PREFIX: (
+                    'prefix', 'prefix'),
+            }
+            for policy in l7policies:
+                if (policy['action'] not in redirect_modes or
+                        not (policy['enabled'] and policy['l7rules'])):
+                    continue
+                mode, field = redirect_modes[policy['action']]
+                destination = policy[f'redirect_{field}']
+                if destination:
+                    policy['request_redirect'] = {
+                        'mode': mode,
+                        'argument': _quote_config_arg(
+                            destination.replace('%', '%%'))}
         if listener.protocol == constants.PROTOCOL_TCP and l7policies:
             l7policies.sort(key=self._sni_policy_priority)
             if tcp_tls_termination:
@@ -839,7 +874,8 @@ class JinjaTemplater:
         else:
             ret_value['redirect_pool'] = None
         if (l7policy.action in [constants.L7POLICY_ACTION_REDIRECT_TO_URL,
-                                constants.L7POLICY_ACTION_REDIRECT_PREFIX] and
+                                constants.L7POLICY_ACTION_REDIRECT_PREFIX,
+                                constants.L7POLICY_ACTION_REDIRECT_REQUEST] and
                 l7policy.redirect_http_code):
             ret_value['redirect_http_code'] = l7policy.redirect_http_code
         else:
@@ -856,6 +892,11 @@ class JinjaTemplater:
                     l7policy.targets, available_pool_ids)
                 ret_value['weighted_targets'] = targets
                 ret_value['total_weight'] = total
+            elif l7policy.action == constants.L7POLICY_ACTION_REDIRECT_REQUEST:
+                ret_value['request_redirect'] = (
+                    self._transform_request_redirect(l7policy.redirect_request))
+                ret_value['redirect_http_code'] = (
+                    l7policy.redirect_http_code or 302)
             for field in ('request_header_operations',
                           'response_header_operations'):
                 operations = getattr(l7policy, field)
@@ -865,25 +906,60 @@ class JinjaTemplater:
         return ret_value
 
     @staticmethod
+    def _transform_request_redirect(redirect):
+        redirect = validate.http_request_redirect(redirect)
+        scheme = redirect['scheme']
+        port = redirect['port']
+        hostname = redirect.get('hostname')
+        authority = hostname or '%[req.fhdr(host),regsub(:[0-9]*$,)]'
+        target = f'{scheme}://{authority}'
+        if port != {'http': 80, 'https': 443}[scheme]:
+            target += f':{port}'
+
+        result = {'mode': 'prefix', 'request_hostname': hostname is None}
+        query_suffix = '%[pathq,regsub(^[^?]+,)]'
+        if 'replace_full_path' in redirect:
+            result['mode'] = 'location'
+            target += _redirect_path(redirect['replace_full_path'])
+            target += query_suffix
+        elif 'replace_prefix' in redirect:
+            prefix = redirect['replace_prefix']
+            match = prefix['match'].removesuffix('/') or '/'
+            replacement = _redirect_path(prefix['replacement']).removesuffix(
+                '/')
+            if match != '/':
+                result['match'] = _quote_config_arg(match)
+                result['descendants'] = _quote_config_arg(match + '/')
+                result['mode'] = 'location'
+                # Match is already checked by the frontend ACLs. For an
+                # empty replacement, emit a root slash and consume the
+                # existing delimiter when the suffix starts with one.
+                if replacement:
+                    suffix = f'%[pathq,regsub(^.{{{len(match)}}},)]'
+                    target += replacement + suffix
+                else:
+                    target += f'%[pathq,regsub(^.{{{len(match)}}}/?,/)]'
+            else:
+                target += replacement
+        result['argument'] = _quote_config_arg(target)
+        return result
+
+    @staticmethod
     def _transform_header_operations(operations, field):
         actions = {'SET': 'set-header', 'ADD': 'add-header',
                    'REMOVE': 'del-header'}
 
-        def quote(value):
-            value = value.replace('\\', '\\\\')
-            value = value.replace('"', '\\"').replace('$', '\\$')
-            return f'"{value}"'
-
         transformed = []
         for operation in validate.header_operations(operations, field):
             action = actions[operation['operation']]
-            name = quote(operation['name'])
+            name = _quote_config_arg(operation['name'])
             if 'value' in operation:
                 # HAProxy parses a log-format expression after the config
                 # parser. Double percent signs denote literal percent signs.
                 value = operation['value'].replace('%', '%%')
                 # HAProxy treats a zero-length argument as a missing one.
-                line = f'{action} {name} {quote(value or "%[str()]")}'
+                argument = _quote_config_arg(value or '%[str()]')
+                line = f'{action} {name} {argument}'
             else:
                 line = f'{action} {name}'
             transformed.append(line)

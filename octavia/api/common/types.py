@@ -270,6 +270,19 @@ class FixedHTTPResponse(BaseType):
     status_code = wtypes.wsattr(FixedHTTPStatusCode(), mandatory=True)
 
 
+class HTTPRequestRedirect(wtypes.UserType):
+    # Keep the original JSON types and reject unknown keys.
+    basetype = object
+    name = 'http_request_redirect'
+
+    @staticmethod
+    def validate(value):
+        try:
+            return validate.http_request_redirect(value)
+        except exceptions.InvalidL7PolicyArgs as e:
+            raise ValueError(str(e)) from e
+
+
 class WeightedL7PolicyTargets(wtypes.UserType):
     # Preserve the original JSON types for strict validation.
     basetype = object
