@@ -221,7 +221,8 @@ class L7PolicyController(base.BaseController):
             driver_utils.require_gateway_policy_action(
                 driver, l7policy_dict['action'], listener.protocol,
                 tcp_tls_termination=listener.tcp_tls_termination,
-                request_url_rewrite=l7policy_dict.get('request_url_rewrite'))
+                request_url_rewrite=l7policy_dict.get('request_url_rewrite'),
+                targets=l7policy_dict.get('targets'))
             validate_policy_headers(
                 l7policy_dict, listener.protocol, driver)
 
@@ -385,6 +386,20 @@ class L7PolicyController(base.BaseController):
                         hostname != db_l7policy.https_listener_hostname))):
                 driver_utils.require_request_url_rewrite(
                     driver, listener.protocol)
+            old_targets = db_l7policy.targets
+            targets = l7policy_dict.get('targets', old_targets)
+            updated_request_transform = any(
+                l7policy_dict.get(field) and
+                l7policy_dict[field] != getattr(db_l7policy, field)
+                for field in validate.TARGET_REQUEST_FILTER_FIELDS)
+            if (any(validate.target_request_filters(target)
+                    for target in targets or []) and
+                    (targets != old_targets or
+                     (enabled and (
+                         activates_policy or updated_request_transform or
+                         hostname != db_l7policy.https_listener_hostname)))):
+                driver_utils.require_weighted_target_request_filters(
+                    driver, listener.protocol)
             routing_changed_or_disabled = (
                 not enabled or action != db_l7policy.action or
                 ('redirect_pool_id' in l7policy_dict and
@@ -397,14 +412,14 @@ class L7PolicyController(base.BaseController):
             if routing_changed_or_disabled or (
                     position > db_l7policy.position and
                     action != constants.L7POLICY_ACTION_REJECT):
-                driver_utils.require_no_exposed_request_url_rewrite(
+                driver_utils.require_no_exposed_request_transforms(
                     driver, policy_repo, lock_session, policy_id=id,
                     new_position=(
                         None if routing_changed_or_disabled else position))
             if (action == constants.L7POLICY_ACTION_REDIRECT_REQUEST and
                     enabled and (routing_changed_or_disabled or reopening or
                                  position > db_l7policy.position)):
-                driver_utils.require_no_rewrite_exposed_by_ordered_redirect(
+                driver_utils.require_no_transform_exposed_by_ordered_redirect(
                     driver, policy_repo, lock_session, listener_id, hostname,
                     position, policy_id=id)
             if activates_policy or routing_changed.intersection(l7policy_dict):
@@ -502,7 +517,7 @@ class L7PolicyController(base.BaseController):
                                                 lb_id=load_balancer_id,
                                                 listener_ids=[listener_id])
             policy_repo = self.repositories.l7policy
-            driver_utils.require_no_exposed_request_url_rewrite(
+            driver_utils.require_no_exposed_request_transforms(
                 driver, policy_repo, context.session, policy_id=id)
             policy_repo.update(
                 context.session, db_l7policy.id,
