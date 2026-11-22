@@ -46,11 +46,24 @@ from octavia.common import exceptions
 from octavia.common import utils
 from octavia.common import validate
 from octavia.db import api as db_api
+from octavia.db import base_models
 from octavia.db import models
 
 CONF = cfg.CONF
 
 LOG = logging.getLogger(__name__)
+
+
+def _pool_has_gateway_backend_tls_tag():
+    # The renderer checks exact tag membership, independent of DB collation.
+    tag = consts.GATEWAY_BACKEND_TLS_POOL_TAG.encode('ascii').hex().upper()
+    tags = base_models.Tags
+    return (select(tags.resource_id)
+            .where(tags.resource_id == models.Pool.id,
+                   func.hex(tags.tag) == tag)
+            .correlate(models.Pool)
+            .with_for_update()
+            .exists())
 
 
 class BaseRepository:
@@ -1009,7 +1022,9 @@ class PoolRepository(BaseRepository):
         row = (session.query(pool.protocol, pool.backend_h2c, pool.tls_enabled,
                              pool.enabled, pool.backend_tls_hostname,
                              pool.ca_tls_certificate_id,
-                             pool.crl_container_id)
+                             pool.crl_container_id,
+                             _pool_has_gateway_backend_tls_tag().label(
+                                 'gateway_backend_tls_tagged'))
                .filter(pool.id == pool_id,
                        pool.provisioning_status != consts.DELETED)
                .with_for_update().one_or_none())
@@ -2063,10 +2078,14 @@ class L7PolicyRepository(BaseRepository):
 
     def _validate_l7policy_pool_data(self, session, l7policy, old_policy=None):
         """Does validations on a given L7 policy."""
-        if l7policy.request_url_rewrite is not None:
+        if (l7policy.request_cors is not None or
+                l7policy.request_url_rewrite is not None):
             listener = session.get(models.Listener, l7policy.listener_id)
-            validate.validate_http_request_url_rewrite_protocol(
-                listener.protocol)
+            if l7policy.request_cors is not None:
+                validate.validate_http_request_cors_protocol(listener.protocol)
+            if l7policy.request_url_rewrite is not None:
+                validate.validate_http_request_url_rewrite_protocol(
+                    listener.protocol)
             action = l7policy.action or getattr(old_policy, 'action', None)
             if action == consts.L7POLICY_ACTION_REDIRECT_TO_POOL:
                 pool_id = l7policy.redirect_pool_id or getattr(
@@ -2154,16 +2173,34 @@ class L7PolicyRepository(BaseRepository):
                         (rule.type == consts.L7RULE_TYPE_TLS_SNI))))
 
     @staticmethod
-    def _active_pool(*, restoring_pool=None, removed_pool=None):
+    def _active_pool(*, restoring_pool=None, removed_pool=None,
+                     include_closed=False):
         pool = models.Pool
         condition = pool.provisioning_status.notin_(
             (consts.PENDING_DELETE, consts.DELETED))
+        enabled = pool.enabled.is_(True)
+        if include_closed:
+            # A disabled protected pool still owns its matching requests.
+            enabled |= (pool.backend_tls_hostname.isnot(None) |
+                        ((pool.protocol == consts.PROTOCOL_HTTP) &
+                         _pool_has_gateway_backend_tls_tag()))
         if restoring_pool is not None:
-            return condition & (pool.id == restoring_pool)
-        condition &= pool.enabled.is_(True)
+            condition &= pool.id == restoring_pool
+            # CORS was already reachable if the pool served local 503s.
+            return condition & ~enabled if include_closed else condition
         if removed_pool is not None:
             condition &= pool.id != removed_pool
-        return condition
+        return condition & enabled
+
+    def _has_redirect_pool(self, condition):
+        # Use a current read for the pool, including under REPEATABLE READ.
+        pool = models.Pool
+        policy = self.model_class
+        return (select(pool.id)
+                .where(pool.id == policy.redirect_pool_id, condition)
+                .correlate(policy)
+                .with_for_update()
+                .exists())
 
     @staticmethod
     def _in_https_section(row):
@@ -2171,10 +2208,10 @@ class L7PolicyRepository(BaseRepository):
             return row.https_listener_hostname is None
         return row.https_listener_hostname in row.https_virtual_hosts
 
-    def get_active_url_rewrites(self, session, *, listener_id=None,
-                                load_balancer_id=None, reopening=None,
-                                restoring_pool=None, removed_pool=None,
-                                target_filters=False):
+    def get_active_request_transforms(
+            self, session, *, transform, listener_id=None,
+            load_balancer_id=None, reopening=None, restoring_pool=None,
+            removed_pool=None, activating_closed_pool=None):
         """Read request transforms with a predicate and forwarding target.
 
         Use current reads inside the load balancer provisioning lock.
@@ -2184,22 +2221,34 @@ class L7PolicyRepository(BaseRepository):
         listener = models.Listener
         lb = models.LoadBalancer
         target = models.L7PolicyTarget
+        cors = transform == 'request_cors'
+        if activating_closed_pool is not None:
+            if not cors:
+                return []
+            restoring_pool = activating_closed_pool
         pool = self._active_pool(restoring_pool=restoring_pool,
-                                 removed_pool=removed_pool)
+                                 removed_pool=removed_pool,
+                                 include_closed=cors)
         active_target = (target.weight > 0) & target.pool.has(pool)
         query = self._active_http_policies(session)
-        if target_filters:
+        if transform == 'target_filters':
             query = query.filter(
                 policy.action == consts.L7POLICY_ACTION_WEIGHTED_TARGETS,
                 policy._targets.any(
                     active_target & target.request_filters.isnot(None)))
         else:
+            weighted = policy.action == consts.L7POLICY_ACTION_WEIGHTED_TARGETS
+            if cors:
+                # A winning weighted policy can answer preflights even if
+                # every target returns a local error. Reopening one target
+                # therefore does not activate a previously inactive CORS.
+                weighted = weighted & (restoring_pool is None)
+            else:
+                weighted = weighted & policy._targets.any(active_target)
             query = query.filter(
-                policy.request_url_rewrite.isnot(None),
+                getattr(policy, transform).isnot(None),
                 ((policy.action == consts.L7POLICY_ACTION_REDIRECT_TO_POOL) &
-                 policy.redirect_pool.has(pool)) |
-                ((policy.action == consts.L7POLICY_ACTION_WEIGHTED_TARGETS) &
-                 policy._targets.any(active_target)))
+                 self._has_redirect_pool(pool)) | weighted)
         if listener_id is not None:
             query = query.filter(policy.listener_id == listener_id)
         if load_balancer_id is not None:
@@ -2212,9 +2261,9 @@ class L7PolicyRepository(BaseRepository):
         return [row for row in query.with_for_update().all()
                 if self._in_https_section(row)]
 
-    def get_rewrite_exposed_by_policy(self, session, *, policy_id=None,
-                                      disabling_pool=None, new_position=None,
-                                      target_filters=False):
+    def get_transform_exposed_by_policy(
+            self, session, *, transform, policy_id=None, disabling_pool=None,
+            new_position=None):
         """Find a transform a request could reach if another policy changes."""
         policy = self.model_class
         listener = models.Listener
@@ -2226,7 +2275,8 @@ class L7PolicyRepository(BaseRepository):
             blockers = blockers.filter(
                 policy.id == policy_id,
                 (policy.action != consts.L7POLICY_ACTION_REDIRECT_TO_POOL) |
-                policy.redirect_pool.has(self._active_pool()))
+                self._has_redirect_pool(
+                    self._active_pool(include_closed=True)))
         else:
             # A weighted policy still wins and generates 503 for an
             # unavailable member of its target set.
@@ -2240,30 +2290,29 @@ class L7PolicyRepository(BaseRepository):
                 consts.L7POLICY_ACTION_REJECT,
                 consts.L7POLICY_ACTION_REDIRECT_TO_URL,
                 consts.L7POLICY_ACTION_REDIRECT_PREFIX)
-            for rewrite in self.get_active_url_rewrites(
-                    session, listener_id=blocker.listener_id,
-                    removed_pool=disabling_pool,
-                    target_filters=target_filters):
-                if (rewrite.id != blocker.id and
-                        rewrite.https_listener_hostname ==
+            for candidate in self.get_active_request_transforms(
+                    session, transform=transform,
+                    listener_id=blocker.listener_id,
+                    removed_pool=disabling_pool):
+                if (candidate.id != blocker.id and
+                        candidate.https_listener_hostname ==
                         blocker.https_listener_hostname and
                         ((terminal and new_position is None) or
-                         blocker.position < rewrite.position) and
+                         blocker.position < candidate.position) and
                         (new_position is None or
-                         new_position >= rewrite.position)):
-                    return rewrite.protocol
+                         new_position >= candidate.position)):
+                    return candidate.protocol
 
-    def get_rewrite_exposed_by_ordered_redirect(
-            self, session, listener_id, hostname, position, *, policy_id=None,
-            target_filters=False):
-        """Check whether entry into the ordered phase can expose a rewrite."""
-        rewrites = [
-            rewrite for rewrite in self.get_active_url_rewrites(
-                session, listener_id=listener_id,
-                target_filters=target_filters)
-            if (rewrite.https_listener_hostname == hostname and
-                rewrite.position < position)]
-        if not rewrites:
+    def get_transform_exposed_by_ordered_redirect(
+            self, session, listener_id, hostname, position, *, transform,
+            policy_id=None):
+        """Check if entering the ordered phase can expose a transform."""
+        candidates = [
+            candidate for candidate in self.get_active_request_transforms(
+                session, transform=transform, listener_id=listener_id)
+            if (candidate.https_listener_hostname == hostname and
+                candidate.position < position)]
+        if not candidates:
             return
         # Policy edits need an existing predicate. A new or changed rule
         # supplied by a rule endpoint is already accounted for by the caller.
@@ -2276,7 +2325,7 @@ class L7PolicyRepository(BaseRepository):
                     .with_for_update().limit(1).scalar()):
                 return
         policy = self.model_class
-        first = min(rewrites, key=lambda rewrite: rewrite.position)
+        first = min(candidates, key=lambda row: row.position)
         legacy = self._active_http_policies(session).filter(
             policy.listener_id == listener_id,
             policy.https_listener_hostname == hostname,

@@ -295,6 +295,18 @@ class HTTPRequestURLRewrite(wtypes.UserType):
             raise ValueError(str(e)) from e
 
 
+class HTTPRequestCORS(wtypes.UserType):
+    basetype = object
+    name = 'request_cors'
+
+    @staticmethod
+    def validate(value):
+        try:
+            return validate.http_request_cors(value)
+        except exceptions.InvalidL7PolicyArgs as e:
+            raise ValueError(str(e)) from e
+
+
 class WeightedL7PolicyTargets(wtypes.UserType):
     # Preserve the original JSON types for strict validation.
     basetype = object

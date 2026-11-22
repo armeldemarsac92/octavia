@@ -125,6 +125,10 @@ api_opts = [
                        'request URL rewrites. Enable after upgrading the '
                        'database, API, provider library, workers and '
                        'Amphora images.')),
+    cfg.ListOpt('enabled_request_cors_providers', default=[],
+                help=_('Providers whose regional fleets support L7 policy '
+                       'CORS. Enable after upgrading the database, API, '
+                       'provider library, workers and Amphora images.')),
     cfg.ListOpt('enabled_l7policy_initial_rules_providers', default=[],
                 help=_('Provider driver names that can create a disabled HTTP '
                        'L7 policy with its initial rules in one operation. '

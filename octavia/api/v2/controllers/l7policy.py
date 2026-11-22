@@ -251,7 +251,8 @@ class L7PolicyController(base.BaseController):
                 driver, l7policy_dict['action'], listener.protocol,
                 tcp_tls_termination=listener.tcp_tls_termination,
                 request_url_rewrite=l7policy_dict.get('request_url_rewrite'),
-                targets=l7policy_dict.get('targets'))
+                targets=l7policy_dict.get('targets'),
+                request_cors=l7policy_dict.get('request_cors'))
             validate_policy_headers(
                 l7policy_dict, listener.protocol, driver)
 
@@ -389,6 +390,10 @@ class L7PolicyController(base.BaseController):
                 'https_listener_hostname'}
             if l7policy_dict.get('request_url_rewrite'):
                 https_routing_changed.add('request_url_rewrite')
+            cors = l7policy_dict.get('request_cors', db_l7policy.request_cors)
+            cors_changed = cors != db_l7policy.request_cors
+            if cors_changed and cors is not None:
+                https_routing_changed.add('request_cors')
             if (hostname is not None and
                     (reopening or
                      https_routing_changed.intersection(l7policy_dict))):
@@ -417,6 +422,19 @@ class L7PolicyController(base.BaseController):
                     driver, listener.protocol)
             old_targets = db_l7policy.targets
             targets = l7policy_dict.get('targets', old_targets)
+            routing_changed_or_disabled = (
+                not enabled or action != db_l7policy.action or
+                ('redirect_pool_id' in l7policy_dict and
+                 pool_id != db_l7policy.redirect_pool_id) or
+                hostname != db_l7policy.https_listener_hostname or
+                ('redirect_request' in l7policy_dict and
+                 l7policy_dict['redirect_request'] !=
+                 db_l7policy.redirect_request))
+            if cors is not None and (
+                    cors_changed or (enabled and (
+                        activates_policy or routing_changed_or_disabled or
+                        targets != old_targets))):
+                driver_utils.require_request_cors(driver, listener.protocol)
             updated_request_transform = any(
                 l7policy_dict.get(field) and
                 l7policy_dict[field] != getattr(db_l7policy, field)
@@ -428,14 +446,6 @@ class L7PolicyController(base.BaseController):
                     old_targets, targets, expands_filter_scope):
                 driver_utils.require_weighted_target_request_filters(
                     driver, listener.protocol)
-            routing_changed_or_disabled = (
-                not enabled or action != db_l7policy.action or
-                ('redirect_pool_id' in l7policy_dict and
-                 pool_id != db_l7policy.redirect_pool_id) or
-                hostname != db_l7policy.https_listener_hostname or
-                ('redirect_request' in l7policy_dict and
-                 l7policy_dict['redirect_request'] !=
-                 db_l7policy.redirect_request))
             position = l7policy_dict.get('position') or db_l7policy.position
             if routing_changed_or_disabled or (
                     position > db_l7policy.position and
@@ -488,7 +498,8 @@ class L7PolicyController(base.BaseController):
                 policy_action in (constants.L7POLICY_ACTION_WEIGHTED_TARGETS,
                                   constants.L7POLICY_ACTION_REDIRECT_REQUEST)
                 for policy_action in (action, db_l7policy.action)) or
-                'request_url_rewrite' in l7policy_dict)
+                'request_url_rewrite' in l7policy_dict or
+                'request_cors' in l7policy_dict)
             if persist_before_dispatch:
                 # Validate target pool references before sending them to a
                 # provider. The write rolls back if the provider rejects it.

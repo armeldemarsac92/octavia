@@ -251,6 +251,35 @@ exact path or a descendant on a segment boundary. The original query
 travels with the rewritten path. Send ``request_url_rewrite: null`` to clear
 the settings. Omission in an update preserves the settings.
 
+``request_cors_v1`` enables ``request_cors`` on ``REDIRECT_TO_POOL`` and
+``WEIGHTED_TARGETS`` policies on HTTP and ``TERMINATED_HTTPS`` listeners.
+Amphora applies the settings of the winning policy after evaluating
+the L7 rules on the original request. A policy can answer a CORS
+preflight locally even when its selected target cannot serve traffic.
+
+The object has six optional keys with the
+`Gateway API v1.7.0 CORS filter
+<https://gateway-api.sigs.k8s.io/reference/api-types/httproute/#cors>`_
+semantics:
+
+* ``allow_origins`` takes up to 64 distinct origins of up to 253 characters.
+  Use ``http://`` or ``https://`` with an exact host, a leading ``*.``
+  wildcard, or the host ``*``. Ports range from 1 to 65535 with effective
+  defaults of 80 and 443. A standalone ``*`` allows any origin and must
+  be the only list entry.
+* ``allow_credentials`` is a JSON boolean and defaults to ``false``.
+* ``allow_methods`` takes up to nine distinct uppercase HTTP methods
+  from the Gateway API enum (GET, HEAD, POST, PUT, DELETE, CONNECT,
+  OPTIONS, TRACE and PATCH), or ``*`` by itself.
+* ``allow_headers`` and ``expose_headers`` each take up to 64 distinct
+  HTTP header names of 1 to 256 ASCII token characters. Header matching
+  is case-insensitive. ``*`` must be the sole entry in ``allow_headers``.
+* ``max_age`` takes an integer from 1 to 2147483647 seconds and defaults
+  to 5.
+
+An empty object applies CORS with no allowed origins. Omission in an
+update preserves the settings. Send ``request_cors: null`` to clear them.
+
 ``weighted_http_target_request_filters_v1`` adds optional
 ``request_header_operations`` and ``request_url_rewrite`` to each
 ``WEIGHTED_TARGETS.targets`` item with a ``pool_id``. Both fields have

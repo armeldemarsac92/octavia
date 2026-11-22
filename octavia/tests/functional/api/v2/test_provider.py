@@ -20,6 +20,7 @@ from oslo_config import cfg
 from oslo_config import fixture as oslo_fixture
 from oslo_utils import uuidutils
 
+from octavia.api.drivers import utils as driver_utils
 from octavia.common import constants
 from octavia.tests.functional.api.v2 import base
 
@@ -125,6 +126,21 @@ class TestGatewayCapabilities(base.BaseAPITest):
         self.assertEqual(
             {'gateway_capabilities': ['request_url_rewrite_v1']},
             self.get(self.capabilities_path()).json)
+        self.assertEqual(empty,
+                         self.get(self.capabilities_path('noop_driver')).json)
+
+    def test_request_cors_capability_requires_opt_in_driver_and_dto(self):
+        empty = {'gateway_capabilities': []}
+        path = self.capabilities_path()
+        self.assertEqual(empty, self.get(path).json)
+        self.conf.config(
+            group='api_settings',
+            enabled_request_cors_providers=['amphora', 'noop_driver'])
+        with mock.patch.object(driver_utils, 'REQUEST_CORS_PAYLOAD_AVAILABLE',
+                               False):
+            self.assertEqual(empty, self.get(path).json)
+        self.assertEqual({'gateway_capabilities': ['request_cors_v1']},
+                         self.get(path).json)
         self.assertEqual(empty,
                          self.get(self.capabilities_path('noop_driver')).json)
 

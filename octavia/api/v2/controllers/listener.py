@@ -102,6 +102,7 @@ def validate_policy_options_on_create(
                 policy.get('fixed_response') is None and
                 policy.get('redirect_request') is None and
                 policy.get('request_url_rewrite') is None and
+                policy.get('request_cors') is None and
                 policy.get('targets') is None and
                 'request_header_operations' not in policy and
                 'response_header_operations' not in policy):
@@ -112,7 +113,8 @@ def validate_policy_options_on_create(
             driver, checked['action'], protocol,
             tcp_tls_termination=tcp_tls_termination,
             request_url_rewrite=checked.get('request_url_rewrite'),
-            targets=checked.get('targets'))
+            targets=checked.get('targets'),
+            request_cors=checked.get('request_cors'))
         l7policy.validate_policy_headers(checked, protocol, driver)
         if not creating_load_balancer:
             raise exceptions.ValidationException(

@@ -187,6 +187,29 @@ that has no enabled match or forwarding destination. Clear existing
 settings before rolling back the services or provider library.
 
 
+CORS in L7 forwarding policies
+-----------------------------
+
+Apply migration ``c9b157a8be42`` and upgrade Octavia, octavia-lib and the
+Amphora fleet before enrolling the provider on every regional API replica.
+
+.. code-block:: ini
+
+   [api_settings]
+   enabled_request_cors_providers = amphora
+
+The provider advertises ``request_cors_v1`` when the regional setting,
+provider driver and installed octavia-lib all support the field. A winning
+HTTP or terminated HTTPS policy can answer preflights and control the CORS
+headers returned to clients, including when a weighted target responds
+with a local error.
+
+Removing regional enrollment prevents creation, replacement and changes
+that would expose or reactivate a retained CORS filter. Stored active
+filters continue to run on upgraded workers. Clear a filter with
+``request_cors: null`` before a routing change that would expose it.
+Clear stored filters before rolling back Octavia, octavia-lib or Amphora.
+
 Full-value exact request header matching
 ----------------------------------------
 
