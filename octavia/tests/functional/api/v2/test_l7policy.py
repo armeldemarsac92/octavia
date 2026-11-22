@@ -2665,3 +2665,25 @@ class TestL7Policy(base.BaseAPITest):
         lb = self.post(self.LBS_PATH, body).json['loadbalancer']
         saved_rule = lb['listeners'][0]['l7policies'][0]['rules'][0]
         self.assertEqual(rule, {key: saved_rule[key] for key in rule})
+
+    @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
+    def test_query_param_rule_nested_load_balancer_create(self, rpc):
+        rule = {'type': 'HTTP_QUERY_PARAM_EXACT', 'compare_type': 'EQUAL_TO',
+                'key': 'X&Version', 'value': 'one\r\ntwo'}
+        policy = {'action': 'REJECT', 'rules': [rule]}
+        listener = {'protocol': 'HTTP', 'protocol_port': 80,
+                    'l7policies': [policy]}
+        body = {'loadbalancer': {'project_id': uuidutils.generate_uuid(),
+                                 'provider': 'amphora',
+                                 'vip_subnet_id': uuidutils.generate_uuid(),
+                                 'listeners': [listener]}}
+        self.post(self.LBS_PATH, body, status=501)
+        self.conf.config(group='api_settings',
+                         enabled_http_query_param_exact_providers=['amphora'])
+        listener['protocol'] = 'TCP'
+        self.post(self.LBS_PATH, body, status=400)
+        rpc.return_value.cast.assert_not_called()
+        listener['protocol'] = 'HTTP'
+        lb = self.post(self.LBS_PATH, body).json['loadbalancer']
+        saved_rule = lb['listeners'][0]['l7policies'][0]['rules'][0]
+        self.assertEqual(rule, {key: saved_rule[key] for key in rule})

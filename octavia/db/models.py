@@ -770,7 +770,8 @@ class L7Rule(base_models.BASE, base_models.IdMixin, base_models.ProjectMixin,
             "l7rule_compare_type.name",
             name="fk_l7rule_l7rule_compare_type_name"),
         nullable=False)
-    key = sa.Column(sa.String(255), nullable=True)
+    key = sa.Column(sa.String(constants.MAX_L7RULE_QUERY_PARAM_KEY_LENGTH),
+                    nullable=True)
     value = sa.Column(
         sa.String(constants.MAX_L7RULE_HEADER_VALUE_LENGTH).with_variant(
             mysql.VARCHAR(constants.MAX_L7RULE_HEADER_VALUE_LENGTH,

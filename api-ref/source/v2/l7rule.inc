@@ -142,6 +142,21 @@ capability is unavailable.
    {"rule": {"type": "HTTP_HEADER_EXACT", "compare_type": "EQUAL_TO",
              "key": "Version", "value": "one, other"}}
 
+With ``http_query_param_exact_v1`` enabled, use ``HTTP_QUERY_PARAM_EXACT``
+with ``EQUAL_TO`` on HTTP or TERMINATED_HTTPS listeners. The key is a
+case-sensitive ASCII token of 1 to 256 characters. The value is a
+case-sensitive UTF-8 string of 1 to 1024 characters. The rule uses the first
+occurrence of the decoded name and compares its value after one form URL
+decoding pass. A plus sign in the URL represents a space, and a literal
+plus is encoded as ``%2B``. An absent parameter does not match unless the
+rule is inverted. An otherwise valid request for this rule type returns
+HTTP 501 when the capability is unavailable.
+
+.. code-block:: json
+
+   {"rule": {"type": "HTTP_QUERY_PARAM_EXACT", "compare_type": "EQUAL_TO",
+             "key": "Color", "value": "light blue"}}
+
 With ``http_method_match_v1`` enabled, use ``HTTP_METHOD`` with
 ``EQUAL_TO`` on HTTP or TERMINATED_HTTPS listeners. Omit the key and leave
 ``invert`` false. The case-sensitive value must be one of ``GET``, ``HEAD``,

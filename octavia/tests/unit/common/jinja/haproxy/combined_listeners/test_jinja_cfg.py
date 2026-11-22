@@ -1735,6 +1735,30 @@ class TestHaproxyCfg(base.TestCase):
             '6f6e652c202274776f22', rendered)
         self.assertIn('acl legacy req.hdr(X-Color) -m str one', rendered)
 
+    def test_query_param_rule_and_inversion_share_policy_condition(self):
+        amp = sample_configs_combined.sample_amphora_tuple()
+        rule = sample_configs_combined.sample_l7rule_tuple
+        for protocol in ('HTTP', 'TERMINATED_HTTPS'):
+            with self.subTest(protocol=protocol):
+                listener = sample_configs_combined.sample_listener_tuple(
+                    l7=True, proto=protocol)
+                policy = listener.l7policies[0]._replace(l7rules=[
+                    rule('catalog', type='PATH', compare_type='EQUAL_TO',
+                         value='/catalog'),
+                    rule('query', type='HTTP_QUERY_PARAM_EXACT',
+                         compare_type='EQUAL_TO', key='X&', invert=True,
+                         value='é\r\n'),
+                ])
+                listener = listener._replace(l7policies=[policy])
+                rendered = self.jinja_cfg.build_config(
+                    amp, [listener], None, haproxy_versions=['3', '0', '19'],
+                    amp_details=None)
+                self.assertIn(
+                    r"""acl query 'query,regsub("(^|&)(?:\x58|(?i:%58))"""
+                    r"""(?i:%26)(?==|&|$)","\1%58%26"),param(%58%26),"""
+                    "url_dec(1)' -m bin c3a90d0a\n", rendered)
+                self.assertIn('if catalog !query\n', rendered)
+
     def test_request_headers_use_selected_policy_in_shared_backend(self):
         amp = sample_configs_combined.sample_amphora_tuple()
         listener = sample_configs_combined.sample_listener_tuple(l7=True)
