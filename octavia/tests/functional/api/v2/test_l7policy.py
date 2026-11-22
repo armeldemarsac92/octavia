@@ -2081,6 +2081,99 @@ class TestL7Policy(base.BaseAPITest):
                     self.assert_correct_status(lb_id=self.lb_id)
 
     @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
+    @mock.patch('octavia.common.tls_utils.cert_parser.load_certificates_data')
+    def test_https_listener_isolation_lifecycle(self, cert_data, rpc):
+        cert_data.return_value = {
+            'tls_cert': data_models.TLSContainer(certificate='cert 1')}
+        lb = self.create_load_balancer(
+            uuidutils.generate_uuid(), provider='amphora')['loadbalancer']
+        lb_id = lb['id']
+        self.set_lb_status(lb_id)
+        listener_options = {
+            'default_tls_container_ref': uuidutils.generate_uuid(),
+            'https_virtual_hosts': ['*.example.test', 'A.Example.Test'],
+            'default_http_response': {'status_code': 404}}
+        self.create_listener('TERMINATED_HTTPS', 443, lb_id,
+                             status=501, **listener_options)
+        self.conf.config(
+            group='api_settings',
+            enabled_https_listener_isolation_providers=['amphora'],
+            enabled_gateway_action_providers=['amphora'])
+        self.create_listener('TERMINATED_HTTPS', 443, lb_id, status=400,
+                             **dict(listener_options, https_virtual_hosts=[
+                                 'a.example.test', 'A.Example.Test']))
+        self.create_listener('TERMINATED_HTTPS', 443, lb_id, status=400,
+                             **dict(listener_options, default_http_response={
+                                 'status_code': 500}))
+        listener = self.create_listener(
+            'TERMINATED_HTTPS', 443, lb_id, **listener_options)['listener']
+        listener_id = listener['id']
+        listener_path = self.LISTENER_PATH.format(listener_id=listener_id)
+        hosts = ['*.example.test', 'a.example.test']
+        self.assertEqual(hosts, listener['https_virtual_hosts'])
+        self.assertEqual(
+            hosts, rpc.return_value.cast.call_args.kwargs['listener'][
+                'https_virtual_hosts'])
+
+        self.set_lb_status(lb_id)
+        self.create_l7policy(listener_id, 'REJECT', status=400)
+        self.create_l7policy(listener_id, 'REJECT', status=400,
+                             https_listener_hostname='other.test')
+        policy = self.create_l7policy(
+            listener_id, 'REJECT',
+            https_listener_hostname='A.EXAMPLE.TEST')['l7policy']
+        policy_path = self.L7POLICY_PATH.format(l7policy_id=policy['id'])
+        self.assertEqual('a.example.test', policy['https_listener_hostname'])
+        self.assertEqual(
+            'a.example.test',
+            rpc.return_value.cast.call_args.kwargs['l7policy'][
+                'https_listener_hostname'])
+        self.set_lb_status(lb_id)
+
+        self.put(listener_path, {'listener': {
+            'https_virtual_hosts': ['*.example.test']}}, status=400)
+        self.put(policy_path, {'l7policy': {
+            'https_listener_hostname': None}}, status=400)
+        self.conf.config(group='api_settings',
+                         enabled_https_listener_isolation_providers=[])
+        self.create_l7rule(
+            policy['id'], 'PATH', 'STARTS_WITH', '/', status=501)
+        self.put(listener_path, {'listener': {'admin_state_up': False}})
+        self.set_lb_status(lb_id)
+        self.put(listener_path, {'listener': {'admin_state_up': True}},
+                 status=501)
+        self.delete(policy_path)
+        self.set_lb_status(lb_id)
+        self.delete(listener_path)
+
+    @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
+    @mock.patch('octavia.common.tls_utils.cert_parser.load_certificates_data')
+    def test_https_listener_isolation_in_initial_graph(self, cert_data, rpc):
+        cert_data.return_value = {
+            'tls_cert': data_models.TLSContainer(certificate='cert 1')}
+        self.conf.config(
+            group='api_settings',
+            enabled_https_listener_isolation_providers=['amphora'])
+        policy = {'action': 'REJECT', 'rules': [{
+            'type': 'PATH', 'compare_type': 'STARTS_WITH', 'value': '/'}]}
+        listener = {
+            'name': 'isolated-https', 'protocol': 'TERMINATED_HTTPS',
+            'protocol_port': 443, 'https_virtual_hosts': ['*'],
+            'default_tls_container_ref': uuidutils.generate_uuid(),
+            'l7policies': [policy]}
+        body = {'loadbalancer': {
+            'project_id': self.project_id, 'provider': 'amphora',
+            'vip_subnet_id': uuidutils.generate_uuid(),
+            'listeners': [listener]}}
+        self.post(self.LBS_PATH, body, status=400)
+        policy['https_listener_hostname'] = '*'
+        lb = self.post(self.LBS_PATH, body).json['loadbalancer']
+        saved, = lb['listeners']
+        saved_policy, = saved['l7policies']
+        self.assertEqual(['*'], saved['https_virtual_hosts'])
+        self.assertEqual('*', saved_policy['https_listener_hostname'])
+
+    @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
     def test_tls_sni_admission_and_withdrawal(self, rpc):
         lb = self.create_load_balancer(
             uuidutils.generate_uuid(), provider='amphora')['loadbalancer']

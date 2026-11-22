@@ -45,7 +45,7 @@ class PaginationHelper:
     _non_query_fields = {
         models.L7Policy: {'fixed_response', 'request_header_operations',
                           'targets'},
-        models.Listener: {'default_http_response'},
+        models.Listener: {'default_http_response', 'https_virtual_hosts'},
     }
 
     def __init__(self, params, sort_dir=constants.DEFAULT_SORT_DIR):

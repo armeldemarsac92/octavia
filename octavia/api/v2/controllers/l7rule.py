@@ -183,6 +183,8 @@ class L7RuleController(base.BaseController):
             db_l7policy = self._test_lb_listener_policy_statuses(
                 context.session)
             protocol = db_l7policy.listener.protocol
+            if db_l7policy.https_listener_hostname is not None:
+                driver_utils.require_https_listener_isolation(driver)
             driver_utils.validate_l7rule_context(
                 driver, l7rule.type, protocol)
             tcp_policy = driver_utils.uses_tls_sni_policy_path(
@@ -294,6 +296,8 @@ class L7RuleController(base.BaseController):
                 driver, protocol)
             if ((enabled and (not db_l7rule.enabled or match_changed)) or
                     (tcp_policy and match_changed)):
+                if db_l7policy.https_listener_hostname is not None:
+                    driver_utils.require_https_listener_isolation(driver)
                 driver_utils.require_gateway_policy_action(
                     driver, db_l7policy.action, db_l7policy.listener.protocol,
                     request_header_operations=(

@@ -112,6 +112,9 @@ api_opts = [
     cfg.ListOpt('enabled_tls_sni_providers', default=[],
                 help=_('Providers enabled in this region for TLS ClientHello '
                        'SNI routing on TCP listeners.')),
+    cfg.ListOpt('enabled_https_listener_isolation_providers', default=[],
+                help=_('Providers with HAProxy 3.0 or newer enrolled for '
+                       'shared HTTPS listener hostname isolation.')),
     cfg.ListOpt('enabled_tls_sni_suffix_providers', default=[],
                 help=_('Providers enabled in this region for wildcard SNI '
                        'routing. Requires enabled_tls_sni_providers.')),

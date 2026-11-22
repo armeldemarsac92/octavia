@@ -90,6 +90,7 @@ GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME = 'backend_tls_hostname_v1'
 GATEWAY_BACKEND_TLS_POOL_TAG = 'gateway-api-openstack.backend-tls=v1'
 GATEWAY_CAPABILITY_TLS_SNI = 'tls_sni_passthrough_v1'
 GATEWAY_CAPABILITY_TLS_SNI_SUFFIX = 'tls_sni_suffix_v1'
+GATEWAY_CAPABILITY_HTTPS_LISTENER_ISOLATION = 'https_listener_isolation_v1'
 GATEWAY_CAPABILITY_HTTP_HEADER_EXACT = 'http_header_exact_v1'
 GATEWAY_CAPABILITY_HTTP_METHOD_MATCH = 'http_method_match_v1'
 MAX_L7POLICY_TARGETS = 16

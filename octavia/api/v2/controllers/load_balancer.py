@@ -816,6 +816,9 @@ class LoadBalancersController(base.BaseController):
             reopening = (load_balancer.admin_state_up is True and
                          not db_lb.enabled)
             if reopening:
+                if self.repositories.listener.has_enabled_https_isolation(
+                        context.session, id):
+                    driver_utils.require_https_listener_isolation(driver)
                 driver_utils.require_active_http_l7rule_capabilities(
                     driver, self.repositories.l7policy, context.session,
                     load_balancer_id=id)

@@ -83,8 +83,8 @@ class ToDictMixin:
         for attr, value in self.__dict__.items():
             if attr.startswith('_') or not kwargs.get(attr, True):
                 continue
-            if attr == 'tags':
-                # tags is a list, it doesn't need recurse
+            if attr in ('tags', 'https_virtual_hosts'):
+                # Lists of scalar values also belong in shallow payloads.
                 ret[attr] = value
                 continue
             ret[attr] = self._to_dict(value, calling_classes=calling_classes,
@@ -428,13 +428,14 @@ class Listener(BaseDataModel):
                  allowed_cidrs=None, tls_ciphers=None, tls_versions=None,
                  alpn_protocols=None, hsts_max_age=None,
                  hsts_include_subdomains=None, hsts_preload=None,
-                 default_http_response=None):
+                 default_http_response=None, https_virtual_hosts=None):
         self.id = id
         self.project_id = project_id
         self.name = name
         self.description = description
         self.default_pool_id = default_pool_id
         self.default_http_response = default_http_response
+        self.https_virtual_hosts = https_virtual_hosts
         self.load_balancer_id = load_balancer_id
         self.protocol = protocol
         self.protocol_port = protocol_port
@@ -721,7 +722,8 @@ class L7Policy(BaseDataModel):
                  operating_status=None, project_id=None, created_at=None,
                  updated_at=None, redirect_prefix=None, tags=None,
                  redirect_http_code=None, fixed_response=None,
-                 targets=None, request_header_operations=None):
+                 targets=None, request_header_operations=None,
+                 https_listener_hostname=None):
         self.id = id
         self.name = name
         self.description = description
@@ -744,6 +746,7 @@ class L7Policy(BaseDataModel):
         self.redirect_http_code = redirect_http_code
         self.fixed_response = fixed_response
         self.request_header_operations = request_header_operations
+        self.https_listener_hostname = https_listener_hostname
         self.targets = targets or []
 
     def _conditionally_remove_pool_links(self, pool):

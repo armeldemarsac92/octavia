@@ -1161,6 +1161,15 @@ class ListenerRepository(BaseRepository):
                 resource=data_models.Listener._name(), id=id)
         return listener
 
+    def has_enabled_https_isolation(self, session, load_balancer_id):
+        model = self.model_class
+        return (session.query(model.id).filter(
+            model.load_balancer_id == load_balancer_id,
+            model.enabled.is_(True),
+            model.provisioning_status != consts.DELETED,
+            model.https_virtual_hosts.isnot(None))
+            .with_for_update().first() is not None)
+
     def has_default_pool(self, session, id):
         """Checks if a listener has a default pool."""
         listener = self.get(session, id=id)
@@ -1187,6 +1196,9 @@ class ListenerRepository(BaseRepository):
         # Verify any newly specified default_pool_id exists
         default_pool_id = model_kwargs.get('default_pool_id')
         if default_pool_id:
+            if listener_db.https_virtual_hosts is not None:
+                raise exceptions.ValidationException(detail=_(
+                    'A scoped HTTPS listener cannot have a default pool.'))
             self._pool_check(session, default_pool_id, listener_id=id)
         if 'sni_containers' in model_kwargs:
             # sni_container_refs is being updated. It is either being set
@@ -1897,6 +1909,14 @@ class L7PolicyRepository(BaseRepository):
         pool = self.get_redirect_pool_for_update(session, listener, pool_id)
         validate.validate_tcp_redirect_pool_protocol(
             pool.protocol, pool.tls_enabled)
+
+    def get_https_listener_hostnames(self, session, listener_id):
+        model = self.model_class
+        rows = (session.query(model.https_listener_hostname)
+                .filter(model.listener_id == listener_id,
+                        model.provisioning_status != consts.DELETED)
+                .with_for_update().all())
+        return [hostname for hostname, in rows]
 
     def has_active_tcp_sni_policy(self, session, load_balancer_id,
                                   compare_type=None):

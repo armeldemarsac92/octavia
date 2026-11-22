@@ -221,6 +221,30 @@ terminated HTTPS listeners. This capability requires the provider name in
 ``[api_settings] enabled_http_method_match_providers``. Apply the database
 migration and upgrade the regional API, workers and Amphora fleet first.
 
+``https_listener_isolation_v1`` allows several host sections on a single
+``TERMINATED_HTTPS`` listener. Set ``https_virtual_hosts`` to a nonempty set
+of exact DNS names, DNS wildcard suffixes beginning with ``*.``, or ``*``
+for a catch-all. Use one project-authorized default certificate and omit
+SNI certificate references and the default pool. The fallback is HTTP
+404, also accepted as an explicit ``default_http_response``. Each policy
+on the listener must set ``https_listener_hostname`` to a configured
+section, including policies created with the initial load balancer graph.
+
+Amphora independently selects a section from TLS SNI and HTTP authority.
+Exact names come first, then the longest matching suffix, then the
+catch-all. Wildcard suffixes match one or more leading DNS labels.
+Authority matching ignores case and port. A request whose authority matches
+another section receives 421. An unmatched authority or a section without
+a matching policy receives 404. Policy evaluation stays within the
+selected section.
+
+Enroll the provider in ``[api_settings]
+enabled_https_listener_isolation_providers`` after upgrading the regional
+API, workers, driver library, database and Amphora fleet (HAProxy 3.0 or
+newer). Withdrawing enrollment preserves isolation on existing listeners.
+Delete policies selecting a section before removing it from the listener.
+Replace the listener to remove isolation.
+
 .. rest_status_code:: success ../http-status.yaml
 
    - 200
