@@ -103,6 +103,10 @@ api_opts = [
                 help=_('Providers whose regional fleets support L7 response '
                        'header operations. Enable after upgrading the '
                        'database, API, workers and Amphora images.')),
+    cfg.ListOpt('enabled_http_request_redirect_providers', default=[],
+                help=_('Providers whose regional fleets support structured '
+                       'HTTP request redirects. Enable after upgrading the '
+                       'database, API, workers and Amphora images.')),
     cfg.ListOpt('enabled_http_method_match_providers', default=[],
                 help=_('Provider driver names whose regional fleets '
                        'support exact HTTP method L7 rules. Enable '

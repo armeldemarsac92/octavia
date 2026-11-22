@@ -125,6 +125,31 @@ response. Operators can disable the option and clear existing lists.
 Request and response header options can be enabled independently.
 
 
+Structured HTTP redirects in L7 policies
+---------------------------------------
+
+Apply migration ``675c8279483a`` and upgrade the Octavia API, workers,
+octavia-lib and the provider's Amphora fleet. The renderer has been
+qualified with HAProxy 3.0.19. Enroll the provider on every regional API
+replica to advertise ``http_request_redirect_v1``.
+
+.. code-block:: ini
+
+   [api_settings]
+   enabled_http_request_redirect_providers = amphora
+
+The default provider list is empty. On a frontend with an active
+``REDIRECT_REQUEST`` policy, Amphora evaluates structured and legacy
+redirects in position order with forwarding policies. The stock
+``REJECT`` action continues to run in HAProxy's deny phase.
+
+Removing the provider from the list blocks creation and changes that
+activate or modify structured redirects. Stored policies remain readable.
+Operators can disable them, delete them or convert them to stock actions.
+Patched workers continue rendering stored enabled policies while operators
+retire them.
+
+
 Full-value exact request header matching
 ----------------------------------------
 

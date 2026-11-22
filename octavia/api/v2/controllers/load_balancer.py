@@ -835,9 +835,11 @@ class LoadBalancersController(base.BaseController):
                 policy_repo = self.repositories.l7policy
                 driver_utils.require_active_http_l7rule_capabilities(
                     driver, policy_repo, context.session, load_balancer_id=id)
-                for protocol, request_ops, response_ops in (
-                        policy_repo.get_active_http_policy_headers(
+                for protocol, action, request_ops, response_ops in (
+                        policy_repo.get_active_http_policy_extensions(
                             context.session, id)):
+                    if action == constants.L7POLICY_ACTION_REDIRECT_REQUEST:
+                        driver_utils.require_http_request_redirect(driver)
                     driver_utils.require_policy_header_operations(
                         driver, protocol, request_ops, response_ops)
             if (reopening and

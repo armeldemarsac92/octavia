@@ -193,6 +193,24 @@ backend {{ fixed_response_backend_name(constants, listener, response_id) }}
 {% endmacro %}
 
 
+{% macro request_redirect_backend_name(listener, policy) -%}
+    request-redirect-{{ listener.id }}-{{ policy.id }}
+{%- endmacro %}
+
+
+{% macro request_redirect_backend_macro(listener, policy) %}
+    {% set redirect = policy.request_redirect %}
+    {% set code = policy.redirect_http_code or 302 %}
+backend {{ request_redirect_backend_name(listener, policy) }}
+    mode http
+    {% if redirect.request_hostname %}
+    http-request deny deny_status 400 unless { req.fhdr(host) -m reg '^([A-Za-z0-9.-]+|\[[A-Fa-f0-9:.]+\])(:[0-9]*)?$' }
+    {% endif %}
+    http-request redirect code {{ code }} {{ redirect.mode }} {{ redirect.argument|safe }}
+
+{% endmacro %}
+
+
 {% macro closed_backend_macro(listener, pool) %}
 {# An empty backend returns 503 in HTTP mode and closes TCP connections. #}
 backend {{ pool.id }}:{{ listener.id }}
@@ -208,6 +226,10 @@ backend {{ pool.id }}:{{ listener.id }}
     {% for l7rule in l7policy.l7rules %}
         {{- l7rule_macro(constants, l7rule, listener) -}}
     {% endfor %}
+    {% if l7policy.request_redirect is defined and l7policy.request_redirect.match is defined %}
+    acl redirect-prefix-{{ l7policy.id }} path -m str -- {{ l7policy.request_redirect.match|safe }}
+    acl redirect-prefix-{{ l7policy.id }} path -m beg -- {{ l7policy.request_redirect.descendants|safe }}
+    {% endif %}
 {% endmacro %}
 
 
@@ -239,6 +261,8 @@ backend {{ pool.id }}:{{ listener.id }}
     {% endif %}
     {% if l7policy.action == constants.L7POLICY_ACTION_REJECT %}
     http-request deny if{{ l7rule_list_macro(constants, l7policy) }}
+    {% elif l7policy.request_redirect is defined %}
+    use_backend {{ request_redirect_backend_name(listener, l7policy) }} if{{ l7rule_list_macro(constants, l7policy) }}{% if l7policy.request_redirect.match is defined %} redirect-prefix-{{ l7policy.id }}{% endif +%}
     {% elif l7policy.action == constants.L7POLICY_ACTION_REDIRECT_TO_URL %}
     redirect {{- redirect_http_code_opt }} location {{ l7policy.redirect_url }} if{{ l7rule_list_macro(constants, l7policy) }}
     {% elif l7policy.action == constants.L7POLICY_ACTION_REDIRECT_TO_POOL and

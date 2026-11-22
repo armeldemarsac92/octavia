@@ -97,8 +97,10 @@ def validate_policy_options_on_create(
                     driver, rule['compare_type'], tcp_tls_termination)
         if (not tcp_policy and
                 action not in (constants.L7POLICY_ACTION_FIXED_RESPONSE,
-                               constants.L7POLICY_ACTION_WEIGHTED_TARGETS) and
+                               constants.L7POLICY_ACTION_WEIGHTED_TARGETS,
+                               constants.L7POLICY_ACTION_REDIRECT_REQUEST) and
                 policy.get('fixed_response') is None and
+                policy.get('redirect_request') is None and
                 policy.get('targets') is None and
                 'request_header_operations' not in policy and
                 'response_header_operations' not in policy):

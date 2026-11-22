@@ -67,6 +67,7 @@ class AmphoraProviderDriver(driver_base.ProviderDriver):
     supports_weighted_targets = True
     supports_request_header_operations = True
     supports_response_header_operations = True
+    supports_http_request_redirect = True
     supports_http_header_exact = True
     supports_http_query_param_exact = True
     supports_grpc_content_type = True

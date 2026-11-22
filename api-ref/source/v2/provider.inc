@@ -200,6 +200,28 @@ listener. Operations on ``Connection``, ``Content-Length``, ``Keep-Alive``,
 return HTTP 400. A policy update preserves omitted fields. Send an empty
 list to clear the response operations.
 
+``http_request_redirect_v1`` enables the L7 policy action
+``REDIRECT_REQUEST``. Set ``redirect_request`` to an object with
+``scheme`` (``http`` or ``https``) and ``port`` (an integer from 1 to
+65535). These are the effective destination values. The corresponding
+conventional port (80 or 443) is omitted from the Location header.
+An optional DNS ``hostname`` overrides the incoming hostname. Otherwise,
+Octavia uses the incoming hostname and discards its port. The policy's
+``redirect_http_code`` defaults to 302 and also accepts 301, 303, 307 and
+308.
+
+Omit the path modifiers to preserve the request target's path and query.
+``replace_full_path`` replaces the whole path. Alternatively,
+``replace_prefix`` takes ``match`` and ``replacement``. The request path must
+match the prefix on a segment boundary in addition to satisfying the
+policy's L7 rules. The replacement preserves the suffix and the query.
+Replacement text may have up to 1024 characters. Relative text is rooted
+at ``/``, URI path characters and valid percent escapes are retained, and
+other UTF-8 bytes are percent encoded. An empty full replacement produces
+``/``. An empty prefix replacement removes the matching prefix. An empty
+resulting path becomes ``/``. The top-level ``redirect_request`` field is
+omitted for other actions.
+
 These fields require HTTP or terminated HTTPS. Create extended policies
 through the L7 policy endpoint or in the initial load balancer graph. To
 add one to a standalone listener, create the listener first.

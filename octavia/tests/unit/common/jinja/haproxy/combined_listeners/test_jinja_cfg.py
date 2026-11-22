@@ -1636,6 +1636,36 @@ class TestHaproxyCfg(base.TestCase):
                     None, haproxy_versions=old_version, amp_details=None)
                 self.assertNotIn('http-request return status 500', rendered)
 
+    def test_structured_redirect_uses_ordered_backend_and_literal_path(self):
+        amp = sample_configs_combined.sample_amphora_tuple()
+        listener = sample_configs_combined.sample_listener_tuple(l7=True)
+        policy = listener.l7policies[0]
+        request = policy._replace(
+            id='structured', action=constants.L7POLICY_ACTION_REDIRECT_REQUEST,
+            redirect_pool=None, redirect_http_code=308,
+            redirect_request={
+                'scheme': 'https', 'port': 443, 'hostname': 'example.org',
+                'replace_prefix': {'match': '/a+b/', 'replacement': '/n#%2f/'},
+            })
+        stock = policy._replace(
+            id='stock', action=constants.L7POLICY_ACTION_REDIRECT_PREFIX,
+            redirect_pool=None, redirect_prefix='https://legacy.example.org',
+            redirect_http_code=302)
+        listener = listener._replace(l7policies=[stock, request])
+        config = self.jinja_cfg.build_config(
+            amp, [listener], None, haproxy_versions=['3', '0', '19'],
+            amp_details=None)
+        prefix = f'request-redirect-{listener.id}'
+        self.assertLess(config.index(f'use_backend {prefix}-stock'),
+                        config.index(f'use_backend {prefix}-structured'))
+        self.assertIn('acl redirect-prefix-structured path -m str -- "/a+b"',
+                      config)
+        self.assertIn('acl redirect-prefix-structured path -m beg -- "/a+b/"',
+                      config)
+        self.assertIn('redirect code 308 location '
+                      '"https://example.org/n%%23%%2f%[pathq,regsub(^.{4},)]"',
+                      config)
+
     def test_weighted_policy_routes_nonzero_targets_in_policy_order(self):
         amp = sample_configs_combined.sample_amphora_tuple()
         listener = sample_configs_combined.sample_listener_tuple(l7=True)
