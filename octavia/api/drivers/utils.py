@@ -34,6 +34,8 @@ from octavia.i18n import _
 
 LOG = logging.getLogger(__name__)
 CONF = cfg.CONF
+HTTP_REQUEST_REDIRECT_PAYLOAD_AVAILABLE = hasattr(
+    driver_dm.L7Policy(), 'redirect_request')
 
 HTTP_L7RULE_CAPABILITIES = {
     constants.L7RULE_TYPE_HTTP_HEADER_EXACT:
@@ -70,7 +72,9 @@ def gateway_capabilities(driver):
                     False) is True):
         capabilities.append(
             constants.GATEWAY_CAPABILITY_RESPONSE_HEADER_OPERATIONS)
-    if (driver.name in api_settings.enabled_http_request_redirect_providers and
+    redirect_providers = api_settings.enabled_http_request_redirect_providers
+    if (HTTP_REQUEST_REDIRECT_PAYLOAD_AVAILABLE and
+            driver.name in redirect_providers and
             getattr(driver, 'supports_http_request_redirect', False) is True):
         capabilities.append(constants.GATEWAY_CAPABILITY_HTTP_REQUEST_REDIRECT)
     if (driver.name in api_settings.enabled_http_header_exact_providers and

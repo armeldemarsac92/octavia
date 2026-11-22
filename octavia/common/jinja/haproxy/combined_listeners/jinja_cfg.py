@@ -572,9 +572,8 @@ class JinjaTemplater:
                 transformed['https_section'] = https_sections[hostname]
             l7policies.append(transformed)
         if any('request_redirect' in policy for policy in l7policies):
-            # Legacy redirects have an earlier HAProxy phase than
-            # use_backend. Keep every redirect on this frontend in the
-            # same position-ordered switching phase.
+            # For requests matching a structured redirect, give legacy
+            # redirects a backend in the position-ordered switching phase.
             redirect_modes = {
                 constants.L7POLICY_ACTION_REDIRECT_TO_URL: ('location', 'url'),
                 constants.L7POLICY_ACTION_REDIRECT_PREFIX: (

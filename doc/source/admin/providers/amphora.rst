@@ -128,26 +128,35 @@ Request and response header options can be enabled independently.
 Structured HTTP redirects in L7 policies
 ---------------------------------------
 
-Apply migration ``675c8279483a`` and upgrade the Octavia API, workers,
-octavia-lib and the provider's Amphora fleet. The renderer has been
-qualified with HAProxy 3.0.19. Enroll the provider on every regional API
-replica to advertise ``http_request_redirect_v1``.
+Keep enrollment empty during the upgrade. Apply migration ``675c8279483a``
+and install the matching octavia-lib with the structured ``L7Policy``
+payload on API servers and workers. Octavia can run with the previous
+regional octavia-lib during the rollout and suppresses the new capability
+and its writes until the matching payload is installed. Upgrade the
+provider's Amphora fleet before enrolling the provider on every regional
+API replica. The renderer was qualified with HAProxy 3.0.19.
 
 .. code-block:: ini
 
    [api_settings]
    enabled_http_request_redirect_providers = amphora
 
-The default provider list is empty. On a frontend with an active
-``REDIRECT_REQUEST`` policy, Amphora evaluates structured and legacy
-redirects in position order with forwarding policies. The stock
-``REJECT`` action continues to run in HAProxy's deny phase.
+When a request matches a ``REDIRECT_REQUEST`` policy, Amphora evaluates
+structured and legacy redirects in position order with forwarding policies.
+Other requests follow the legacy HAProxy redirect phase. A client that
+needs position-order resolution between a fixed-destination redirect and
+forwarding can use ``REDIRECT_REQUEST`` with an explicit hostname and
+effective scheme and port. The stock ``REJECT`` action continues to run in
+HAProxy's deny phase.
 
 Removing the provider from the list blocks creation and changes that
 activate or modify structured redirects. Stored policies remain readable.
 Operators can disable them, delete them or convert them to stock actions.
-Patched workers continue rendering stored enabled policies while operators
-retire them.
+Disable the policy or listener before removing individual predicates from
+an active redirect. Removing an enabled rule while another remains would
+broaden the redirect. Patched workers continue rendering stored enabled
+policies during retirement. Remove all structured policies before rolling
+back octavia-lib or Octavia.
 
 
 Full-value exact request header matching

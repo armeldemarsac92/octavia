@@ -330,6 +330,10 @@ class L7PolicyController(base.BaseController):
             if reopening and not tcp_policy:
                 driver_utils.require_active_http_l7rule_capabilities(
                     driver, policy_repo, lock_session, policy_id=id)
+            if (action == constants.L7POLICY_ACTION_REDIRECT_REQUEST and
+                    enabled and listener.enabled and
+                    hostname != db_l7policy.https_listener_hostname):
+                routing_changed.add('https_listener_hostname')
             activates_policy = enabled and (
                 reopening or
                 l7policy_dict.get('position', db_l7policy.position) !=
