@@ -111,7 +111,8 @@ def validate_policy_options_on_create(
         driver_utils.require_gateway_policy_action(
             driver, checked['action'], protocol,
             tcp_tls_termination=tcp_tls_termination,
-            request_url_rewrite=checked.get('request_url_rewrite'))
+            request_url_rewrite=checked.get('request_url_rewrite'),
+            targets=checked.get('targets'))
         l7policy.validate_policy_headers(checked, protocol, driver)
         if not creating_load_balancer:
             raise exceptions.ValidationException(
@@ -759,18 +760,10 @@ class ListenersController(base.BaseController):
                     session, db_listener.id):
                 validate.validate_https_policy_hostname(hosts, hostname)
             removed = set(old_hosts or ()) - set(hosts)
-            if (removed and updates.get('enabled', db_listener.enabled) and
-                    not driver_utils.request_url_rewrite_available(driver)):
-                for rewrite in policy_repo.get_active_url_rewrites(
-                        session, listener_id=db_listener.id):
-                    section = rewrite.https_listener_hostname
-                    if any(host != '*' and
-                           (section == '*' or
-                            (section.startswith('*.') and
-                             host.endswith(section[1:])))
-                           for host in removed):
-                        driver_utils.require_request_url_rewrite(
-                            driver, db_listener.protocol)
+            if removed and updates.get('enabled', db_listener.enabled):
+                driver_utils.require_no_active_request_transforms(
+                    driver, policy_repo, session, listener_id=db_listener.id,
+                    removed_https_hosts=removed)
 
     def _set_default_on_none(self, listener, tcp_tls_termination=False):
         """Reset settings to their default values if None/null was passed in
@@ -882,12 +875,9 @@ class ListenersController(base.BaseController):
                         request_header_operations=request_ops,
                         response_header_operations=response_ops,
                         tcp_tls_termination=db_listener.tcp_tls_termination)
-                if (not driver_utils.request_url_rewrite_available(driver) and
-                        policy_repo.get_active_url_rewrites(
-                            context.session, listener_id=id,
-                            reopening='listener')):
-                    driver_utils.require_request_url_rewrite(
-                        driver, db_listener.protocol)
+                driver_utils.require_no_active_request_transforms(
+                    driver, policy_repo, context.session, listener_id=id,
+                    reopening='listener')
                 if (not db_listener.tcp_tls_termination and
                         driver_utils.uses_tls_sni_policy_path(
                             driver, db_listener.protocol) and

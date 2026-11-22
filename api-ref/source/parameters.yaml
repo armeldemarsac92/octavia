@@ -1055,6 +1055,15 @@ l7policy-redirect-url-optional:
   in: body
   required: false
   type: string
+l7policy-initial-rules:
+  description: |
+    When the provider advertises ``l7policy_initial_rules_v1``, a non-empty
+    array of initial L7 rules for a policy created with ``admin_state_up: false``.
+    Each rule accepts ``type``, ``compare_type``, ``value``, and optionally
+    ``key``, ``invert``, ``admin_state_up``, and ``tags``.
+  in: body
+  required: false
+  type: array
 l7policy-rule-ids:
   description: |
     List of associated L7 rule IDs.

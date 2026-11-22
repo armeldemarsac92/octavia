@@ -276,6 +276,11 @@ backend {{ pool.id }}:{{ listener.id }}
 {% endmacro %}
 
 
+{% macro weighted_target_match_macro(policy_id, target) -%}
+    {{ selected_policy_match_macro(policy_id) }} { var(txn.octavia_weighted_draw) -m int {{ target.first }}:{{ target.last }} }
+{%- endmacro %}
+
+
 {% macro l7policy_macro(constants, l7policy, listener) %}
     {% if l7policy.action == constants.L7POLICY_ACTION_REJECT %}
     http-request deny if{{ l7rule_list_macro(constants, l7policy) }}
@@ -296,7 +301,7 @@ backend {{ pool.id }}:{{ listener.id }}
             {% else %}
                 {% set backend = fixed_response_backend_name(constants, listener, 'weighted-' ~ target.status_code) %}
             {% endif %}
-    use_backend {{ backend }} if {{ selected_policy_match_macro(l7policy.id) }} { var(txn.octavia_weighted_draw) -m int {{ target.first }}:{{ target.last }} }
+    use_backend {{ backend }} if {{ weighted_target_match_macro(l7policy.id, target) }}
         {% endfor %}
     {% endif %}
 {% endmacro %}
@@ -565,6 +570,11 @@ backend {{ pool.id }}:{{ listener.id }}
     {% for policy_id, operations in listener.get('request_url_rewrites_by_pool', {}).get(pool.id, []) %}
         {% for operation in operations %}
     http-request {{ operation|safe }} if {{ selected_policy_match_macro(policy_id) }}
+        {% endfor %}
+    {% endfor %}
+    {% for policy_id, target in listener.get('target_filters_by_pool', {}).get(pool.id, []) %}
+        {% for operation in target.request_filters %}
+    http-request {{ operation|safe }} if {{ weighted_target_match_macro(policy_id, target) }}
         {% endfor %}
     {% endfor %}
     balance {{ pool.lb_algorithm }}

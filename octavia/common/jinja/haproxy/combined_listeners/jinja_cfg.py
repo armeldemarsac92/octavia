@@ -612,18 +612,21 @@ class JinjaTemplater:
         requests_by_pool = {}
         responses_by_backend = {}
         rewrites_by_pool = {}
+        target_filters_by_pool = {}
         for policy in l7policies:
             request_ops = policy.get('request_header_operations')
             response_ops = policy.get('response_header_operations')
             rewrite = policy.get('request_url_rewrite')
-            if not (request_ops or response_ops or rewrite):
-                continue
             pool_ids = set()
             fixed_responses = set()
             if 'weighted_targets' in policy:
                 for target in policy['weighted_targets']:
                     if 'pool_id' in target:
-                        pool_ids.add(target['pool_id'])
+                        pool_id = target['pool_id']
+                        pool_ids.add(pool_id)
+                        if target.get('request_filters'):
+                            target_filters_by_pool.setdefault(
+                                pool_id, []).append((policy['id'], target))
                     else:
                         code = target["status_code"]
                         fixed_responses.add(f'weighted-{code}')
@@ -648,6 +651,8 @@ class JinjaTemplater:
                     responses_by_backend.setdefault(('fixed', response_id),
                                                     []).append(
                         (policy['id'], response_ops))
+        if target_filters_by_pool:
+            ret_value['target_filters_by_pool'] = target_filters_by_pool
         if requests_by_pool:
             ret_value['request_header_operations_by_pool'] = requests_by_pool
         if rewrites_by_pool:
@@ -1024,8 +1029,7 @@ class JinjaTemplater:
             transformed.append(line)
         return transformed
 
-    @staticmethod
-    def _transform_weighted_targets(targets, available_pool_ids):
+    def _transform_weighted_targets(self, targets, available_pool_ids):
         intervals = []
         total = 0
         for target in targets:
@@ -1041,6 +1045,14 @@ class JinjaTemplater:
                     target['fixed_response'])
             elif target['pool_id'] in available_pool_ids:
                 interval['pool_id'] = target['pool_id']
+                operations = target.get('request_header_operations', [])
+                request_filters = self._transform_header_operations(
+                    operations, 'request_header_operations')
+                if 'request_url_rewrite' in target:
+                    request_filters.extend(self._transform_request_url_rewrite(
+                        target['request_url_rewrite']))
+                if request_filters:
+                    interval['request_filters'] = request_filters
             else:
                 # Keep the unavailable target's share and terminate here.
                 interval['status_code'] = 503

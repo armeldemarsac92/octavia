@@ -38,6 +38,7 @@ HTTP_REQUEST_REDIRECT_PAYLOAD_AVAILABLE = hasattr(
     driver_dm.L7Policy(), 'redirect_request')
 REQUEST_URL_REWRITE_PAYLOAD_AVAILABLE = hasattr(
     driver_dm.L7Policy(), 'request_url_rewrite')
+WEIGHTED_TARGET_PAYLOAD_AVAILABLE = hasattr(driver_dm.L7Policy(), 'targets')
 
 HTTP_L7RULE_CAPABILITIES = {
     constants.L7RULE_TYPE_HTTP_HEADER_EXACT:
@@ -61,6 +62,14 @@ def gateway_capabilities(driver):
         if getattr(driver, 'supports_weighted_targets', False) is True:
             capabilities.append(
                 constants.GATEWAY_CAPABILITY_WEIGHTED_HTTP_TARGETS)
+            target_filter_providers = (
+                api_settings.enabled_weighted_target_request_filter_providers)
+            if (WEIGHTED_TARGET_PAYLOAD_AVAILABLE and
+                    driver.name in target_filter_providers and
+                    getattr(driver, 'supports_weighted_target_request_filters',
+                            False) is True):
+                capabilities.append(
+                    constants.GATEWAY_CAPABILITY_WEIGHTED_TARGET_FILTERS)
     header_providers = api_settings.enabled_request_header_operation_providers
     if (driver.name in header_providers and
             getattr(driver, 'supports_request_header_operations',
@@ -83,6 +92,11 @@ def gateway_capabilities(driver):
             driver.name in api_settings.enabled_request_url_rewrite_providers
             and getattr(driver, 'supports_request_url_rewrite', False) is True):
         capabilities.append(constants.GATEWAY_CAPABILITY_REQUEST_URL_REWRITE)
+    initial_rules_providers = (
+        api_settings.enabled_l7policy_initial_rules_providers)
+    if (driver.name in initial_rules_providers and
+            getattr(driver, 'supports_l7policy_initial_rules', False) is True):
+        capabilities.append(constants.GATEWAY_CAPABILITY_L7POLICY_INITIAL_RULES)
     if (driver.name in api_settings.enabled_http_header_exact_providers and
             getattr(driver, 'supports_http_header_exact', False) is True):
         capabilities.append(constants.GATEWAY_CAPABILITY_HTTP_HEADER_EXACT)
@@ -191,23 +205,62 @@ def require_request_url_rewrite(driver, protocol):
                 'provider.'))
 
 
-def require_no_exposed_request_url_rewrite(driver, policy_repo, session,
-                                           **changes):
-    if not request_url_rewrite_available(driver):
+def require_weighted_target_request_filters(driver, protocol):
+    validate.validate_weighted_l7policy_protocol(protocol)
+    if (constants.GATEWAY_CAPABILITY_WEIGHTED_TARGET_FILTERS not in
+            gateway_capabilities(driver)):
+        raise exceptions.ProviderUnsupportedOptionError(
+            prov=driver.name, user_msg=_(
+                'Request filters on weighted pool targets are unavailable '
+                'for this provider.'))
+
+
+def _withdrawn_request_transforms(driver):
+    capabilities = gateway_capabilities(driver)
+    if constants.GATEWAY_CAPABILITY_REQUEST_URL_REWRITE not in capabilities:
+        yield False, require_request_url_rewrite
+    if (constants.GATEWAY_CAPABILITY_WEIGHTED_TARGET_FILTERS not in
+            capabilities):
+        yield True, require_weighted_target_request_filters
+
+
+def require_no_exposed_request_transforms(driver, policy_repo, session,
+                                          **changes):
+    for target_filters, require in _withdrawn_request_transforms(driver):
         protocol = policy_repo.get_rewrite_exposed_by_policy(
-            session, **changes)
+            session, target_filters=target_filters, **changes)
         if protocol:
-            require_request_url_rewrite(driver, protocol)
+            require(driver, protocol)
 
 
-def require_no_rewrite_exposed_by_ordered_redirect(
+def require_no_transform_exposed_by_ordered_redirect(
         driver, policy_repo, session, listener_id, hostname, position,
         *, policy_id=None):
-    if not request_url_rewrite_available(driver):
+    for target_filters, require in _withdrawn_request_transforms(driver):
         protocol = policy_repo.get_rewrite_exposed_by_ordered_redirect(
-            session, listener_id, hostname, position, policy_id=policy_id)
+            session, listener_id, hostname, position, policy_id=policy_id,
+            target_filters=target_filters)
         if protocol:
-            require_request_url_rewrite(driver, protocol)
+            require(driver, protocol)
+
+
+def require_no_active_request_transforms(
+        driver, policy_repo, session, *, policy_id=None,
+        removed_https_hosts=(), **scope):
+    for target_filters, require in _withdrawn_request_transforms(driver):
+        for row in policy_repo.get_active_url_rewrites(
+                session, target_filters=target_filters, **scope):
+            if policy_id is not None and row.id != policy_id:
+                continue
+            section = row.https_listener_hostname
+            if removed_https_hosts and not any(
+                    host != '*' and
+                    (section == '*' or
+                     (section.startswith('*.') and
+                      host.endswith(section[1:])))
+                    for host in removed_https_hosts):
+                continue
+            require(driver, row.protocol)
 
 
 def uses_tls_sni_policy_path(driver, protocol, tcp_tls_termination=False):
@@ -305,7 +358,7 @@ def require_gateway_policy_action(driver, action, protocol, *,
                                   request_header_operations=None,
                                   tcp_tls_termination=False,
                                   response_header_operations=None,
-                                  request_url_rewrite=None):
+                                  request_url_rewrite=None, targets=None):
     if request_url_rewrite:
         require_request_url_rewrite(driver, protocol)
     if action == constants.L7POLICY_ACTION_FIXED_RESPONSE:
@@ -314,6 +367,9 @@ def require_gateway_policy_action(driver, action, protocol, *,
     elif action == constants.L7POLICY_ACTION_WEIGHTED_TARGETS:
         validate.validate_weighted_l7policy_protocol(protocol)
         require_weighted_targets(driver)
+        if any(validate.target_request_filters(target)
+               for target in targets or []):
+            require_weighted_target_request_filters(driver, protocol)
     elif action == constants.L7POLICY_ACTION_REDIRECT_REQUEST:
         validate.validate_http_request_redirect_protocol(protocol)
         require_http_request_redirect(driver)

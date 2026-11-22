@@ -202,6 +202,14 @@ listener. Operations on ``Connection``, ``Content-Length``, ``Keep-Alive``,
 return HTTP 400. A policy update preserves omitted fields. Send an empty
 list to clear the response operations.
 
+``l7policy_initial_rules_v1`` allows creating a disabled L7 policy and its
+initial rules in one POST to ``/v2/lbaas/l7policies`` on an existing HTTP or
+terminated HTTPS listener. Enable a compatible provider in
+``[api_settings] enabled_l7policy_initial_rules_providers`` after upgrading
+the API and all workers in the region. Removing a provider from that list
+disables admission of new policy posts with rules. Existing policies and rules
+can be read and managed through their regular endpoints.
+
 ``http_request_redirect_v1`` enables the L7 policy action
 ``REDIRECT_REQUEST``. Set ``redirect_request`` to an object with
 ``scheme`` (``http`` or ``https``) and ``port`` (an integer from 1 to
@@ -234,8 +242,7 @@ that needs position-order precedence with forwarding.
 ``REDIRECT_TO_POOL`` and ``WEIGHTED_TARGETS`` policies. Amphora evaluates
 the L7 rules on the original request and applies the rewrite after selecting
 the destination pool. A rewrite on a weighted policy applies to each
-selected pool. Fixed responses and individual target filters are outside
-the rewrite contract.
+selected pool. Fixed responses do not rewrite the request.
 
 Set ``hostname`` to replace the HTTP authority with a DNS name.
 ``replace_full_path`` and ``replace_prefix`` have the same shape and
@@ -243,6 +250,44 @@ replacement encoding as in ``redirect_request``. A prefix changes only an
 exact path or a descendant on a segment boundary. The original query
 travels with the rewritten path. Send ``request_url_rewrite: null`` to clear
 the settings. Omission in an update preserves the settings.
+
+``weighted_http_target_request_filters_v1`` adds optional
+``request_header_operations`` and ``request_url_rewrite`` to each
+``WEIGHTED_TARGETS.targets`` item with a ``pool_id``. Both fields have
+the same format as their policy-level counterparts. Amphora selects the
+policy and draws the target on the original request. In the selected pool,
+it applies the policy's header operations and URL rewrite first, then the
+target's header operations and URL rewrite. The same pool can occur more
+than once with different filters. A target with zero weight does not receive
+requests. A local fixed response or an unavailable target runs no request
+filter.
+
+A rule and its filtered target can each rewrite a different part of the URL.
+Two path rewrites, two hostname rewrites, or a hostname rewrite combined
+with an operation on the Host header return HTTP 400. Header operations
+across the two levels are sequential. A matching prefix rewrite preserves
+the query and path suffix. This contract does not add named targets to
+the initial load balancer graph. Create the pool and listener first, then
+send pool targets to the L7 policy endpoint. A PUT replaces the complete
+ordered target list. Omit the filter fields from target entries to clear
+them and omit ``targets`` itself to retain the list.
+
+After regional withdrawal, a policy update can remove filters from selected
+targets. Each retained filter must stay at its original position and pool.
+A positive-weight filter can keep its share of the ordered draw or occupy a
+smaller interval within it. A policy whose remaining filters all have zero
+weight can be reactivated. Adding a filter or expanding its reach requires
+regional enrollment.
+
+Enable the capability with
+``[api_settings] enabled_weighted_target_request_filter_providers`` after
+upgrading the database, API, workers and Amphora images. The provider must
+also be enrolled for ``weighted_http_targets_v1``. The policy-level
+capabilities are required only when the corresponding policy-level fields
+are used. Withdrawing the target capability preserves established routing,
+allows reads and removal of the filters, and blocks changes that would
+expand their use. Ordinary weighted targets remain available while the base
+weighted capability is enabled.
 
 These fields require HTTP or terminated HTTPS. Create extended policies
 through the L7 policy endpoint or in the initial load balancer graph. To

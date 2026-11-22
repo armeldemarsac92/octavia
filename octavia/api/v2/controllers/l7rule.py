@@ -34,6 +34,13 @@ from octavia.db import prepare as db_prepare
 LOG = logging.getLogger(__name__)
 
 
+def validate_create_rule_data(rule):
+    try:
+        validate.l7rule_data(rule, validate_request_value=True)
+    except Exception as e:
+        raise exceptions.L7RuleValidation(error=e) from e
+
+
 class L7RuleController(base.BaseController):
     RBAC_TYPE = constants.RBAC_L7RULE
 
@@ -158,10 +165,7 @@ class L7RuleController(base.BaseController):
             self._auth_validate_action(context, l7rule.project_id,
                                        constants.RBAC_POST)
 
-            try:
-                validate.l7rule_data(l7rule, validate_request_value=True)
-            except Exception as e:
-                raise exceptions.L7RuleValidation(error=e)
+            validate_create_rule_data(l7rule)
 
             self._check_l7policy_max_rules(context.session)
 
@@ -197,9 +201,10 @@ class L7RuleController(base.BaseController):
                     response_header_operations=(
                         db_l7policy.response_header_operations),
                     request_url_rewrite=db_l7policy.request_url_rewrite,
+                    targets=db_l7policy.targets,
                     tcp_tls_termination=tcp_tls_termination)
             if l7rule_dict['enabled']:
-                driver_utils.require_no_exposed_request_url_rewrite(
+                driver_utils.require_no_exposed_request_transforms(
                     driver, self.repositories.l7policy, context.session,
                     policy_id=db_l7policy.id)
                 self._require_no_rewrite_exposed_by_ordered_redirect(
@@ -268,7 +273,7 @@ class L7RuleController(base.BaseController):
             self, session, driver, policy):
         if (policy.enabled and
                 policy.action == constants.L7POLICY_ACTION_REDIRECT_REQUEST):
-            driver_utils.require_no_rewrite_exposed_by_ordered_redirect(
+            driver_utils.require_no_transform_exposed_by_ordered_redirect(
                 driver, self.repositories.l7policy, session,
                 policy.listener_id, policy.https_listener_hostname,
                 policy.position)
@@ -290,15 +295,11 @@ class L7RuleController(base.BaseController):
                 driver_utils.require_http_request_redirect(driver)
                 self._require_no_rewrite_exposed_by_ordered_redirect(
                     session, driver, policy)
-            if (policy.request_url_rewrite and
-                    not driver_utils.request_url_rewrite_available(driver) and
-                    any(rewrite.id == policy.id for rewrite in
-                        policy_repo.get_active_url_rewrites(
-                            session, listener_id=listener.id))):
-                driver_utils.require_request_url_rewrite(driver,
-                                                         listener.protocol)
+            driver_utils.require_no_active_request_transforms(
+                driver, policy_repo, session, policy_id=policy.id,
+                listener_id=listener.id)
         else:
-            driver_utils.require_no_exposed_request_url_rewrite(
+            driver_utils.require_no_exposed_request_transforms(
                 driver, policy_repo, session, policy_id=policy.id)
 
     @wsme_pecan.wsexpose(l7rule_types.L7RuleRootResponse,
@@ -372,9 +373,10 @@ class L7RuleController(base.BaseController):
                     response_header_operations=(
                         db_l7policy.response_header_operations),
                     request_url_rewrite=db_l7policy.request_url_rewrite,
+                    targets=db_l7policy.targets,
                     tcp_tls_termination=tcp_tls_termination)
                 if enabled:
-                    driver_utils.require_no_exposed_request_url_rewrite(
+                    driver_utils.require_no_exposed_request_transforms(
                         driver, self.repositories.l7policy, context.session,
                         policy_id=db_l7policy.id)
                     self._require_no_rewrite_exposed_by_ordered_redirect(

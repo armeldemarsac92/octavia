@@ -226,9 +226,10 @@ class BaseController(pecan_rest.RestController):
             query_filter = {'project_id': project_id}
         return query_filter
 
-    def _auth_validate_action(self, context, project_id, action):
+    def _auth_validate_action(self, context, project_id, action, *,
+                              rbac_type=None):
         # Check that the user is authorized to do an action in this object
-        action = f'{self.RBAC_TYPE}{action}'
+        action = f'{rbac_type or self.RBAC_TYPE}{action}'
         target = {'project_id': project_id}
         policy.get_enforcer().authorize(action, target, context)
 

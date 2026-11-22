@@ -58,6 +58,35 @@ def validate_policy_headers(policy, protocol, driver, old_policy=None):
             validate.validate_header_protocol(protocol)
 
 
+def _requires_target_filter_capability(previous, targets, expands_scope):
+    """Allow removal of existing filters after regional withdrawal."""
+    previous, targets = previous or [], targets or []
+    if previous == targets and not expands_scope:
+        return False
+
+    # The draw selects an occurrence by its ordered weight. An unchanged
+    # positive filter may remain in the same or a narrower selection interval.
+    previous_total = sum(target['weight'] for target in previous)
+    total = sum(target['weight'] for target in targets)
+    previous_start = start = 0
+    for index, target in enumerate(targets):
+        old = previous[index] if index < len(previous) else {}
+        previous_end = previous_start + old.get('weight', 0)
+        end = start + target['weight']
+        filters = validate.target_request_filters(target)
+        if filters:
+            if (target.get('pool_id') != old.get('pool_id') or
+                    any(old.get(field) != value
+                        for field, value in filters.items())):
+                return True
+            extends_draw = (start * previous_total < previous_start * total or
+                            end * previous_total > previous_end * total)
+            if target['weight'] and (expands_scope or extends_draw):
+                return True
+        previous_start, start = previous_end, end
+    return False
+
+
 class L7PolicyController(base.BaseController):
     RBAC_TYPE = constants.RBAC_L7POLICY
 
@@ -151,6 +180,9 @@ class L7PolicyController(base.BaseController):
                          body=l7policy_types.L7PolicyRootPOST, status_code=201)
     def post(self, l7policy_):
         """Creates a l7policy on a listener."""
+        if not l7policy_ or not l7policy_.l7policy:
+            raise exceptions.ValidationException(detail=_(
+                'The request must contain an l7policy object.'))
         l7policy = l7policy_.l7policy
         context = pecan_request.context.get('octavia_context')
 
@@ -171,13 +203,27 @@ class L7PolicyController(base.BaseController):
                 raise exceptions.ListenerNoChildren(
                     protocol=lib_consts.PROTOCOL_PROMETHEUS)
 
-            if l7policy.rules:
-                raise exceptions.ValidationException(detail=_(
-                    'Create the policy first, then use POST '
-                    '/v2/lbaas/l7policies/{id}/rules.'))
-
             # Load the driver early as it also provides validation
             driver = driver_factory.get_driver(provider)
+            if l7policy.rules:
+                capabilities = driver_utils.gateway_capabilities(driver)
+                if (listener.protocol not in (
+                        lib_consts.PROTOCOL_HTTP,
+                        lib_consts.PROTOCOL_TERMINATED_HTTPS) or
+                        constants.GATEWAY_CAPABILITY_L7POLICY_INITIAL_RULES
+                        not in capabilities):
+                    raise exceptions.ValidationException(detail=_(
+                        'Create the policy first, then use POST '
+                        '/v2/lbaas/l7policies/{id}/rules.'))
+                self._auth_validate_action(
+                    context, l7policy.project_id, constants.RBAC_POST,
+                    rbac_type=constants.RBAC_L7RULE)
+                if l7policy.admin_state_up is not False:
+                    raise exceptions.ValidationException(detail=_(
+                        'An L7 policy with initial rules must be created '
+                        'with admin_state_up set to false.'))
+                for rule in l7policy.rules:
+                    l7rule.validate_create_rule_data(rule)
 
         lock_session = context.session
         lock_session.begin()
@@ -192,10 +238,20 @@ class L7PolicyController(base.BaseController):
             l7policy_dict = db_prepare.create_l7policy(
                 l7policy.to_dict(render_unsets=True),
                 load_balancer_id, listener_id)
+            rules = l7policy_dict.pop('l7rules', []) or []
+            if rules:
+                if self.repositories.check_quota_met(
+                        lock_session, data_models.L7Rule,
+                        l7policy.project_id, count=len(rules),
+                        ensure_project=False):
+                    raise exceptions.QuotaException(
+                        resource=data_models.L7Rule._name())
+
             driver_utils.require_gateway_policy_action(
                 driver, l7policy_dict['action'], listener.protocol,
                 tcp_tls_termination=listener.tcp_tls_termination,
-                request_url_rewrite=l7policy_dict.get('request_url_rewrite'))
+                request_url_rewrite=l7policy_dict.get('request_url_rewrite'),
+                targets=l7policy_dict.get('targets'))
             validate_policy_headers(
                 l7policy_dict, listener.protocol, driver)
 
@@ -218,8 +274,14 @@ class L7PolicyController(base.BaseController):
             elif pool_id:
                 self._validate_redirect_pool_protocol(
                     lock_session, listener, pool_id)
+            for rule in rules:
+                driver_utils.validate_l7rule_context(
+                    driver, rule['type'], listener.protocol,
+                    tcp_tls_termination=listener.tcp_tls_termination)
             db_l7policy = self._validate_create_l7policy(
                 lock_session, l7policy_dict)
+            if rules:
+                self._create_rules(lock_session, db_l7policy, rules)
 
             # Prepare the data for the driver data model
             provider_l7policy = (
@@ -250,15 +312,17 @@ class L7PolicyController(base.BaseController):
         rules = policy_dict.pop('l7rules', []) or []
         db_policy = self._validate_create_l7policy(lock_session, policy_dict)
 
-        new_rules = []
-        for r in rules:
-            r['project_id'] = db_policy.project_id
-            new_rules.append(
-                l7rule.L7RuleController(db_policy.id)._graph_create(
-                    lock_session, r))
-
-        db_policy.l7rules = new_rules
+        if rules:
+            self._create_rules(lock_session, db_policy, rules)
         return db_policy
+
+    def _create_rules(self, lock_session, db_policy, rules):
+        controller = l7rule.L7RuleController(db_policy.id)
+        new_rules = []
+        for rule in rules:
+            rule['project_id'] = db_policy.project_id
+            new_rules.append(controller._graph_create(lock_session, rule))
+        db_policy.l7rules = new_rules
 
     @wsme_pecan.wsexpose(l7policy_types.L7PolicyRootResponse,
                          wtypes.text, body=l7policy_types.L7PolicyRootPUT,
@@ -351,6 +415,19 @@ class L7PolicyController(base.BaseController):
                         hostname != db_l7policy.https_listener_hostname))):
                 driver_utils.require_request_url_rewrite(
                     driver, listener.protocol)
+            old_targets = db_l7policy.targets
+            targets = l7policy_dict.get('targets', old_targets)
+            updated_request_transform = any(
+                l7policy_dict.get(field) and
+                l7policy_dict[field] != getattr(db_l7policy, field)
+                for field in validate.TARGET_REQUEST_FILTER_FIELDS)
+            expands_filter_scope = enabled and (
+                activates_policy or updated_request_transform or
+                hostname != db_l7policy.https_listener_hostname)
+            if _requires_target_filter_capability(
+                    old_targets, targets, expands_filter_scope):
+                driver_utils.require_weighted_target_request_filters(
+                    driver, listener.protocol)
             routing_changed_or_disabled = (
                 not enabled or action != db_l7policy.action or
                 ('redirect_pool_id' in l7policy_dict and
@@ -363,14 +440,14 @@ class L7PolicyController(base.BaseController):
             if routing_changed_or_disabled or (
                     position > db_l7policy.position and
                     action != constants.L7POLICY_ACTION_REJECT):
-                driver_utils.require_no_exposed_request_url_rewrite(
+                driver_utils.require_no_exposed_request_transforms(
                     driver, policy_repo, lock_session, policy_id=id,
                     new_position=(
                         None if routing_changed_or_disabled else position))
             if (action == constants.L7POLICY_ACTION_REDIRECT_REQUEST and
                     enabled and (routing_changed_or_disabled or reopening or
                                  position > db_l7policy.position)):
-                driver_utils.require_no_rewrite_exposed_by_ordered_redirect(
+                driver_utils.require_no_transform_exposed_by_ordered_redirect(
                     driver, policy_repo, lock_session, listener_id, hostname,
                     position, policy_id=id)
             if activates_policy or routing_changed.intersection(l7policy_dict):
@@ -468,7 +545,7 @@ class L7PolicyController(base.BaseController):
                                                 lb_id=load_balancer_id,
                                                 listener_ids=[listener_id])
             policy_repo = self.repositories.l7policy
-            driver_utils.require_no_exposed_request_url_rewrite(
+            driver_utils.require_no_exposed_request_transforms(
                 driver, policy_repo, context.session, policy_id=id)
             policy_repo.update(
                 context.session, db_l7policy.id,

@@ -65,10 +65,12 @@ VALID_L7POLICY_LISTENER_PROTOCOLS = [
 class AmphoraProviderDriver(driver_base.ProviderDriver):
     supports_fixed_http_responses = True
     supports_weighted_targets = True
+    supports_weighted_target_request_filters = True
     supports_request_header_operations = True
     supports_response_header_operations = True
     supports_http_request_redirect = True
     supports_request_url_rewrite = True
+    supports_l7policy_initial_rules = True
     supports_http_header_exact = True
     supports_http_query_param_exact = True
     supports_grpc_content_type = True
@@ -427,8 +429,12 @@ class AmphoraProviderDriver(driver_base.ProviderDriver):
             raise exceptions.UnsupportedOptionError(
                 user_fault_string=msg,
                 operator_fault_string=msg)
-        payload = {consts.L7POLICY: l7policy.to_dict()}
-        self.client.cast({}, 'create_l7policy', **payload)
+        policy = l7policy.to_dict()
+        # Preserve the normal RPC payload for policies without initial rules.
+        if l7policy.rules:
+            policy['rules'] = l7policy.to_dict(recurse=True)['rules']
+            policy[consts.LOADBALANCER_ID] = db_listener.load_balancer_id
+        self.client.cast({}, 'create_l7policy', **{consts.L7POLICY: policy})
 
     def l7policy_delete(self, l7policy):
         payload = {consts.L7POLICY: l7policy.to_dict()}

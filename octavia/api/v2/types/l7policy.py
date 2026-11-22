@@ -12,12 +12,14 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+from wsme.rest import json as wsme_json
 from wsme import types as wtypes
 
 from octavia.api.common import types
 from octavia.api.v2.types import l7rule as l7rule_types
 from octavia.api.v2.types import pool as pool_types
 from octavia.common import constants
+from octavia.i18n import _
 
 
 class BaseL7PolicyType(types.BaseType):
@@ -146,6 +148,30 @@ class L7PolicyPOST(BaseL7PolicyType):
 
 class L7PolicyRootPOST(types.BaseType):
     l7policy = wtypes.wsattr(L7PolicyPOST)
+
+
+@wsme_json.fromjson.when_object(L7PolicyRootPOST)
+def _l7policy_post_from_json(datatype, value):
+    # Validate shape and booleans before the generic decoder coerces values.
+    policy = value.get('l7policy') if isinstance(value, dict) else None
+    if not isinstance(policy, dict):
+        raise ValueError(_('The request must contain an l7policy object.'))
+    rules = policy.get('rules')
+    if rules is not None and not isinstance(rules, list):
+        raise ValueError(_('Initial rules must be an array.'))
+    if rules:
+        if ('admin_state_up' in policy and
+                not isinstance(policy['admin_state_up'], bool)):
+            raise ValueError(_('Policy admin_state_up must be a boolean.'))
+        for rule in rules:
+            if not isinstance(rule, dict):
+                raise ValueError(_('Each initial rule must be an object.'))
+            for field in ('admin_state_up', 'invert'):
+                if field in rule and not isinstance(rule[field], bool):
+                    raise ValueError(_(
+                        'Initial rule %(field)s must be a boolean.')
+                        % {'field': field})
+    return wsme_json.fromjson.default(datatype, value)
 
 
 class L7PolicyPUT(BaseL7PolicyType):
