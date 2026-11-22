@@ -554,6 +554,19 @@ class TestL7Rule(base.BaseAPITest):
             l7rule_prov_status=constants.PENDING_CREATE,
             l7rule_op_status=constants.OFFLINE)
 
+    def test_disable_legacy_path_regex_with_final_linefeed(self):
+        value = '/legacy\n'
+        rule = self.create_l7rule(
+            self.l7policy_id, 'PATH', 'REGEX', value)['rule']
+        self.set_lb_status(self.lb_id)
+        path = self.L7RULE_PATH.format(
+            l7policy_id=self.l7policy_id, l7rule_id=rule['id'])
+        self.put(path, {'rule': {'value': '/legacy\nsuffix'}}, status=400)
+        self.put(path, {'rule': {'admin_state_up': False}})
+        saved = self.get(path).json['rule']
+        self.assertEqual(value, saved['value'])
+        self.assertFalse(saved['admin_state_up'])
+
     def test_create_rule_authorized(self):
         self.conf = self.useFixture(oslo_fixture.Config(cfg.CONF))
         auth_strategy = self.conf.conf.api_settings.get('auth_strategy')
@@ -827,6 +840,8 @@ class TestL7Rule(base.BaseAPITest):
         saved = self.get(path).json['rule']
         self.assertEqual('one\r\ntwo', saved['value'])
         self.assertTrue(saved['invert'])
+        self.put(path, {'rule': {'type': 'PATH', 'compare_type': 'REGEX',
+                                 'key': None}}, status=400)
 
         self.conf.config(group='api_settings',
                          enabled_http_query_param_exact_providers=[])

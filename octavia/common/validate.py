@@ -213,7 +213,7 @@ def validate_tcp_redirect_pool_protocol(protocol, tls_enabled):
 
 # Note that we can evaluate this outside the context of any L7 Policy because
 # L7 rules must be internally consistent.
-def l7rule_data(l7rule):
+def l7rule_data(l7rule, *, validate_request_value=False):
     """Raises an error if the l7rule given is invalid in some way."""
     if not l7rule.value:
         raise exceptions.InvalidL7Rule(msg=_('L7 rule type requires a value'))
@@ -239,7 +239,10 @@ def l7rule_data(l7rule):
     if l7rule.key and len(l7rule.key) > constants.MAX_L7RULE_KEY_LENGTH:
         raise exceptions.InvalidL7Rule(msg=_(
             'L7 rule keys are limited to 255 characters.'))
-    if '\r' in l7rule.value or '\n' in l7rule.value:
+    # Preserve the original WSME pattern, which allows one final LF. Apply
+    # it to request values so previously stored rules can still be edited.
+    if (validate_request_value and
+            ('\r' in l7rule.value or '\n' in l7rule.value.removesuffix('\n'))):
         raise exceptions.InvalidL7Rule(msg=_(
             'Line breaks are unsupported in values for this L7 rule type.'))
     if l7rule.type == constants.L7RULE_TYPE_HTTP_HEADER_EXACT:
