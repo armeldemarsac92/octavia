@@ -18,7 +18,7 @@ from octavia.api.common import types
 from octavia.common import constants
 
 
-RULE_KEY_LENGTH = constants.MAX_L7RULE_KEY_LENGTH
+RULE_KEY_LENGTH = constants.MAX_L7RULE_QUERY_PARAM_KEY_LENGTH
 RULE_VALUE_LENGTH = constants.MAX_L7RULE_HEADER_VALUE_LENGTH
 
 
@@ -69,8 +69,7 @@ class L7RulePOST(BaseL7Type):
         mandatory=True)
     key = wtypes.wsattr(wtypes.StringType(max_length=RULE_KEY_LENGTH,
                                           pattern=r'^[^\r\n]*$'))
-    value = wtypes.wsattr(wtypes.StringType(max_length=RULE_VALUE_LENGTH,
-                                            pattern=r'^[^\r\n]*$'),
+    value = wtypes.wsattr(wtypes.StringType(max_length=RULE_VALUE_LENGTH),
                           mandatory=True)
     invert = wtypes.wsattr(bool, default=False)
     admin_state_up = wtypes.wsattr(bool, default=True)
@@ -93,8 +92,7 @@ class L7RulePUT(BaseL7Type):
                     *constants.SUPPORTED_L7RULE_COMPARE_TYPES))
     key = wtypes.wsattr(wtypes.StringType(max_length=RULE_KEY_LENGTH,
                                           pattern=r'^[^\r\n]*$'))
-    value = wtypes.wsattr(wtypes.StringType(max_length=RULE_VALUE_LENGTH,
-                                            pattern=r'^[^\r\n]*$'))
+    value = wtypes.wsattr(wtypes.StringType(max_length=RULE_VALUE_LENGTH))
     invert = wtypes.wsattr(bool)
     admin_state_up = wtypes.wsattr(bool)
     tags = wtypes.wsattr(wtypes.ArrayType(wtypes.StringType(max_length=255)))

@@ -195,6 +195,34 @@ that would activate an enabled method rule also requires enrollment. Existing
 active rules continue to serve and can be disabled or removed. Retire them
 before rolling back the workers.
 
+Exact HTTP query parameter matching
+-----------------------------------
+
+An ``HTTP_QUERY_PARAM_EXACT`` L7 rule with ``EQUAL_TO`` matches the first
+occurrence of a case-sensitive parameter name on an HTTP or terminated
+HTTPS listener. Amphora splits the query on literal ampersands, recognizes
+percent-encoded names, and form URL decodes the selected value once before
+comparing it byte for byte with the configured UTF-8 value.
+
+Apply database migration ``ff81efc318ad`` and upgrade the API and workers.
+Verify that existing and replacement Amphorae support the generated HAProxy
+configuration, including the PCRE regex used to recognize encoded names.
+Local testing used HAProxy 3.0.19 with PCRE2. Configure the database
+connection to use ``utf8mb4`` for four-byte characters.
+
+Set the provider names on each regional API replica and reload the
+configuration. The opt-in defaults to empty.
+
+.. code-block:: ini
+
+   [api_settings]
+   enabled_http_query_param_exact_providers = amphora
+
+The provider then advertises ``http_query_param_exact_v1``. Removing the
+provider name prevents new rules, match changes and re-enabling a rule or
+parent that would activate it. Existing rules remain readable and can be
+disabled or deleted. Retire the rules before rolling back the workers.
+
 
 TLS passthrough by SNI
 ----------------------
