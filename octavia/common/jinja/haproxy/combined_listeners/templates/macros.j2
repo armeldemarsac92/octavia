@@ -184,11 +184,114 @@ bind {{ lb_vip_address }}:{{ listener.protocol_port }} {{
 {% endmacro %}
 
 
+{% macro cors_request(policies) %}
+    {% if policies %}
+    acl octavia_cors_preflight var(txn.octavia_cors_preflight) -m bool
+    acl octavia_cors_credentialed req.fhdr_cnt(cookie) gt 0
+    acl octavia_cors_credentialed req.fhdr_cnt(authorization) gt 0
+    acl octavia_cors_credentialed ssl_c_used
+    {% endif %}
+    {% for policy_id, cors in policies %}
+        {% set selected = selected_policy_match_macro(policy_id) %}
+        {% set origin_acl = 'octavia_cors_origin_' ~ policy_id %}
+        {% set method_acl = 'octavia_cors_method_' ~ policy_id %}
+        {% for pattern in cors.origin_patterns %}
+    acl {{ origin_acl }} req.fhdr(origin) -m reg -i {{ pattern|safe }}
+        {% endfor %}
+        {% if cors.methods_wildcard %}
+    acl {{ method_acl }} req.fhdr(access-control-request-method) -m reg {{ cors.method_token_pattern|safe }}
+        {% else %}
+    acl {{ method_acl }} req.fhdr(access-control-request-method) -m str {{ cors.accepted_methods|safe }}
+        {% endif %}
+    http-request set-var(txn.octavia_cors_preflight) bool(true) if {{ selected }} METH_OPTIONS { req.fhdr_cnt(origin) gt 0 } { req.fhdr_cnt(access-control-request-method) gt 0 }
+        {% if cors.origin_patterns %}
+    http-request set-var(txn.octavia_cors_origin) req.fhdr(origin) if {{ selected }} { req.fhdr_cnt(origin) eq 1 } {{ origin_acl }}
+        {% endif %}
+    http-request return status 403 if {{ selected }} octavia_cors_preflight !{ var(txn.octavia_cors_origin) -m found }
+    http-request return status 403 if {{ selected }} octavia_cors_preflight !{ req.fhdr_cnt(access-control-request-method) eq 1 }
+    http-request return status 403 if {{ selected }} octavia_cors_preflight !{{ method_acl }}
+        {% if cors.header_list_pattern %}
+            {% set capture = selected ~ ' { var(txn.octavia_cors_origin) -m found }' %}
+            {% if not (cors.headers_wildcard and cors.credentials) %}
+                {% set capture = capture ~ ' octavia_cors_preflight' %}
+            {% endif %}
+    http-request set-var(txn.octavia_cors_headers) req.fhdr(access-control-request-headers) if {{ capture }} { req.fhdr_cnt(access-control-request-headers) eq 1 }
+    {# Extract and join repeated field lines. The config parser decodes the
+       CR/LF escapes in outer double quotes for both libc and PCRE2 builds. #}
+    http-request set-var(txn.octavia_cors_headers) "req.hdrs,regsub(\"(^|[\x0d\x0a]+)(access-control-request-headers: ([^\x0d\x0a]*)|[^\x0d\x0a]*)\",\"\\1\\3\",gi),regsub(\"^[\x0d\x0a]+|[\x0d\x0a]+\x24\",\"\",g),regsub(\"[\x0d\x0a]+\",\", \",g)" if {{ capture }} { req.fhdr_cnt(access-control-request-headers) gt 1 }
+    http-request unset-var(txn.octavia_cors_headers) if {{ capture }} !{ var(txn.octavia_cors_headers) -m reg -i {{ cors.header_list_pattern|safe }} }
+    http-request unset-var(txn.octavia_cors_headers) if {{ capture }} { var(txn.octavia_cors_headers) -m reg ",[\x09 ]*\x24" }
+            {% if cors.headers_wildcard and cors.credentials %}
+    http-request unset-var(txn.octavia_cors_headers) if {{ capture }} { var(txn.octavia_cors_headers) -m reg "(^|,)[\x09 ]*[*][\x09 ]*(,|\x24)" }
+            {% endif %}
+        {% endif %}
+    http-request return status 403 if {{ selected }} octavia_cors_preflight { req.fhdr_cnt(access-control-request-headers) gt 0 } !{ var(txn.octavia_cors_headers) -m found }
+        {% if cors.methods_wildcard and cors.credentials %}
+    http-request set-var(txn.octavia_cors_method) req.fhdr(access-control-request-method) if {{ selected }} { var(txn.octavia_cors_origin) -m found } { req.fhdr_cnt(access-control-request-method) eq 1 } {{ method_acl }} !{ req.fhdr(access-control-request-method) -m str * }
+    http-request return status 403 if {{ selected }} octavia_cors_preflight !{ var(txn.octavia_cors_method) -m found }
+        {% elif cors.methods_wildcard %}
+    http-request set-var(txn.octavia_cors_method) req.fhdr(access-control-request-method) if {{ selected }} octavia_cors_preflight
+        {% endif %}
+    http-request set-var(txn.octavia_cors_allowed) bool(true) if {{ selected }} { var(txn.octavia_cors_origin) -m found }
+        {% if not cors.credentials %}
+    http-request unset-var(txn.octavia_cors_allowed) if {{ selected }} !octavia_cors_preflight octavia_cors_credentialed
+        {% endif %}
+    http-request return status 204 if {{ selected }} octavia_cors_preflight
+    {% endfor %}
+{% endmacro %}
+
+
+{% macro cors_response(policies) %}
+    {% for policy_id, cors in policies %}
+        {% set selected = selected_policy_match_macro(policy_id) %}
+        {% set allowed = selected ~ ' { var(txn.octavia_cors_allowed) -m bool }' %}
+        {% set preflight = '{ var(txn.octavia_cors_preflight) -m bool }' %}
+        {% for name in ('Allow-Origin', 'Allow-Credentials', 'Allow-Methods',
+                        'Allow-Headers', 'Expose-Headers', 'Max-Age') %}
+    http-after-response del-header Access-Control-{{ name }} if {{ selected }}
+        {% endfor %}
+        {% for name, varies_for_actual in (
+                ('Origin', true),
+                ('Access-Control-Request-Method', cors.credentials and cors.methods_wildcard),
+                ('Access-Control-Request-Headers', cors.credentials and cors.headers_wildcard)) %}
+    http-after-response add-header Vary {{ name }} if {{ selected }}{% if not varies_for_actual %} {{ preflight }}{% endif %} !{ res.hdr(vary) -m str -i {{ name }} * }
+        {% endfor %}
+        {% if not cors.credentials %}
+            {% for name in ('Cookie', 'Authorization') %}
+    http-after-response add-header Vary {{ name }} if {{ selected }} !{{ preflight }} !{ res.hdr(vary) -m str -i {{ name }} * }
+            {% endfor %}
+        {% endif %}
+    http-after-response set-header Access-Control-Allow-Origin {{ cors.origin_response|safe }} if {{ allowed }}
+        {% if cors.credentials %}
+    http-after-response set-header Access-Control-Allow-Credentials true if {{ allowed }}
+        {% endif %}
+        {% for name, value in cors.response_headers.items() %}
+    http-after-response set-header {{ name }} {{ value|safe }} if {{ allowed }}
+        {% endfor %}
+        {% if cors.methods_wildcard %}
+    http-after-response set-header Access-Control-Allow-Methods "%[var(txn.octavia_cors_method)]" if {{ allowed }} { var(txn.octavia_cors_method) -m found }
+        {% endif %}
+        {% if cors.headers_wildcard %}
+    http-after-response set-header Access-Control-Allow-Headers "%[var(txn.octavia_cors_headers)]" if {{ allowed }} { var(txn.octavia_cors_headers) -m found }
+        {% endif %}
+    http-after-response set-header Access-Control-Max-Age {{ cors.max_age }} if {{ allowed }} {{ preflight }}
+        {% if cors.expose_wildcard and cors.credentials %}
+    {# Double the commas so adjacent forbidden names match independently. #}
+    http-after-response set-header Access-Control-Expose-Headers '%[res.hdr_names,regsub(",",",,",g),regsub("(^|,)(set-cookie2?|[*])(,|$)","",gi),regsub(",+",",",g),regsub("^,|,$","",g)]' if {{ allowed }}
+        {% elif cors.expose_wildcard %}
+    http-after-response set-header Access-Control-Expose-Headers "*" if {{ allowed }}
+        {% endif %}
+    {% endfor %}
+{% endmacro %}
+
+
 {% macro fixed_response_backend_macro(constants, listener, response_id, status_code) %}
 backend {{ fixed_response_backend_name(constants, listener, response_id) }}
     mode http
-    http-request return status {{ status_code }}
+    {% set cors = listener.get('cors_by_backend', {}).get(('fixed', response_id), []) %}
+{{ cors_request(cors) }}    http-request return status {{ status_code }}
 {{ policy_response_headers(listener, 'fixed', response_id) -}}
+{{ cors_response(cors) -}}
 
 {% endmacro %}
 
@@ -217,7 +320,10 @@ backend {{ pool.id }}:{{ listener.id }}
     mode {{ listener.protocol_mode }}
     timeout connect {{ listener.timeout_member_connect }}
     timeout server {{ listener.timeout_member_data }}
+    {% set cors = listener.get('cors_by_backend', {}).get(('pool', pool.id), []) %}
+{{ cors_request(cors) -}}
 {{ policy_response_headers(listener, 'pool', pool.id) -}}
+{{ cors_response(cors) -}}
 
 {% endmacro %}
 
@@ -362,7 +468,8 @@ frontend {{ listener.id }}
     {% set select_policy = listener.weighted_response_codes is defined or
                            listener.request_header_operations_by_pool is defined or
                            listener.response_header_operations_by_backend is defined or
-                           listener.request_url_rewrites_by_pool is defined %}
+                           listener.request_url_rewrites_by_pool is defined or
+                           listener.cors_by_backend is defined %}
     {% if select_policy or structured %}
         {% for l7policy in policies %}
             {{- l7policy_rules_macro(constants, l7policy, listener) -}}
@@ -561,7 +668,10 @@ backend {{ pool.id }}:{{ listener.id }}
                constants.PROTOCOL_HTTP.lower()))%}
     http-reuse safe
     {% endif %}
+    {% set cors = listener.get('cors_by_backend', {}).get(('pool', pool.id), []) %}
+{{ cors_request(cors) -}}
 {{ policy_response_headers(listener, 'pool', pool.id) -}}
+{{ cors_response(cors) -}}
     {% for policy_id, operations in listener.get('request_header_operations_by_pool', {}).get(pool.id, []) %}
         {% for operation in operations %}
     http-request {{ operation|safe }} if {{ selected_policy_match_macro(policy_id) }}

@@ -593,6 +593,73 @@ def http_request_url_rewrite(rewrite):
     return rewrite
 
 
+# Match the Gateway API v1.7.0 CORSOrigin schema and check the port range.
+_CORS_ORIGIN_RE = re.compile(
+    r"https?://(?:\*|(?:\*\.)?(?:[a-zA-Z0-9-]+\.)*[a-zA-Z0-9-]+)"
+    r"(?::(?P<port>[0-9]{1,5}))?")
+_CORS_LIST_FIELDS = {
+    'allow_origins': 64,
+    'allow_methods': 9,
+    'allow_headers': 64,
+    'expose_headers': 64,
+}
+
+
+def _valid_cors_origin(origin):
+    if origin == '*':
+        return True
+    match = _CORS_ORIGIN_RE.fullmatch(origin) if len(origin) <= 253 else None
+    if not match:
+        return False
+    port = match['port']
+    return port is None or 1 <= int(port) <= constants.MAX_PORT_NUMBER
+
+
+def http_request_cors(cors):
+    """Validate the Gateway API v1.7.0 CORS object without coercing values."""
+    if (not isinstance(cors, dict) or
+            cors.keys() - (_CORS_LIST_FIELDS.keys() |
+                           {'allow_credentials', 'max_age'})):
+        raise exceptions.InvalidL7PolicyArgs(
+            msg=_('Invalid request_cors fields.'))
+    if ('allow_credentials' in cors and
+            type(cors['allow_credentials']) is not bool):
+        raise exceptions.InvalidL7PolicyArgs(
+            msg=_('request_cors.allow_credentials must be a boolean.'))
+    if 'max_age' in cors:
+        max_age = cors['max_age']
+        if type(max_age) is not int or not 1 <= max_age <= 2**31 - 1:
+            raise exceptions.InvalidL7PolicyArgs(
+                msg=_('request_cors.max_age must be an integer from '
+                      '1 to 2147483647.'))
+
+    for field, limit in _CORS_LIST_FIELDS.items():
+        if field not in cors:
+            continue
+        values = cors[field]
+        if (not isinstance(values, list) or len(values) > limit or
+                any(not isinstance(value, str) for value in values) or
+                len(set(values)) != len(values)):
+            raise exceptions.InvalidL7PolicyArgs(msg=_(
+                'request_cors.%s must be an array of distinct strings '
+                'within its item limit.') % field)
+        if field != 'expose_headers' and '*' in values and len(values) > 1:
+            raise exceptions.InvalidL7PolicyArgs(msg=_(
+                "request_cors.%s cannot contain '*' with other values.")
+                % field)
+        if field == 'allow_origins':
+            valid = all(_valid_cors_origin(value) for value in values)
+        elif field == 'allow_methods':
+            valid = all(value == '*' or value in constants.L7RULE_HTTP_METHODS
+                        for value in values)
+        else:
+            valid = all(_HEADER_NAME_RE.fullmatch(value) for value in values)
+        if not valid:
+            raise exceptions.InvalidL7PolicyArgs(
+                msg=_('Invalid value in request_cors.%s.') % field)
+    return cors
+
+
 def validate_target_request_filter_composition(targets, operations, rewrite):
     rewrite = rewrite or {}
     operations = operations or []
@@ -674,6 +741,13 @@ def validate_http_request_url_rewrite_protocol(protocol):
         raise exceptions.ValidationException(
             detail=_('HTTP request URL rewrites require an HTTP or '
                      'TERMINATED_HTTPS listener.'))
+
+
+def validate_http_request_cors_protocol(protocol):
+    if protocol not in (constants.PROTOCOL_HTTP,
+                        constants.PROTOCOL_TERMINATED_HTTPS):
+        raise exceptions.ValidationException(detail=_(
+            'L7 policy CORS requires an HTTP or TERMINATED_HTTPS listener.'))
 
 
 def validate_listener_pool_protocol(listener_protocol, pool_protocol):
@@ -850,6 +924,15 @@ def sanitize_l7policy_api_args(l7policy, create=False, old_policy=None):
                       'WEIGHTED_TARGETS.'))
         if 'request_url_rewrite' in l7policy:
             l7policy['request_url_rewrite'] = http_request_url_rewrite(rewrite)
+    cors = l7policy.get('request_cors',
+                        getattr(old_policy, 'request_cors', None))
+    if cors is not None:
+        if l7policy.get('action', old_action) not in forwarding_actions:
+            raise exceptions.InvalidL7PolicyArgs(
+                msg=_('request_cors requires REDIRECT_TO_POOL or '
+                      'WEIGHTED_TARGETS.'))
+        if 'request_cors' in l7policy:
+            l7policy['request_cors'] = http_request_cors(cors)
     for field, actions in (
             ('request_header_operations', forwarding_actions),
             ('response_header_operations',

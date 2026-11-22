@@ -26,6 +26,12 @@ global
     {% if loadbalancer.global_connection_limit is defined %}
     maxconn {{ loadbalancer.global_connection_limit }}
     {% endif %}
+    {% block buffer_tuning %}
+        {% if cors_buffer_tuning is defined %}
+    tune.bufsize {{ cors_buffer_tuning.size }}
+    tune.maxrewrite {{ cors_buffer_tuning.rewrite_reserve }}
+        {% endif %}
+    {% endblock buffer_tuning %}
     {% if ssl_cache is defined %}
     tune.ssl.cachesize {{ ssl_cache }}
     {% endif %}

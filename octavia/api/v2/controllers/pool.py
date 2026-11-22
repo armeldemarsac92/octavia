@@ -506,6 +506,38 @@ class PoolsController(base.BaseController):
             driver, current.protocol, hostname, tls, ca_ref,
             enrolling=hostname != current.backend_tls_hostname or reopening)
 
+    def _validate_request_transform_exposure(self, session, driver, pool_id,
+                                             current, changes, lb_id):
+        policy_repo = self.repositories.l7policy
+        enabled = (changes.admin_state_up
+                   if isinstance(changes.admin_state_up, bool)
+                   else current.enabled)
+        hostname = (
+            current.backend_tls_hostname
+            if changes.backend_tls_hostname is wtypes.Unset
+            else changes.backend_tls_hostname)
+        tls_tag = constants.GATEWAY_BACKEND_TLS_POOL_TAG
+        tagged = (current.gateway_backend_tls_tagged
+                  if changes.tags is wtypes.Unset
+                  else tls_tag in (changes.tags or ()))
+        http_pool = current.protocol == constants.PROTOCOL_HTTP
+        was_routable = (
+            current.enabled or current.backend_tls_hostname is not None or
+            (http_pool and current.gateway_backend_tls_tagged))
+        routable = enabled or hostname is not None or (http_pool and tagged)
+
+        if enabled and not current.enabled:
+            driver_utils.require_no_active_request_transforms(
+                driver, policy_repo, session, load_balancer_id=lb_id,
+                restoring_pool=pool_id)
+        elif not was_routable and routable:
+            driver_utils.require_no_active_request_transforms(
+                driver, policy_repo, session, load_balancer_id=lb_id,
+                activating_closed_pool=pool_id)
+        elif was_routable and not routable:
+            driver_utils.require_no_exposed_request_transforms(
+                driver, policy_repo, session, disabling_pool=pool_id)
+
     def _validate_pool_PUT(self, pool, current):
 
         if current.protocol in (constants.PROTOCOL_UDP,
@@ -626,15 +658,9 @@ class PoolsController(base.BaseController):
             self._validate_pool_PUT(pool, current)
             self._validate_tcp_listener_pool_update(
                 context.session, id, current, pool, driver)
-            policy_repo = self.repositories.l7policy
-            if pool.admin_state_up is True and not current.enabled:
-                driver_utils.require_no_active_request_transforms(
-                    driver, policy_repo, context.session,
-                    load_balancer_id=db_pool.load_balancer_id,
-                    restoring_pool=id)
-            if pool.admin_state_up is False and current.enabled:
-                driver_utils.require_no_exposed_request_transforms(
-                    driver, policy_repo, context.session, disabling_pool=id)
+            self._validate_request_transform_exposure(
+                context.session, driver, id, current, pool,
+                db_pool.load_balancer_id)
 
             # Prepare the data for the driver data model
             pool_dict = pool.to_dict(render_unsets=False)

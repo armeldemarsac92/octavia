@@ -24,6 +24,7 @@ from oslo_utils import uuidutils
 
 from octavia.amphorae.drivers.noop_driver import driver as amphora_noop
 from octavia.api.drivers.noop_driver import driver as noop_driver
+from octavia.api.drivers import utils as driver_utils
 from octavia.common import constants
 import octavia.common.context
 from octavia.common import data_models
@@ -32,6 +33,7 @@ from octavia.common import policy
 from octavia.controller.queue.v2 import endpoints
 from octavia.db import repositories
 from octavia.tests.common import constants as c_const
+from octavia.tests.common import sample_certs
 from octavia.tests.functional.api.v2 import base
 
 
@@ -196,6 +198,115 @@ class TestInitialL7Rules(base.BaseAPITest):
         self.rpc.cast.assert_not_called()
         stored = self.get(path).json['l7policy']
         self.assertFalse(stored['admin_state_up'])
+        self.assertEqual('ACTIVE', stored['provisioning_status'])
+
+    @mock.patch.object(amphora_noop.NoopAmphoraLoadBalancerDriver, 'update')
+    def test_cors_create_update_and_clear_reach_worker_snapshot(self, update):
+        pool = self.create_pool(self.lb_id, 'HTTP', 'ROUND_ROBIN')['pool']
+        self.set_lb_status(self.lb_id)
+        self.rpc.cast.reset_mock()
+        target = {'redirect_pool_id': pool['id'],
+                  'admin_state_up': False, 'rules': self.rules}
+        field = 'request_cors'
+        self.create_l7policy(
+            self.listener_id, 'REDIRECT_TO_POOL', status=501,
+            request_cors={}, **target)
+        self.rpc.cast.assert_not_called()
+        self.conf.config(group='api_settings',
+                         enabled_request_cors_providers=['amphora'])
+
+        for invalid in ([], {'unknown': True}, {'allow_credentials': 'true'},
+                        {'allow_origins': ['https://example.test:65536']},
+                        {'allow_origins': ['*', 'https://example.test']},
+                        {'allow_origins': ['https://example.test/path']},
+                        {'allow_methods': ['get']},
+                        {'allow_headers': ['x-header\nnext']},
+                        {'allow_headers': ['x' * 257]},
+                        {'expose_headers': ['same', 'same']},
+                        {'max_age': True}, {'max_age': 2**31}):
+            with self.subTest(invalid=invalid):
+                self.create_l7policy(
+                    self.listener_id, 'REDIRECT_TO_POOL', status=400,
+                    request_cors=invalid, **target)
+        self.create_l7policy(
+            self.listener_id, 'REJECT', status=400, request_cors={})
+        self.rpc.cast.assert_not_called()
+
+        cors = {
+            'allow_origins': ['https://*.example.test:443', 'http://*'],
+            'allow_credentials': True,
+            'allow_methods': ['GET', 'PATCH'],
+            'allow_headers': ['X-Custom'],
+            'expose_headers': ['*', 'X-Trace'],
+            'max_age': 3600,
+        }
+        policy = self.create_l7policy(
+            self.listener_id, 'REDIRECT_TO_POOL', request_cors=cors,
+            **target)['l7policy']
+        path = self.L7POLICY_PATH.format(l7policy_id=policy['id'])
+
+        def assert_snapshot(operation, expected):
+            update.reset_mock()
+            self._dispatch(operation)
+            update.assert_called_once()
+            snapshot, = update.call_args.args
+            rendered, = snapshot.listeners[0].l7policies
+            self.assertEqual(expected, rendered.request_cors)
+
+        self.assertEqual(cors, self.rpc.cast.call_args.kwargs[
+            constants.L7POLICY][field])
+        assert_snapshot('create_l7policy', cors)
+
+        cases = (({'name': 'retained'}, cors), ({field: {}}, {}))
+        for body, expected in cases:
+            self.put(path, {'l7policy': body})
+            cast_args = self.rpc.cast.call_args.kwargs
+            updates = cast_args[constants.L7POLICY_UPDATES]
+            self.assertEqual(field in body, field in updates)
+            if field in body:
+                self.assertEqual(body[field], updates[field])
+            assert_snapshot('update_l7policy', expected)
+            self.assertEqual(expected, self.get(path).json['l7policy'][field])
+
+        self.conf.config(group='api_settings',
+                         enabled_request_cors_providers=[])
+        cleared = self.put(path, {'l7policy': {field: None}})
+        self.assertNotIn(field, cleared.json['l7policy'])
+        self.assertIsNone(self.rpc.cast.call_args.kwargs[
+            constants.L7POLICY_UPDATES][field])
+        assert_snapshot('update_l7policy', None)
+        self.assertNotIn(field, self.get(path).json['l7policy'])
+
+    @mock.patch.object(driver_utils, 'REQUEST_CORS_PAYLOAD_AVAILABLE', False)
+    def test_cors_cleanup_with_pre_cors_provider_payload(self):
+        self.conf.config(group='api_settings',
+                         enabled_request_cors_providers=['amphora'])
+        pool = self.create_pool(self.lb_id, 'HTTP', 'ROUND_ROBIN')['pool']
+        self.set_lb_status(self.lb_id)
+        self.rpc.cast.reset_mock()
+        self.create_l7policy(
+            self.listener_id, 'REDIRECT_TO_POOL', redirect_pool_id=pool['id'],
+            request_cors={}, status=501)
+        self.rpc.cast.assert_not_called()
+        policy = self.create_l7policy(
+            self.listener_id, 'REDIRECT_TO_POOL',
+            redirect_pool_id=pool['id'])['l7policy']
+        self.assertNotIn('request_cors', policy)
+        self._dispatch('create_l7policy')
+        # Represent a stored policy after restarting with an older octavia-lib.
+        with self.session.begin():
+            self.l7policy_repo.update(self.session, policy['id'],
+                                      request_cors={})
+
+        path = self.L7POLICY_PATH.format(l7policy_id=policy['id'])
+        self.assertEqual({}, self.get(path).json['l7policy']['request_cors'])
+        cleared = self.put(path, {'l7policy': {'request_cors': None}})
+        self.assertNotIn('request_cors', cleared.json['l7policy'])
+        for payload in self.rpc.cast.call_args.kwargs.values():
+            self.assertNotIn('request_cors', payload)
+        self._dispatch('update_l7policy')
+        stored = self.get(path).json['l7policy']
+        self.assertNotIn('request_cors', stored)
         self.assertEqual('ACTIVE', stored['provisioning_status'])
 
     def test_rule_quota_reusable_after_parent_delete(self):
@@ -1608,6 +1719,140 @@ class TestL7Policy(base.BaseAPITest):
         self.delete(filtered)
         self.set_lb_status(lb)
         self.delete(blocker)
+
+    @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
+    def test_cors_withdrawal_protects_unavailable_targets(self, rpc):
+        self.conf.config(
+            group='api_settings', enabled_gateway_action_providers=['amphora'],
+            enabled_request_cors_providers=['amphora'])
+        lb = self.create_load_balancer(
+            uuidutils.generate_uuid(), provider='amphora')['loadbalancer']
+        lb = lb['id']
+        self.set_lb_status(lb)
+        listener = self.create_listener('HTTP', 80, lb)['listener']['id']
+        self.set_lb_status(lb)
+        pool = self.create_pool(
+            lb, 'HTTP', 'ROUND_ROBIN', admin_state_up=False)['pool']['id']
+        self.set_lb_status(lb)
+
+        blocker = self.create_l7policy(
+            listener, 'REJECT', position=1)['l7policy']['id']
+        self.set_lb_status(lb)
+        self.create_l7rule(blocker, 'PATH', 'STARTS_WITH', '/hidden')
+        self.set_lb_status(lb)
+        cors = {'allow_origins': ['https://client.test']}
+        policy = self.create_l7policy(
+            listener, 'WEIGHTED_TARGETS', position=2, request_cors=cors,
+            targets=[{'weight': 1, 'pool_id': pool}])['l7policy']
+        self.set_lb_status(lb)
+        policy_path = self.L7POLICY_PATH.format(l7policy_id=policy['id'])
+        rule = self.create_l7rule(
+            policy['id'], 'PATH', 'STARTS_WITH', '/')['rule']
+        self.set_lb_status(lb)
+        self.create_l7rule(
+            policy['id'], 'HEADER', 'EQUAL_TO', 'yes', key='X-Custom')
+        self.set_lb_status(lb)
+
+        self.conf.config(group='api_settings',
+                         enabled_request_cors_providers=[])
+        rpc.return_value.cast.reset_mock()
+        rule_path = self.L7RULE_PATH.format(
+            l7policy_id=policy['id'], l7rule_id=rule['id'])
+        self.put(rule_path, {'rule': {'value': '/different'}}, status=501)
+        self.delete(rule_path, status=501)
+        self.delete(self.L7POLICY_PATH.format(l7policy_id=blocker),
+                    status=501)
+        self.put(policy_path, {'l7policy': {'request_cors': {
+            'allow_origins': ['*']}}}, status=501)
+        rpc.return_value.cast.assert_not_called()
+
+        listener_path = self.LISTENER_PATH.format(listener_id=listener)
+        lb_path = self.LB_PATH.format(lb_id=lb)
+        for path, resource in ((listener_path, 'listener'),
+                               (lb_path, 'loadbalancer'),
+                               (policy_path, 'l7policy')):
+            self.put(path, {resource: {'admin_state_up': False}})
+            self.set_lb_status(lb)
+            self.put(path, {resource: {'admin_state_up': True}}, status=501)
+            self.conf.config(group='api_settings',
+                             enabled_request_cors_providers=['amphora'])
+            self.put(path, {resource: {'admin_state_up': True}})
+            self.set_lb_status(lb)
+            self.conf.config(group='api_settings',
+                             enabled_request_cors_providers=[])
+
+        stored = self.get(policy_path).json['l7policy']
+        self.assertEqual(cors, stored['request_cors'])
+        self.put(policy_path, {'l7policy': {'request_cors': None}})
+        self.set_lb_status(lb)
+        self.delete(rule_path)
+
+    @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
+    def test_cors_withdrawal_accounts_for_closed_backend_tls_pool(self, rpc):
+        self.conf.config(
+            group='api_settings',
+            enabled_backend_tls_hostname_providers=['amphora'],
+            enabled_request_cors_providers=['amphora'])
+        self.cert_manager_mock().get_secret.return_value = (
+            sample_certs.X509_CA_CERT)
+        lb = self.create_load_balancer(
+            uuidutils.generate_uuid(), provider='amphora')['loadbalancer']
+        lb_id = lb['id']
+        self.set_lb_status(lb_id)
+        listener = self.create_listener('HTTP', 80, lb_id)['listener']['id']
+        self.set_lb_status(lb_id)
+
+        tag = constants.GATEWAY_BACKEND_TLS_POOL_TAG
+        pool = self.create_pool(
+            lb_id, 'HTTP', 'ROUND_ROBIN', tls_enabled=True,
+            ca_tls_container_ref=uuidutils.generate_uuid(),
+            backend_tls_hostname='backend.example.test', tags=[tag])['pool']
+        self.set_lb_status(lb_id)
+        sibling = self.create_pool(lb_id, 'HTTP', 'ROUND_ROBIN')['pool']
+        self.set_lb_status(lb_id)
+
+        policy_paths = []
+        for position, pool_id in enumerate((pool['id'], sibling['id']), 1):
+            policy = self.create_l7policy(
+                listener, 'REDIRECT_TO_POOL', redirect_pool_id=pool_id,
+                position=position, request_cors={})['l7policy']
+            self.set_lb_status(lb_id)
+            self.create_l7rule(policy['id'], 'PATH', 'STARTS_WITH', '/')
+            self.set_lb_status(lb_id)
+            policy_paths.append(self.L7POLICY_PATH.format(
+                l7policy_id=policy['id']))
+        blocker, fallback = policy_paths
+        pool_path = self.POOL_PATH.format(pool_id=pool['id'])
+        self.conf.config(group='api_settings',
+                         enabled_request_cors_providers=[])
+
+        def put_pool(**updates):
+            self.put(pool_path, {'pool': updates})
+            self.set_lb_status(lb_id)
+
+        # Both disabling and reopening preserve the first policy's choice.
+        put_pool(admin_state_up=False)
+        put_pool(admin_state_up=True)
+        put_pool(admin_state_up=False)
+        rpc.return_value.cast.reset_mock()
+        self.delete(blocker, status=501)
+        remove_tls = dict(backend_tls_hostname=None, tls_enabled=False,
+                          ca_tls_container_ref=None)
+        self.put(pool_path, {'pool': dict(remove_tls, tags=[])}, status=501)
+        rpc.return_value.cast.assert_not_called()
+
+        # Either marker suffices. Removing the last one changes selection.
+        put_pool(**remove_tls)
+        rpc.return_value.cast.reset_mock()
+        self.delete(blocker, status=501)
+        self.put(pool_path, {'pool': {'tags': []}}, status=501)
+        rpc.return_value.cast.assert_not_called()
+
+        self.put(fallback, {'l7policy': {'request_cors': None}})
+        self.set_lb_status(lb_id)
+        put_pool(tags=[])
+        # Reattaching a marker would expose the first policy's dormant CORS.
+        self.put(pool_path, {'pool': {'tags': [tag]}}, status=501)
 
     @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
     def test_request_url_rewrite_round_trip_and_withdrawal(self, rpc):

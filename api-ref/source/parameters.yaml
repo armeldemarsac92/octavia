@@ -1038,6 +1038,18 @@ l7policy-redirect-url:
   in: body
   required: true
   type: string
+l7policy-request-cors:
+  description: |
+    CORS settings for the selected ``REDIRECT_TO_POOL`` or
+    ``WEIGHTED_TARGETS`` policy on an HTTP or terminated HTTPS listener.
+    The optional keys are ``allow_origins``, ``allow_credentials``,
+    ``allow_methods``, ``allow_headers``, ``expose_headers`` and
+    ``max_age``. An empty object applies CORS with no allowed origins.
+    Omit the field in an update to preserve it, or send ``null`` to clear
+    it. Responses omit the field when it has no stored value.
+  in: body
+  required: false
+  type: object
 l7policy-request-url-rewrite:
   description: |
     Request URL changes made by the winning HTTP forwarding policy.

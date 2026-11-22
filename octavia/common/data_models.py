@@ -727,7 +727,7 @@ class L7Policy(BaseDataModel):
                  targets=None, request_header_operations=None,
                  https_listener_hostname=None,
                  response_header_operations=None, redirect_request=None,
-                 request_url_rewrite=None):
+                 request_url_rewrite=None, request_cors=None):
         self.id = id
         self.name = name
         self.description = description
@@ -735,6 +735,7 @@ class L7Policy(BaseDataModel):
         self.action = action
         self.redirect_request = redirect_request
         self.request_url_rewrite = request_url_rewrite
+        self.request_cors = request_cors
         self.redirect_pool_id = redirect_pool_id
         self.redirect_url = redirect_url
         self.position = position
