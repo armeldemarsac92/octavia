@@ -238,6 +238,11 @@ HTTP and terminated HTTPS listeners. Apply the database migration and
 upgrade the regional API, workers and Amphora fleet before adding the
 provider name to ``[api_settings] enabled_http_query_param_exact_providers``.
 
+``grpc_content_type_v1`` enables ``GRPC_CONTENT_TYPE`` rules for HTTP and
+terminated HTTPS listeners. Apply the database migration and upgrade the
+regional API, workers and Amphora fleet before adding the provider name to
+``[api_settings] enabled_grpc_content_type_providers``.
+
 ``https_listener_isolation_v1`` allows several host sections on a single
 ``TERMINATED_HTTPS`` listener. Set ``https_virtual_hosts`` to a nonempty set
 of exact DNS names, DNS wildcard suffixes beginning with ``*.``, or ``*``

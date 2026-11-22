@@ -57,6 +57,23 @@ ACTIVE_PENDING_STATUSES = constants.SUPPORTED_PROVISIONING_STATUSES + (
 # HAProxy's rand() reduces a 32-bit draw to the requested interval.
 HAPROXY_MAX_RANDOM_RANGE = 1 << 32
 
+# Use POSIX ERE for Amphora builds with and without PCRE. A Content-Type
+# field can contain a comma inside a quoted parameter, but cannot be a list.
+_HTTP_TOKEN = r"[A-Za-z0-9!#$%&'*+.^_`|~-]+"
+_HTTP_OWS = '[ \t]*'
+_HTTP_QUOTED_STRING = '"([^"\\\\[:cntrl:]]|\t|\\\\([^[:cntrl:]]|\t))*"'
+_GRPC_CONTENT_TYPE_PATTERN = (
+    f'^{_HTTP_OWS}{constants.GRPC_CONTENT_TYPE}([+]{_HTTP_TOKEN})?{_HTTP_OWS}'
+    f'(;{_HTTP_OWS}'
+    f'({_HTTP_TOKEN}=({_HTTP_TOKEN}|{_HTTP_QUOTED_STRING}){_HTTP_OWS})?)*$'
+)
+# Quote the fixed pattern for the HAProxy config parser, which expands
+# dollar signs and processes escapes inside double quotes.
+_GRPC_CONTENT_TYPE_ACL = '"' + _GRPC_CONTENT_TYPE_PATTERN.translate({
+    ord('\\'): r'\\', ord('"'): r'\x22', ord('$'): r'\x24',
+    ord('\t'): r'\x09',
+}) + '"'
+
 BASE_PATH = '/var/lib/octavia'
 BASE_CRT_DIR = BASE_PATH + '/certs'
 
@@ -901,22 +918,38 @@ class JinjaTemplater:
 
     @staticmethod
     def _query_param_fetch(key):
-        """Normalize the first matching query name for HAProxy's param."""
+        """Normalize the query name for HAProxy's first-value lookup."""
         encoded_name = []
         name_pattern = []
         for byte in key.encode('ascii'):
             encoded_name.append(f'%{byte:02X}')
-            percent_escape = f'(?i:%{byte:02x})'
-            if chr(byte) in '+&%#':
+            # Fold hex digits while preserving the case of the decoded name.
+            digits = ''.join(
+                f'[{digit}{digit.upper()}]' if digit in 'abcdef' else digit
+                for digit in f'{byte:02x}')
+            percent_escape = f'%{digits}'
+            char = chr(byte)
+            if char in '+&%#':
                 # These characters must be percent-encoded in a name.
                 name_pattern.append(percent_escape)
             else:
-                name_pattern.append(rf'(?:\x{byte:02x}|{percent_escape})')
+                # Pass a regex escape through the outer HAProxy config
+                # quotes. Escape a dollar there and match it in a class.
+                literal = rf'\\{char}' if char in '*.^|' else char
+                if char == '$':
+                    literal = r'[\$]'
+                name_pattern.append(f'({literal}|{percent_escape})')
         encoded_name = ''.join(encoded_name)
-        pattern = '(^|&)' + ''.join(name_pattern) + '(?==|&|$)'
+        pattern = '(^|&)' + ''.join(name_pattern)
+        # Both libc and PCRE2 support POSIX alternation. Consume each
+        # delimiter with a separate substitution so only the leading
+        # boundary needs a backreference. Normalize a bare name to an
+        # empty assignment, preserving its position relative to duplicates.
+        assigned = rf'regsub(\"{pattern}=\",\"\\1{encoded_name}=\")'
+        bare = rf'regsub(\"{pattern}(&|\$)\",\"\\1{encoded_name}=&\")'
         # Split before decoding the value so encoded delimiters stay data.
-        return (rf"""'query,regsub("{pattern}","\1{encoded_name}"),"""
-                rf"""param({encoded_name}),url_dec(1)'""")
+        return (f'"query,{assigned},{bare},'
+                f'param({encoded_name}),url_dec(1)"')
 
     def _transform_l7rule(self, l7rule, feature_compatibility):
         """Transforms an L7 rule into an object that will
@@ -935,6 +968,8 @@ class JinjaTemplater:
         elif l7rule.type == constants.L7RULE_TYPE_HTTP_QUERY_PARAM_EXACT:
             key = self._query_param_fetch(key)
             value = l7rule.value.encode('utf-8').hex()
+        elif l7rule.type == constants.L7RULE_TYPE_GRPC_CONTENT_TYPE:
+            value = _GRPC_CONTENT_TYPE_ACL
         else:
             value = self._escape_haproxy_config_string(l7rule.value)
 

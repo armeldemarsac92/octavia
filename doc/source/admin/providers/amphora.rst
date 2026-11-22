@@ -206,9 +206,9 @@ comparing it byte for byte with the configured UTF-8 value.
 
 Apply database migration ``ff81efc318ad`` and upgrade the API and workers.
 Verify that existing and replacement Amphorae support the generated HAProxy
-configuration, including the PCRE regex used to recognize encoded names.
-Local testing used HAProxy 3.0.19 with PCRE2. Configure the database
-connection to use ``utf8mb4`` for four-byte characters.
+configuration. Amphora uses POSIX regular expressions to recognize encoded
+names. Local testing used HAProxy 3.0.19 with libc and PCRE2. Configure the
+database connection to use ``utf8mb4`` for four-byte characters.
 
 Set the provider names on each regional API replica and reload the
 configuration. The opt-in defaults to empty.
@@ -220,6 +220,31 @@ configuration. The opt-in defaults to empty.
 
 The provider then advertises ``http_query_param_exact_v1``. Removing the
 provider name prevents new rules, match changes and re-enabling a rule or
+parent that would activate it. Existing rules remain readable and can be
+disabled or deleted. Retire the rules before rolling back the workers.
+
+
+Native gRPC media type matching
+-------------------------------
+
+``GRPC_CONTENT_TYPE`` matches a single HTTP Content-Type field on HTTP and
+terminated HTTPS listeners. It accepts ``application/grpc``, an optional
+``+`` followed by an HTTP token, and optional media type parameters.
+Amphora uses a fixed POSIX expression compatible with both libc and PCRE
+builds of HAProxy. A comma can appear within a quoted parameter.
+
+Apply migration ``4f1a36c90e8b`` and upgrade the regional API, workers and
+Amphora fleet. Verify the generated configuration with the fleet's HAProxy
+build before adding the provider to the following setting on each API
+replica. The opt-in defaults to empty.
+
+.. code-block:: ini
+
+   [api_settings]
+   enabled_grpc_content_type_providers = amphora
+
+The provider then advertises ``grpc_content_type_v1``. Removing the
+provider name stops new rules, match changes and re-enabling a rule or
 parent that would activate it. Existing rules remain readable and can be
 disabled or deleted. Retire the rules before rolling back the workers.
 

@@ -42,6 +42,8 @@ HTTP_L7RULE_CAPABILITIES = {
         constants.GATEWAY_CAPABILITY_HTTP_METHOD_MATCH,
     constants.L7RULE_TYPE_HTTP_QUERY_PARAM_EXACT:
         constants.GATEWAY_CAPABILITY_HTTP_QUERY_PARAM_EXACT,
+    constants.L7RULE_TYPE_GRPC_CONTENT_TYPE:
+        constants.GATEWAY_CAPABILITY_GRPC_CONTENT_TYPE,
 }
 
 
@@ -79,6 +81,9 @@ def gateway_capabilities(driver):
     if (driver.name in query_param_providers and
             getattr(driver, 'supports_http_query_param_exact', False) is True):
         capabilities.append(constants.GATEWAY_CAPABILITY_HTTP_QUERY_PARAM_EXACT)
+    if (driver.name in api_settings.enabled_grpc_content_type_providers and
+            getattr(driver, 'supports_grpc_content_type', False) is True):
+        capabilities.append(constants.GATEWAY_CAPABILITY_GRPC_CONTENT_TYPE)
     if (driver.name in api_settings.enabled_backend_h2c_providers and
             getattr(driver, 'supports_backend_h2c', False) is True):
         capabilities.append(constants.GATEWAY_CAPABILITY_BACKEND_H2C)
@@ -196,6 +201,9 @@ def _unsupported_http_l7rule(driver, rule_type):
     elif rule_type == constants.L7RULE_TYPE_HTTP_QUERY_PARAM_EXACT:
         message = _('Exact HTTP query parameter matching is unavailable '
                     'for this provider.')
+    elif rule_type == constants.L7RULE_TYPE_GRPC_CONTENT_TYPE:
+        message = _('Native gRPC Content-Type matching is unavailable '
+                    'for this provider.')
     else:
         message = _('Exact HTTP method matching is unavailable for this '
                     'provider.')
@@ -212,6 +220,12 @@ def require_active_http_l7rule_capabilities(driver, policy_repo, session,
             raise _unsupported_http_l7rule(driver, rule_type)
 
 
+def require_http_l7rule_capability(driver, rule_type):
+    capability = HTTP_L7RULE_CAPABILITIES.get(rule_type)
+    if capability and capability not in gateway_capabilities(driver):
+        raise _unsupported_http_l7rule(driver, rule_type)
+
+
 def validate_l7rule_context(driver, rule_type, protocol, *,
                             admit_http_l7rule=True, tcp_tls_termination=False):
     if rule_type in HTTP_L7RULE_CAPABILITIES:
@@ -220,9 +234,8 @@ def validate_l7rule_context(driver, rule_type, protocol, *,
             raise exceptions.L7RuleValidation(error=_(
                 '%(rule_type)s requires an HTTP or TERMINATED_HTTPS '
                 'listener.') % {'rule_type': rule_type})
-        if (admit_http_l7rule and HTTP_L7RULE_CAPABILITIES[rule_type] not in
-                gateway_capabilities(driver)):
-            raise _unsupported_http_l7rule(driver, rule_type)
+        if admit_http_l7rule:
+            require_http_l7rule_capability(driver, rule_type)
     elif rule_type == constants.L7RULE_TYPE_TLS_SNI:
         if protocol != constants.PROTOCOL_TCP:
             raise exceptions.L7RuleValidation(error=_(

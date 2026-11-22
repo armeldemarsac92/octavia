@@ -2687,3 +2687,24 @@ class TestL7Policy(base.BaseAPITest):
         lb = self.post(self.LBS_PATH, body).json['loadbalancer']
         saved_rule = lb['listeners'][0]['l7policies'][0]['rules'][0]
         self.assertEqual(rule, {key: saved_rule[key] for key in rule})
+
+    @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
+    def test_grpc_content_type_rule_nested_load_balancer_create(self, rpc):
+        rule = {'type': 'GRPC_CONTENT_TYPE', 'compare_type': 'EQUAL_TO',
+                'value': 'application/grpc'}
+        listener = {'protocol': 'HTTP', 'protocol_port': 80,
+                    'l7policies': [{'action': 'REJECT', 'rules': [rule]}]}
+        body = {'loadbalancer': {'project_id': uuidutils.generate_uuid(),
+                                 'provider': 'amphora',
+                                 'vip_subnet_id': uuidutils.generate_uuid(),
+                                 'listeners': [listener]}}
+        self.post(self.LBS_PATH, body, status=501)
+        self.conf.config(group='api_settings',
+                         enabled_grpc_content_type_providers=['amphora'])
+        listener['protocol'] = 'TCP'
+        self.post(self.LBS_PATH, body, status=400)
+        rpc.return_value.cast.assert_not_called()
+        listener['protocol'] = 'HTTP'
+        lb = self.post(self.LBS_PATH, body).json['loadbalancer']
+        saved_rule = lb['listeners'][0]['l7policies'][0]['rules'][0]
+        self.assertEqual(rule, {key: saved_rule[key] for key in rule})

@@ -280,9 +280,9 @@ class L7RuleController(base.BaseController):
             if l7rule.invert is None:
                 l7rule.invert = False
 
-            # A type change to HTTP_METHOD also clears an inherited header
-            # key in the partial update sent to the worker.
-            if (l7rule.type == constants.L7RULE_TYPE_HTTP_METHOD and
+            # Clear an inherited key when converting to a keyless predicate.
+            if (l7rule.type in (constants.L7RULE_TYPE_HTTP_METHOD,
+                                constants.L7RULE_TYPE_GRPC_CONTENT_TYPE) and
                     l7rule.key is wtypes.Unset):
                 l7rule.key = None
 
@@ -303,8 +303,12 @@ class L7RuleController(base.BaseController):
                 field in l7rule_dict and
                 l7rule_dict[field] != getattr(db_l7rule, field)
                 for field in match_fields)
+            rule_type = l7rule_dict.get('type', db_l7rule.type)
+            if rule_type != db_l7rule.type:
+                driver_utils.require_http_l7rule_capability(
+                    driver, db_l7rule.type)
             driver_utils.validate_l7rule_context(
-                driver, l7rule_dict.get('type', db_l7rule.type), protocol,
+                driver, rule_type, protocol,
                 admit_http_l7rule=(match_changed or
                                    (enabled and not db_l7rule.enabled)),
                 tcp_tls_termination=tcp_tls_termination)
