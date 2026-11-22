@@ -116,6 +116,10 @@ api_opts = [
                        'support full-value exact HTTP header L7 rules. '
                        'Enable after upgrading the database, API, workers '
                        'and Amphora fleet.')),
+    cfg.ListOpt('enabled_tcp_tls_termination_providers', default=[],
+                help=_('Providers whose regional Amphora fleets support TLS '
+                       'termination on TCP listeners. Enable after upgrading '
+                       'the database, API and all workers.')),
     cfg.ListOpt('enabled_tls_sni_providers', default=[],
                 help=_('Providers enabled in this region for TLS ClientHello '
                        'SNI routing on TCP listeners.')),

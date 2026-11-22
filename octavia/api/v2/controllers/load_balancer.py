@@ -782,7 +782,13 @@ class LoadBalancersController(base.BaseController):
 
         pools_by_name = {p.get('name'): p for p in pools}
         for li in listeners:
-            if driver_utils.uses_tls_sni_policy_path(driver, li['protocol']):
+            tcp_tls_termination = li.get('tcp_tls_termination')
+            if tcp_tls_termination and li.get('default_pool'):
+                target = pools_by_name[li['default_pool']['name']]
+                validate.validate_tcp_redirect_pool_protocol(
+                    target.get('protocol'), target.get('tls_enabled'))
+            if driver_utils.uses_tls_sni_policy_path(
+                    driver, li['protocol'], tcp_tls_termination):
                 for policy in li.get('l7policies') or []:
                     target = pools_by_name[policy['redirect_pool']['name']]
                     validate.validate_tcp_redirect_pool_protocol(
@@ -902,6 +908,13 @@ class LoadBalancersController(base.BaseController):
                 if self.repositories.listener.has_enabled_https_isolation(
                         context.session, id):
                     driver_utils.require_https_listener_isolation(driver)
+                listener_repo = self.repositories.listener
+                tls_listeners = listener_repo.get_active_tcp_tls_listeners(
+                    context.session, id)
+                listener_controller = listener.ListenersController()
+                for tls_listener in tls_listeners:
+                    listener_controller._validate_tcp_tls_update(
+                        context.session, tls_listener, {}, driver, True)
                 driver_utils.require_active_http_l7rule_capabilities(
                     driver, self.repositories.l7policy, context.session,
                     load_balancer_id=id)

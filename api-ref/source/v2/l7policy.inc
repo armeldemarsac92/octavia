@@ -116,11 +116,10 @@ L7 policies with ``action`` of ``REJECT`` will return a ``Forbidden (403)``
 response code to the requester.
 
 For TCP listeners, the Amphora provider supports ``REDIRECT_TO_POOL``
-policies with ``TLS_SNI`` rules when the provider advertises
-``tls_sni_passthrough_v1``. The redirect pool must use TCP with
-``tls_enabled`` set to ``false``. Wildcard SNI rules additionally require
-``tls_sni_suffix_v1``. SCTP and UDP pools are unsupported as L7 policy
-targets.
+policies with ``TLS_SNI`` rules. TCP TLS termination requires
+``tcp_tls_termination_v1``. TCP TLS passthrough requires
+``tls_sni_passthrough_v1``, with ``tls_sni_suffix_v1`` for wildcard rules.
+The redirect pool must use TCP with ``tls_enabled`` set to ``false``.
 
 .. rest_status_code:: success ../http-status.yaml
 

@@ -1099,6 +1099,23 @@ class MemberRepository(BaseRepository):
 class ListenerRepository(BaseRepository):
     model_class = models.Listener
 
+    def get_active_tcp_tls_listeners(self, session, load_balancer_id):
+        listener = self.model_class
+        return (session.query(listener)
+                .filter_by(load_balancer_id=load_balancer_id,
+                           tcp_tls_termination=True, enabled=True)
+                .filter(listener.provisioning_status.notin_(
+                    (consts.PENDING_DELETE, consts.DELETED)))
+                .populate_existing().with_for_update().all())
+
+    def has_tcp_tls_default_pool(self, session, pool_id):
+        listener = self.model_class
+        return (session.query(listener.id)
+                .filter_by(default_pool_id=pool_id, tcp_tls_termination=True)
+                .filter(listener.provisioning_status.notin_(
+                    (consts.PENDING_DELETE, consts.DELETED)))
+                .with_for_update().limit(1).scalar() is not None)
+
     def get_all_API_list(self, session, pagination_helper=None, **filters):
         """Get a list of listeners for the API list call.
 
@@ -1652,6 +1669,12 @@ class AmphoraBuildSlotsRepository(BaseRepository):
 class SNIRepository(BaseRepository):
     model_class = models.SNI
 
+    def get_refs_for_update(self, session, listener_id):
+        # A relationship lazy load can use an earlier MariaDB snapshot.
+        refs = (session.query(self.model_class.tls_container_id)
+                .filter_by(listener_id=listener_id).with_for_update().all())
+        return [ref for (ref,) in refs]
+
     def update(self, session, listener_id=None, tls_container_id=None,
                **model_kwargs):
         """Updates an SNI entity in the database."""
@@ -1946,6 +1969,7 @@ class L7PolicyRepository(BaseRepository):
             .filter(
                 listener.load_balancer_id == load_balancer_id,
                 listener.protocol == consts.PROTOCOL_TCP,
+                listener.tcp_tls_termination.is_(False),
                 listener.enabled.is_(True),
                 listener.provisioning_status.notin_(inactive_statuses),
                 policy.enabled.is_(True),
@@ -1965,7 +1989,7 @@ class L7PolicyRepository(BaseRepository):
 
     def has_enabled_l7rule(self, session, rule_type, *, compare_type=None,
                            policy_id=None, load_balancer_id=None,
-                           **policy_filters):
+                           tcp_tls_termination=None, **policy_filters):
         """Find an active child under the parent's provisioning lock.
 
         A policy or listener being reopened may itself be disabled. A load
@@ -1986,9 +2010,14 @@ class L7PolicyRepository(BaseRepository):
                          rule.provisioning_status.notin_(inactive_statuses)))
         if compare_type is not None:
             query = query.filter(rule.compare_type == compare_type)
+        if tcp_tls_termination is not None or load_balancer_id is not None:
+            query = query.join(policy.listener)
+        if tcp_tls_termination is not None:
+            query = query.filter(models.Listener.tcp_tls_termination.is_(
+                tcp_tls_termination))
         if load_balancer_id is not None:
             listener = models.Listener
-            query = query.join(policy.listener).filter(
+            query = query.filter(
                 listener.load_balancer_id == load_balancer_id,
                 listener.enabled.is_(True),
                 listener.provisioning_status.notin_(inactive_statuses))
@@ -1999,11 +2028,14 @@ class L7PolicyRepository(BaseRepository):
             session, consts.L7RULE_TYPE_TLS_SNI,
             compare_type=consts.L7RULE_COMPARE_TYPE_ENDS_WITH, **filters)
 
-    def get_tcp_policy_using_pool(self, session, pool_id):
+    def get_tcp_policy_using_pool(self, session, pool_id, *,
+                                  tcp_tls_termination=False):
         model = self.model_class
         return (session.query(model.id)
                 .join(model.listener)
                 .filter(models.Listener.protocol == consts.PROTOCOL_TCP)
+                .filter(models.Listener.tcp_tls_termination.is_(
+                    tcp_tls_termination))
                 .filter(model.redirect_pool_id == pool_id)
                 .filter(model.action ==
                         consts.L7POLICY_ACTION_REDIRECT_TO_POOL)
