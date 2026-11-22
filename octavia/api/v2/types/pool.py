@@ -92,6 +92,7 @@ class PoolResponse(BasePoolType):
     tls_enabled = wtypes.wsattr(bool)
     backend_h2c = wtypes.wsattr(bool)
     backend_tls_hostname = wtypes.wsattr(wtypes.StringType(max_length=253))
+    backend_tls_require_h2 = wtypes.wsattr(bool)
     tls_ciphers = wtypes.wsattr(wtypes.StringType())
     tls_versions = wtypes.wsattr(wtypes.ArrayType(wtypes.StringType()))
     alpn_protocols = wtypes.wsattr(wtypes.ArrayType(types.AlpnProtocolType()))
@@ -187,6 +188,7 @@ class PoolPOST(BasePoolType):
     tls_enabled = wtypes.wsattr(bool, default=False)
     backend_h2c = wtypes.wsattr(bool, default=False)
     backend_tls_hostname = wtypes.wsattr(wtypes.StringType(max_length=253))
+    backend_tls_require_h2 = wtypes.wsattr(bool, default=False)
     tls_ciphers = wtypes.wsattr(wtypes.StringType(max_length=2048))
     tls_versions = wtypes.wsattr(wtypes.ArrayType(wtypes.StringType(
         max_length=32)))
@@ -212,6 +214,7 @@ class PoolPUT(BasePoolType):
     tls_enabled = wtypes.wsattr(bool)
     backend_h2c = wtypes.wsattr(bool)
     backend_tls_hostname = wtypes.wsattr(wtypes.StringType(max_length=253))
+    backend_tls_require_h2 = wtypes.wsattr(bool)
     tls_ciphers = wtypes.wsattr(wtypes.StringType(max_length=2048))
     tls_versions = wtypes.wsattr(wtypes.ArrayType(wtypes.StringType(
         max_length=32)))
@@ -242,6 +245,7 @@ class PoolSingleCreate(BasePoolType):
     tls_enabled = wtypes.wsattr(bool, default=False)
     backend_h2c = wtypes.wsattr(bool)
     backend_tls_hostname = wtypes.wsattr(wtypes.StringType(max_length=253))
+    backend_tls_require_h2 = wtypes.wsattr(bool)
     tls_ciphers = wtypes.wsattr(wtypes.StringType(max_length=2048))
     tls_versions = wtypes.wsattr(wtypes.ArrayType(wtypes.StringType(
         max_length=32)))

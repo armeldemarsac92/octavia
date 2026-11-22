@@ -40,6 +40,8 @@ REQUEST_URL_REWRITE_PAYLOAD_AVAILABLE = hasattr(
     driver_dm.L7Policy(), 'request_url_rewrite')
 REQUEST_CORS_PAYLOAD_AVAILABLE = hasattr(driver_dm.L7Policy(), 'request_cors')
 WEIGHTED_TARGET_PAYLOAD_AVAILABLE = hasattr(driver_dm.L7Policy(), 'targets')
+BACKEND_TLS_H2_ALPN_PAYLOAD_AVAILABLE = hasattr(
+    driver_dm.Pool(), 'backend_tls_require_h2')
 
 HTTP_L7RULE_CAPABILITIES = {
     constants.L7RULE_TYPE_HTTP_HEADER_EXACT:
@@ -125,6 +127,11 @@ def gateway_capabilities(driver):
             getattr(driver, 'supports_backend_tls_hostname', False) is True):
         capabilities.append(
             constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME)
+    h2_alpn_providers = api_settings.enabled_backend_tls_h2_alpn_providers
+    if (BACKEND_TLS_H2_ALPN_PAYLOAD_AVAILABLE and
+            driver.name in h2_alpn_providers and
+            getattr(driver, 'supports_backend_tls_h2_alpn', False) is True):
+        capabilities.append(constants.GATEWAY_CAPABILITY_BACKEND_TLS_H2_ALPN)
     if (api_settings.allow_tls_terminated_listeners and driver.name in
             api_settings.enabled_tcp_tls_termination_providers and
             getattr(driver, 'supports_tcp_tls_termination', False) is True):
@@ -769,9 +776,16 @@ def db_pool_to_provider_pool(db_pool, for_delete=False):
     return driver_dm.Pool.from_dict(new_pool_dict)
 
 
-def pool_dict_to_provider_dict(pool_dict, for_delete=False):
+def pool_dict_to_provider_dict(pool_dict, for_delete=False, for_update=False):
     new_pool_dict = _base_to_provider_dict(pool_dict, include_project_id=True)
     new_pool_dict['pool_id'] = new_pool_dict.pop('id')
+    # A legacy DTO can carry the old pool for updates and deletes. The
+    # persisted requirement still controls rendering and reactivation.
+    supports_h2 = BACKEND_TLS_H2_ALPN_PAYLOAD_AVAILABLE
+    require_h2 = new_pool_dict.get('backend_tls_require_h2')
+    if ((for_delete and not supports_h2) or
+            (require_h2 is False and (not for_update or not supports_h2))):
+        new_pool_dict.pop('backend_tls_require_h2', None)
 
     # Pull the certs out of the certificate manager to pass to the provider
     if 'tls_certificate_id' in new_pool_dict:

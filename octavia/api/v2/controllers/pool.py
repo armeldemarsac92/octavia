@@ -72,6 +72,18 @@ def _validate_backend_tls_hostname(driver, protocol, hostname, tls_enabled,
                 'for this provider.'))
 
 
+def _validate_backend_tls_require_h2(driver, hostname, *, enrolling):
+    if hostname is None:
+        raise exceptions.ValidationException(detail=_(
+            'backend_tls_require_h2 requires backend_tls_hostname.'))
+    if (enrolling and constants.GATEWAY_CAPABILITY_BACKEND_TLS_H2_ALPN
+            not in driver_utils.gateway_capabilities(driver)):
+        raise exceptions.ProviderUnsupportedOptionError(
+            prov=driver.name, user_msg=_(
+                'Required backend TLS HTTP/2 ALPN is unavailable '
+                'for this provider.'))
+
+
 class PoolsController(base.BaseController):
     RBAC_TYPE = constants.RBAC_POOL
 
@@ -155,8 +167,12 @@ class PoolsController(base.BaseController):
         if pool_dict.get('backend_h2c', False) is None:
             raise exceptions.ValidationException(
                 detail=_('backend_h2c must be true or false.'))
+        require_h2 = pool_dict.get('backend_tls_require_h2', False)
+        if require_h2 is None:
+            raise exceptions.ValidationException(
+                detail=_('backend_tls_require_h2 must be true or false.'))
         hostname = pool_dict.get('backend_tls_hostname')
-        if pool_dict.get('backend_h2c') or hostname is not None:
+        if pool_dict.get('backend_h2c') or hostname is not None or require_h2:
             if driver is None:
                 # Fully populated load balancer creation uses this path too.
                 provider = self._get_db_lb(
@@ -170,6 +186,8 @@ class PoolsController(base.BaseController):
                 driver, pool_dict['protocol'], hostname,
                 pool_dict['tls_enabled'],
                 pool_dict.get('ca_tls_certificate_id'), enrolling=True)
+        if require_h2:
+            _validate_backend_tls_require_h2(driver, hostname, enrolling=True)
 
         # Make sure we have a client CA if they specify a CRL
         if (pool_dict.get('crl_container_id') and
@@ -487,6 +505,22 @@ class PoolsController(base.BaseController):
         hostname = pool.backend_tls_hostname
         if hostname is wtypes.Unset:
             hostname = current.backend_tls_hostname
+        require_h2 = pool.backend_tls_require_h2
+        if require_h2 is None:
+            raise exceptions.ValidationException(
+                detail=_('backend_tls_require_h2 must be true or false.'))
+        if require_h2 is wtypes.Unset:
+            require_h2 = current.backend_tls_require_h2
+        enrolling_h2 = require_h2 and not current.backend_tls_require_h2
+        if not require_h2 and current.backend_tls_require_h2 and (
+                current.enabled or reopening):
+            raise exceptions.ValidationException(detail=_(
+                'Disable the pool before removing required backend TLS '
+                'HTTP/2 ALPN.'))
+        if require_h2:
+            _validate_backend_tls_require_h2(
+                driver, hostname, enrolling=(
+                    pool.backend_tls_require_h2 is True or reopening))
         if hostname is None:
             if current.backend_tls_hostname and (current.enabled or reopening):
                 raise exceptions.ValidationException(detail=_(
@@ -497,9 +531,10 @@ class PoolsController(base.BaseController):
         ca_ref = (current.ca_tls_certificate_id
                   if pool.ca_tls_container_ref is wtypes.Unset
                   else pool.ca_tls_container_ref)
+        enrolling_hostname = hostname != current.backend_tls_hostname
         _validate_backend_tls_hostname(
             driver, current.protocol, hostname, tls, ca_ref,
-            enrolling=hostname != current.backend_tls_hostname or reopening)
+            enrolling=enrolling_hostname or reopening or enrolling_h2)
 
     def _validate_request_transform_exposure(self, session, driver, pool_id,
                                              current, changes, lb_id):
@@ -585,12 +620,13 @@ class PoolsController(base.BaseController):
             self._validate_tls_refs([pool.tls_container_ref])
 
         # Validate the client CA cert and optional client CRL
-        # Recheck unchanged CA material on activation. A protected pool
-        # can still be disabled if its credentials have become unavailable.
+        # Recheck unchanged CA material on activation or HTTP/2 enrollment.
         if ca_ref and (not current.backend_tls_hostname or
                        pool.backend_tls_hostname not in (wtypes.Unset, None) or
                        pool.ca_tls_container_ref is not wtypes.Unset or
                        pool.crl_container_ref is not wtypes.Unset or
+                       (pool.backend_tls_require_h2 is True and
+                        not current.backend_tls_require_h2) or
                        (pool.admin_state_up is True and not current.enabled)):
             self._validate_client_ca_and_crl_refs(ca_ref, crl_ref)
 
@@ -661,8 +697,8 @@ class PoolsController(base.BaseController):
             pool_dict = pool.to_dict(render_unsets=False)
             pool_dict['id'] = id
             pool_dict['project_id'] = project_id
-            provider_pool_dict = (
-                driver_utils.pool_dict_to_provider_dict(pool_dict))
+            provider_pool_dict = driver_utils.pool_dict_to_provider_dict(
+                pool_dict, for_update=True)
 
             # Also prepare the baseline object data
             old_provider_pool = driver_utils.db_pool_to_provider_pool(
