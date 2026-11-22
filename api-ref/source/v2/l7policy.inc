@@ -59,6 +59,7 @@ Response Parameters
    - redirect_http_code: l7policy-redirect-http-code
    - redirect_pool_id: l7policy-redirect-pool_id
    - redirect_prefix: l7policy-redirect-prefix
+   - redirect_request: l7policy-redirect-request
    - redirect_url: l7policy-redirect-url
    - rules: l7policy-rule-ids
    - tags: tags
@@ -112,6 +113,10 @@ L7 policies with ``action`` of ``REDIRECT_TO_URL`` will return the default HTTP
 ``redirect_http_code`` to configure the needed HTTP response code, such as,
 301, 302, 303, 307 and 308.
 
+The regional ``http_request_redirect_v1`` provider capability enables
+``REDIRECT_REQUEST`` and its structured ``redirect_request`` field.
+See the provider Gateway API capabilities for the fields and defaults.
+
 L7 policies with ``action`` of ``REJECT`` will return a ``Forbidden (403)``
 response code to the requester.
 
@@ -151,6 +156,7 @@ Request
    - redirect_http_code: l7policy-redirect-http-code-optional
    - redirect_pool_id: l7policy-redirect-pool_id-optional
    - redirect_prefix: l7policy-redirect-prefix-optional
+   - redirect_request: l7policy-redirect-request
    - redirect_url: l7policy-redirect-url-optional
    - tags: tags-optional
 
@@ -185,6 +191,7 @@ Response Parameters
    - redirect_http_code: l7policy-redirect-http-code
    - redirect_pool_id: l7policy-redirect-pool_id
    - redirect_prefix: l7policy-redirect-prefix
+   - redirect_request: l7policy-redirect-request
    - redirect_url: l7policy-redirect-url
    - rules: l7policy-rule-ids
    - tags: tags
@@ -253,6 +260,7 @@ Response Parameters
    - redirect_http_code: l7policy-redirect-http-code
    - redirect_pool_id: l7policy-redirect-pool_id
    - redirect_prefix: l7policy-redirect-prefix
+   - redirect_request: l7policy-redirect-request
    - redirect_url: l7policy-redirect-url
    - rules: l7policy-rule-ids
    - tags: tags
@@ -312,6 +320,7 @@ Request
    - redirect_http_code: l7policy-redirect-http-code-optional
    - redirect_pool_id: l7policy-redirect-pool_id-optional
    - redirect_prefix: l7policy-redirect-prefix-optional
+   - redirect_request: l7policy-redirect-request
    - redirect_url: l7policy-redirect-url-optional
    - tags: tags-optional
 
@@ -346,6 +355,7 @@ Response Parameters
    - redirect_http_code: l7policy-redirect-http-code
    - redirect_pool_id: l7policy-redirect-pool_id
    - redirect_prefix: l7policy-redirect-prefix
+   - redirect_request: l7policy-redirect-request
    - redirect_url: l7policy-redirect-url
    - rules: l7policy-rule-ids
    - tags: tags

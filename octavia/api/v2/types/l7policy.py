@@ -27,7 +27,7 @@ class BaseL7PolicyType(types.BaseType):
     def to_dict(self, render_unsets=False):
         data = super().to_dict(render_unsets=render_unsets)
         for field in ('request_header_operations',
-                      'response_header_operations'):
+                      'response_header_operations', 'redirect_request'):
             if getattr(self, field) is wtypes.Unset:
                 data.pop(field, None)
         return data
@@ -47,6 +47,7 @@ class L7PolicyResponse(BaseL7PolicyType):
     redirect_pool_id = wtypes.wsattr(wtypes.UuidType())
     redirect_url = wtypes.wsattr(wtypes.StringType())
     fixed_response = wtypes.wsattr(types.FixedHTTPResponse)
+    redirect_request = wtypes.wsattr(types.HTTPRequestRedirect())
     targets = wtypes.wsattr(types.WeightedL7PolicyTargets())
     request_header_operations = wtypes.wsattr(types.RequestHeaderOperations())
     response_header_operations = wtypes.wsattr(
@@ -71,7 +72,7 @@ class L7PolicyResponse(BaseL7PolicyType):
         if db_obj.https_listener_hostname is None:
             result.https_listener_hostname = wtypes.Unset
         for field in ('request_header_operations',
-                      'response_header_operations'):
+                      'response_header_operations', 'redirect_request'):
             if getattr(db_obj, field) is None:
                 setattr(result, field, wtypes.Unset)
         if not db_obj.targets:
@@ -121,6 +122,7 @@ class L7PolicyPOST(BaseL7PolicyType):
     redirect_pool_id = wtypes.wsattr(wtypes.UuidType())
     redirect_url = wtypes.wsattr(types.URLType())
     fixed_response = wtypes.wsattr(types.FixedHTTPResponse)
+    redirect_request = wtypes.wsattr(types.HTTPRequestRedirect())
     targets = wtypes.wsattr(types.WeightedL7PolicyTargets())
     request_header_operations = wtypes.wsattr(types.RequestHeaderOperations())
     response_header_operations = wtypes.wsattr(
@@ -152,6 +154,7 @@ class L7PolicyPUT(BaseL7PolicyType):
     redirect_pool_id = wtypes.wsattr(wtypes.UuidType())
     redirect_url = wtypes.wsattr(types.URLType())
     fixed_response = wtypes.wsattr(types.FixedHTTPResponse)
+    redirect_request = wtypes.wsattr(types.HTTPRequestRedirect())
     targets = wtypes.wsattr(types.WeightedL7PolicyTargets())
     request_header_operations = wtypes.wsattr(types.RequestHeaderOperations())
     response_header_operations = wtypes.wsattr(
@@ -181,6 +184,7 @@ class L7PolicySingleCreate(BaseL7PolicyType):
     redirect_pool = wtypes.wsattr(pool_types.PoolSingleCreate)
     redirect_url = wtypes.wsattr(types.URLType())
     fixed_response = wtypes.wsattr(types.FixedHTTPResponse)
+    redirect_request = wtypes.wsattr(types.HTTPRequestRedirect())
     targets = wtypes.wsattr(types.WeightedL7PolicyTargets())
     request_header_operations = wtypes.wsattr(types.RequestHeaderOperations())
     response_header_operations = wtypes.wsattr(

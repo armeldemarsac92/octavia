@@ -44,7 +44,8 @@ class PaginationHelper:
 
     _non_query_fields = {
         models.L7Policy: {'fixed_response', 'request_header_operations',
-                          'response_header_operations', 'targets'},
+                          'response_header_operations', 'redirect_request',
+                          'targets'},
         models.Listener: {'default_http_response', 'https_virtual_hosts'},
     }
 

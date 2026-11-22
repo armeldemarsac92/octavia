@@ -935,14 +935,16 @@ l7policies-status-object-list:
 l7policy-action:
   description: |
     The L7 policy action.  One of ``REDIRECT_PREFIX``, ``REDIRECT_TO_POOL``,
-    ``REDIRECT_TO_URL``, or ``REJECT``.
+    ``REDIRECT_TO_URL``, or ``REJECT``. The regional capability
+    ``http_request_redirect_v1`` adds ``REDIRECT_REQUEST``.
   in: body
   required: true
   type: string
 l7policy-action-optional:
   description: |
     The L7 policy action.  One of ``REDIRECT_PREFIX``, ``REDIRECT_TO_POOL``,
-    ``REDIRECT_TO_URL``, or ``REJECT``.
+    ``REDIRECT_TO_URL``, or ``REJECT``. The regional capability
+    ``http_request_redirect_v1`` adds ``REDIRECT_REQUEST``.
   in: body
   required: false
   type: string
@@ -974,8 +976,8 @@ l7policy-redirect-http-code:
   description: |
     Requests matching this policy will be redirected to the specified URL or
     Prefix URL with the HTTP response code. Valid if ``action`` is
-    ``REDIRECT_TO_URL`` or ``REDIRECT_PREFIX``. Valid options are: 301, 302,
-    303, 307, or 308. Default is 302.
+    ``REDIRECT_TO_URL``, ``REDIRECT_PREFIX`` or ``REDIRECT_REQUEST``.
+    Valid options are 301, 302, 303, 307 and 308. Default is 302.
   in: body
   min_version: 2.9
   required: true
@@ -984,8 +986,8 @@ l7policy-redirect-http-code-optional:
   description: |
     Requests matching this policy will be redirected to the specified URL or
     Prefix URL with the HTTP response code. Valid if ``action`` is
-    ``REDIRECT_TO_URL`` or ``REDIRECT_PREFIX``. Valid options are: 301, 302,
-    303, 307, or 308. Default is 302.
+    ``REDIRECT_TO_URL``, ``REDIRECT_PREFIX`` or ``REDIRECT_REQUEST``.
+    Valid options are 301, 302, 303, 307 and 308. Default is 302.
   in: body
   min_version: 2.9
   required: false
@@ -1020,6 +1022,15 @@ l7policy-redirect-prefix-optional:
   in: body
   required: false
   type: string
+l7policy-redirect-request:
+  description: |
+    Structured redirect settings for ``REDIRECT_REQUEST``. Contains required
+    ``scheme`` and ``port``, optional ``hostname``, and at most one path
+    modifier, ``replace_full_path`` or ``replace_prefix``. Other actions omit
+    this field.
+  in: body
+  required: false
+  type: object
 l7policy-redirect-url:
   description: |
     Requests matching this policy will be redirected to this URL.

@@ -293,7 +293,10 @@ class L7PolicyController(base.BaseController):
             # Load the driver early as it also provides validation
             driver = driver_factory.get_driver(provider)
             action = l7policy_dict.get('action', db_l7policy.action)
-            routing_changed = {'action', 'fixed_response', 'targets'}
+            routing_changed = {'action', 'fixed_response', 'targets',
+                               'redirect_request'}
+            if action == constants.L7POLICY_ACTION_REDIRECT_REQUEST:
+                routing_changed.add('redirect_http_code')
             tcp_policy = driver_utils.uses_tls_sni_policy_path(
                 driver, listener.protocol, listener.tcp_tls_termination)
             pool_id = l7policy_dict.get('redirect_pool_id')
@@ -365,9 +368,11 @@ class L7PolicyController(base.BaseController):
 
             update_values = dict(
                 l7policy_dict, provisioning_status=constants.PENDING_UPDATE)
-            is_weighted = constants.L7POLICY_ACTION_WEIGHTED_TARGETS in (
-                action, db_l7policy.action)
-            if is_weighted:
+            persist_before_dispatch = (any(
+                policy_action in (constants.L7POLICY_ACTION_WEIGHTED_TARGETS,
+                                  constants.L7POLICY_ACTION_REDIRECT_REQUEST)
+                for policy_action in (action, db_l7policy.action)))
+            if persist_before_dispatch:
                 # Validate target pool references before sending them to a
                 # provider. The write rolls back if the provider rejects it.
                 self.repositories.l7policy.update(
@@ -381,7 +386,7 @@ class L7PolicyController(base.BaseController):
                 old_provider_l7policy,
                 driver_dm.L7Policy.from_dict(provider_l7policy_dict))
 
-            if not is_weighted:
+            if not persist_before_dispatch:
                 self.repositories.l7policy.update(
                     lock_session, id, **update_values)
 

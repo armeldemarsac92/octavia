@@ -541,6 +541,67 @@ def validate_header_protocol(protocol):
                      'TERMINATED_HTTPS listener.'))
 
 
+HTTP_REDIRECT_PATH_RE = re.compile(
+    r"/(?:[a-zA-Z0-9/._~!$&'()*+,;=:@-]|%[a-fA-F0-9]{2})*")
+
+
+def http_request_redirect(redirect):
+    if not isinstance(redirect, dict) or redirect.keys() - {
+            'scheme', 'port', 'hostname', 'replace_full_path',
+            'replace_prefix'}:
+        raise exceptions.InvalidL7PolicyArgs(
+            msg=_('Invalid redirect_request fields.'))
+    if redirect.get('scheme') not in ('http', 'https'):
+        raise exceptions.InvalidL7PolicyArgs(
+            msg=_('redirect_request.scheme must be http or https.'))
+    port = redirect.get('port')
+    if type(port) is not int or not 1 <= port <= constants.MAX_PORT_NUMBER:
+        raise exceptions.InvalidL7PolicyArgs(
+            msg=_('redirect_request.port must be an integer from 1 to 65535.'))
+    if 'hostname' in redirect:
+        hostname = redirect['hostname']
+        if not isinstance(hostname, str) or not is_exact_sni_name(hostname):
+            raise exceptions.InvalidL7PolicyArgs(
+                msg=_('redirect_request.hostname must be a DNS name.'))
+    if 'replace_prefix' in redirect:
+        if 'replace_full_path' in redirect:
+            raise exceptions.InvalidL7PolicyArgs(
+                msg=_('Specify only one redirect path replacement.'))
+        prefix = redirect['replace_prefix']
+        if not isinstance(prefix, dict) or prefix.keys() != {
+                'match', 'replacement'}:
+            raise exceptions.InvalidL7PolicyArgs(
+                msg=_('replace_prefix requires match and replacement.'))
+        match = prefix['match']
+        if (not isinstance(match, str) or len(match) > 1024 or
+                not HTTP_REDIRECT_PATH_RE.fullmatch(match) or
+                any(part in match for part in ('//', '/./', '/../')) or
+                '%2f' in match.lower() or match.endswith(('/.', '/..'))):
+            raise exceptions.InvalidL7PolicyArgs(
+                msg=_('replace_prefix.match must be a valid absolute '
+                      'PathPrefix of at most 1024 characters.'))
+        _validate_http_redirect_replacement(prefix['replacement'])
+    if 'replace_full_path' in redirect:
+        _validate_http_redirect_replacement(redirect['replace_full_path'])
+    return redirect
+
+
+def _validate_http_redirect_replacement(path):
+    if (not isinstance(path, str) or len(path) > 1024 or
+            any(0xD800 <= ord(char) <= 0xDFFF for char in path)):
+        raise exceptions.InvalidL7PolicyArgs(
+            msg=_('Redirect replacements must be UTF-8 text of at most '
+                  '1024 characters.'))
+
+
+def validate_http_request_redirect_protocol(protocol):
+    if protocol not in (constants.PROTOCOL_HTTP,
+                        constants.PROTOCOL_TERMINATED_HTTPS):
+        raise exceptions.ValidationException(
+            detail=_('HTTP request redirects require an HTTP or '
+                     'TERMINATED_HTTPS listener.'))
+
+
 def sanitize_l7policy_api_args(l7policy, create=False, old_policy=None):
     """Validate and make consistent L7Policy API arguments.
 
@@ -554,6 +615,7 @@ def sanitize_l7policy_api_args(l7policy, create=False, old_policy=None):
     """
     fixed_action = constants.L7POLICY_ACTION_FIXED_RESPONSE
     weighted_action = constants.L7POLICY_ACTION_WEIGHTED_TARGETS
+    request_redirect_action = constants.L7POLICY_ACTION_REDIRECT_REQUEST
     old_action = old_policy.action if old_policy is not None else None
     action = l7policy.get('action')
     redirect_targets = (
@@ -562,8 +624,33 @@ def sanitize_l7policy_api_args(l7policy, create=False, old_policy=None):
                               for target in redirect_targets)
     # Legacy partial updates can select a redirect action by target alone.
     if ('action' not in l7policy and not has_redirect_target and
-            old_action in (fixed_action, weighted_action)):
+            old_action in (fixed_action, weighted_action,
+                           request_redirect_action)):
         action = old_action
+
+    if action == request_redirect_action:
+        if any(l7policy.get(target) is not None
+               for target in redirect_targets):
+            raise exceptions.InvalidL7PolicyArgs(
+                msg=_('REDIRECT_REQUEST cannot use legacy redirect targets.'))
+        if 'redirect_request' in l7policy or old_action != action:
+            l7policy['redirect_request'] = http_request_redirect(
+                l7policy.get('redirect_request'))
+        if old_action != action or 'redirect_http_code' in l7policy:
+            code = l7policy.get('redirect_http_code')
+            if code is None:
+                l7policy['redirect_http_code'] = 302
+            elif (type(code) is not int or code not in
+                  constants.SUPPORTED_L7POLICY_REDIRECT_HTTP_CODES):
+                raise exceptions.InvalidL7PolicyArgs(
+                    msg=_('Invalid redirect_http_code.'))
+    elif l7policy.get('redirect_request') is not None:
+        raise exceptions.InvalidL7PolicyArgs(
+            msg=_('redirect_request requires the REDIRECT_REQUEST action.'))
+    elif old_action == request_redirect_action:
+        l7policy['redirect_request'] = None
+    else:
+        l7policy.pop('redirect_request', None)
 
     if action == weighted_action:
         if any(l7policy.get(field) is not None for field in (
@@ -623,6 +710,10 @@ def sanitize_l7policy_api_args(l7policy, create=False, old_policy=None):
             if not l7policy.get('redirect_prefix'):
                 raise exceptions.InvalidL7PolicyArgs(
                     msg='redirect_prefix must not be None')
+        elif action == request_redirect_action:
+            l7policy.update(redirect_pool_id=None, redirect_url=None,
+                            redirect_prefix=None)
+            l7policy.pop('redirect_pool', None)
         else:
             raise exceptions.InvalidL7PolicyAction(
                 action=l7policy['action'])
