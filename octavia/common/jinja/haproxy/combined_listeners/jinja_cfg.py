@@ -204,9 +204,10 @@ class JinjaTemplater:
                         version=f'HAProxy {haproxy_version}; weighted L7 '
                                 'policies require 2.2')
                 if (listener['enabled'] and
-                        'request_header_operations_by_pool' in listener):
+                        ('request_header_operations_by_pool' in listener or
+                         'response_header_operations_by_backend' in listener)):
                     raise driver_except.AmpVersionUnsupported(
-                        version=f'HAProxy {haproxy_version}; request header '
+                        version=f'HAProxy {haproxy_version}; header '
                                 'operations require 2.2')
         if loadbalancer['enabled']:
             for listener in loadbalancer['listeners']:
@@ -550,25 +551,45 @@ class JinjaTemplater:
                     ret_value['timeout_tcp_inspect'] = (
                         constants.DEFAULT_TLS_SNI_INSPECT_TIMEOUT)
         ret_value['l7policies'] = l7policies
-        operations_by_pool = {}
+        requests_by_pool = {}
+        responses_by_backend = {}
         for policy in l7policies:
-            operations = policy.get('request_header_operations')
-            if not operations:
+            request_ops = policy.get('request_header_operations')
+            response_ops = policy.get('response_header_operations')
+            if not (request_ops or response_ops):
                 continue
+            pool_ids = set()
+            fixed_responses = set()
             if 'weighted_targets' in policy:
-                pool_ids = {target['pool_id']
-                            for target in policy['weighted_targets']
-                            if 'pool_id' in target}
+                for target in policy['weighted_targets']:
+                    if 'pool_id' in target:
+                        pool_ids.add(target['pool_id'])
+                    else:
+                        code = target["status_code"]
+                        fixed_responses.add(f'weighted-{code}')
+            elif 'fixed_http_status_code' in policy:
+                fixed_responses.add(policy['id'])
             elif (policy['redirect_pool'] and
                   policy['redirect_pool']['id'] in available_pool_ids):
-                pool_ids = {policy['redirect_pool']['id']}
-            else:
-                pool_ids = set()
+                pool_ids.add(policy['redirect_pool']['id'])
             for pool_id in pool_ids:
-                operations_by_pool.setdefault(pool_id, []).append(
-                    (policy['id'], operations))
-        if operations_by_pool:
-            ret_value['request_header_operations_by_pool'] = operations_by_pool
+                if request_ops:
+                    requests_by_pool.setdefault(pool_id, []).append(
+                        (policy['id'], request_ops))
+                if response_ops:
+                    responses_by_backend.setdefault(('pool', pool_id),
+                                                    []).append(
+                        (policy['id'], response_ops))
+            if response_ops:
+                for response_id in fixed_responses:
+                    responses_by_backend.setdefault(('fixed', response_id),
+                                                    []).append(
+                        (policy['id'], response_ops))
+        if requests_by_pool:
+            ret_value['request_header_operations_by_pool'] = requests_by_pool
+        if responses_by_backend:
+            ret_value['response_header_operations_by_backend'] = (
+                responses_by_backend)
 
         weighted_policies = [policy for policy in l7policies
                              if 'weighted_targets' in policy]
@@ -744,6 +765,7 @@ class JinjaTemplater:
                 policy.provisioning_status == constants.DELETED or
                 policy.action != constants.L7POLICY_ACTION_REDIRECT_TO_POOL or
                 policy.request_header_operations or
+                policy.response_header_operations or
                 not pool or pool.id not in available_pool_ids or
                 pool.protocol != constants.PROTOCOL_TCP or pool.tls_enabled or
                 pool.provisioning_status == constants.DELETED):
@@ -817,14 +839,16 @@ class JinjaTemplater:
                     l7policy.targets, available_pool_ids)
                 ret_value['weighted_targets'] = targets
                 ret_value['total_weight'] = total
-            if l7policy.request_header_operations:
-                ret_value['request_header_operations'] = (
-                    self._transform_request_header_operations(
-                        l7policy.request_header_operations))
+            for field in ('request_header_operations',
+                          'response_header_operations'):
+                operations = getattr(l7policy, field)
+                if operations:
+                    ret_value[field] = self._transform_header_operations(
+                        operations, field)
         return ret_value
 
     @staticmethod
-    def _transform_request_header_operations(operations):
+    def _transform_header_operations(operations, field):
         actions = {'SET': 'set-header', 'ADD': 'add-header',
                    'REMOVE': 'del-header'}
 
@@ -834,7 +858,7 @@ class JinjaTemplater:
             return f'"{value}"'
 
         transformed = []
-        for operation in validate.request_header_operations(operations):
+        for operation in validate.header_operations(operations, field):
             action = actions[operation['operation']]
             name = quote(operation['name'])
             if 'value' in operation:

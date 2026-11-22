@@ -105,6 +105,81 @@ class TestL7Policy(base.BaseAPITest):
         self.set_lb_status(self.lb_id)
         self.put(path, {'l7policy': {field: []}})
 
+    @mock.patch.object(noop_driver.NoopProviderDriver,
+                       'supports_response_header_operations', True)
+    def test_response_operations_require_opt_in_and_can_be_cleared(self):
+        field = 'response_header_operations'
+        operations = [{'operation': 'SET', 'name': 'x-color', 'value': 'blue'}]
+        self.create_l7policy(
+            self.listener_id, 'REDIRECT_TO_POOL',
+            redirect_pool_id=self.pool_id, status=501, **{field: operations})
+        self.conf.config(group='api_settings',
+                         enabled_response_header_operation_providers=[
+                             'noop_driver'])
+        policy = self.create_l7policy(
+            self.listener_id, 'REDIRECT_TO_POOL',
+            redirect_pool_id=self.pool_id, **{field: operations})['l7policy']
+        path = self.L7POLICY_PATH.format(l7policy_id=policy['id'])
+        self.assertEqual(operations, self.get(path).json['l7policy'][field])
+        self.set_lb_status(self.lb_id)
+        self.put(path, {'l7policy': {'name': 'retained'}})
+        self.assertEqual(operations, self.get(path).json['l7policy'][field])
+        self.set_lb_status(self.lb_id)
+        self.put(path, {'l7policy': {field: [
+            {'operation': 'REMOVE', 'name': 'Content-Length'}]}}, status=400)
+        self.conf.config(group='api_settings',
+                         enabled_response_header_operation_providers=[])
+        self.create_l7rule(policy['id'], 'PATH', 'EQUAL_TO', '/', status=501)
+        self.put(path, {'l7policy': {field: []}})
+        self.assertEqual([], self.get(path).json['l7policy'][field])
+
+    @mock.patch.object(noop_driver.NoopProviderDriver,
+                       'supports_request_header_operations', True)
+    @mock.patch.object(noop_driver.NoopProviderDriver,
+                       'supports_response_header_operations', True)
+    def test_loadbalancer_reopen_checks_active_header_operations(self):
+        group = 'api_settings'
+        request_flag = 'enabled_request_header_operation_providers'
+        response_flag = 'enabled_response_header_operation_providers'
+        self.conf.config(group=group, **{
+            request_flag: ['noop_driver'], response_flag: ['noop_driver']})
+        policy = self.create_l7policy(
+            self.listener_id, 'REDIRECT_TO_POOL',
+            redirect_pool_id=self.pool_id,
+            request_header_operations=[
+                {'operation': 'REMOVE', 'name': 'x-request'}],
+            response_header_operations=[
+                {'operation': 'SET', 'name': 'x-response', 'value': 'blue'}]
+        )['l7policy']
+        self.set_lb_status(self.lb_id)
+        self.create_l7rule(policy['id'], 'PATH', 'EQUAL_TO', '/')
+        self.set_lb_status(self.lb_id)
+        lb_path = self.LB_PATH.format(lb_id=self.lb_id)
+        listener_path = self.LISTENER_PATH.format(listener_id=self.listener_id)
+        policy_path = self.L7POLICY_PATH.format(l7policy_id=policy['id'])
+
+        def set_admin_state(path, resource, enabled, status=200):
+            self.put(path, {resource: {'admin_state_up': enabled}},
+                     status=status)
+            if status == 200:
+                self.set_lb_status(self.lb_id)
+
+        set_admin_state(lb_path, 'loadbalancer', False)
+        for missing in (response_flag, request_flag):
+            self.conf.config(group=group, **{missing: []})
+            set_admin_state(lb_path, 'loadbalancer', True, status=501)
+            self.assertFalse(
+                self.get(lb_path).json['loadbalancer']['admin_state_up'])
+            self.conf.config(group=group, **{missing: ['noop_driver']})
+
+        self.conf.config(group=group, **{request_flag: [], response_flag: []})
+        set_admin_state(listener_path, 'listener', False)
+        set_admin_state(lb_path, 'loadbalancer', True)
+        set_admin_state(lb_path, 'loadbalancer', False)
+        set_admin_state(policy_path, 'l7policy', False)
+        set_admin_state(listener_path, 'listener', True)
+        set_admin_state(lb_path, 'loadbalancer', True)
+
     def test_request_header_operations_require_driver_support(self):
         self.conf.config(
             group='api_settings',
@@ -117,11 +192,15 @@ class TestL7Policy(base.BaseAPITest):
 
     @mock.patch.object(noop_driver.NoopProviderDriver,
                        'supports_request_header_operations', True)
-    def test_nested_policy_returns_request_header_operations(self):
+    @mock.patch.object(noop_driver.NoopProviderDriver,
+                       'supports_response_header_operations', True)
+    def test_nested_policy_returns_independent_header_operations(self):
         self.conf.config(
             group='api_settings', enabled_gateway_action_providers=[],
-            enabled_request_header_operation_providers=['noop_driver'])
+            enabled_request_header_operation_providers=['noop_driver'],
+            enabled_response_header_operation_providers=['noop_driver'])
         operations = [{'operation': 'REMOVE', 'name': 'X-Old'}]
+        response_ops = [{'operation': 'ADD', 'name': 'x-result', 'value': ''}]
         response = self.post(self.LBS_PATH, {'loadbalancer': {
             'project_id': self.project_id,
             'vip_subnet_id': uuidutils.generate_uuid(),
@@ -132,12 +211,14 @@ class TestL7Policy(base.BaseAPITest):
                     'redirect_pool': {'name': 'echo', 'protocol': 'HTTP',
                                       'lb_algorithm': 'ROUND_ROBIN'},
                     'request_header_operations': operations,
+                    'response_header_operations': response_ops,
                 }],
             }],
         }}).json['loadbalancer']
         policy = response['listeners'][0]['l7policies'][0]
         self.assertEqual([{'operation': 'REMOVE', 'name': 'x-old'}],
                          policy['request_header_operations'])
+        self.assertEqual(response_ops, policy['response_header_operations'])
 
     @mock.patch.object(noop_driver.NoopProviderDriver,
                        'supports_request_header_operations', True)

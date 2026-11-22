@@ -59,6 +59,13 @@ def gateway_capabilities(driver):
                     False) is True):
         capabilities.append(
             constants.GATEWAY_CAPABILITY_REQUEST_HEADER_OPERATIONS)
+    response_providers = (
+        api_settings.enabled_response_header_operation_providers)
+    if (driver.name in response_providers and
+            getattr(driver, 'supports_response_header_operations',
+                    False) is True):
+        capabilities.append(
+            constants.GATEWAY_CAPABILITY_RESPONSE_HEADER_OPERATIONS)
     if (driver.name in api_settings.enabled_http_header_exact_providers and
             getattr(driver, 'supports_http_header_exact', False) is True):
         capabilities.append(constants.GATEWAY_CAPABILITY_HTTP_HEADER_EXACT)
@@ -125,6 +132,15 @@ def require_request_header_operations(driver):
         raise exceptions.ProviderUnsupportedOptionError(
             prov=driver.name, user_msg=_(
                 'L7 policy request header operations are unavailable for '
+                'this provider.'))
+
+
+def require_response_header_operations(driver):
+    if (constants.GATEWAY_CAPABILITY_RESPONSE_HEADER_OPERATIONS not in
+            gateway_capabilities(driver)):
+        raise exceptions.ProviderUnsupportedOptionError(
+            prov=driver.name, user_msg=_(
+                'L7 policy response header operations are unavailable for '
                 'this provider.'))
 
 
@@ -210,7 +226,8 @@ def validate_l7rule_context(driver, rule_type, protocol, *,
 
 def require_gateway_policy_action(driver, action, protocol, *,
                                   request_header_operations=None,
-                                  tcp_tls_termination=False):
+                                  tcp_tls_termination=False,
+                                  response_header_operations=None):
     if action == constants.L7POLICY_ACTION_FIXED_RESPONSE:
         validate.validate_fixed_http_protocol(protocol)
         require_fixed_http_responses(driver)
@@ -225,9 +242,18 @@ def require_gateway_policy_action(driver, action, protocol, *,
         if action != constants.L7POLICY_ACTION_REDIRECT_TO_POOL:
             raise exceptions.ValidationException(detail=_(
                 'TCP listener policies require the REDIRECT_TO_POOL action.'))
-    if request_header_operations:
+    require_policy_header_operations(
+        driver, protocol, request_header_operations, response_header_operations)
+
+
+def require_policy_header_operations(driver, protocol, request_ops,
+                                     response_ops):
+    if request_ops:
         require_request_header_operations(driver)
-        validate.validate_request_header_protocol(protocol)
+    if response_ops:
+        require_response_header_operations(driver)
+    if request_ops or response_ops:
+        validate.validate_header_protocol(protocol)
 
 
 def call_provider(provider, driver_method, *args, **kwargs):
@@ -738,8 +764,9 @@ def db_l7policy_to_provider_l7policy(db_l7policy):
         del new_l7policy_dict['l7rules']
         new_l7rules = db_l7rules_to_provider_l7rules(db_l7policy.l7rules)
         new_l7policy_dict['rules'] = new_l7rules
-    if not new_l7policy_dict.get('request_header_operations'):
-        new_l7policy_dict.pop('request_header_operations', None)
+    for field in ('request_header_operations', 'response_header_operations'):
+        if not new_l7policy_dict.get(field):
+            new_l7policy_dict.pop(field, None)
     if new_l7policy_dict.get('fixed_response') is None:
         new_l7policy_dict.pop('fixed_response', None)
     return driver_dm.L7Policy.from_dict(new_l7policy_dict)
@@ -750,7 +777,7 @@ def l7policy_dict_to_provider_dict(l7policy_dict):
                                                include_project_id=True)
     new_l7policy_dict['l7policy_id'] = new_l7policy_dict.pop('id')
     for attribute in ('request_header_operations',
-                      'https_listener_hostname'):
+                      'response_header_operations', 'https_listener_hostname'):
         if new_l7policy_dict.get(attribute) is None:
             new_l7policy_dict.pop(attribute, None)
     # Remove the DB back references
