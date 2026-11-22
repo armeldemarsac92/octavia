@@ -1,0 +1,25 @@
+---
+features:
+  - |
+    Amphora can scope HTTPS policies to named virtual hosts on one
+    ``TERMINATED_HTTPS`` listener. Set ``https_virtual_hosts`` to distinct DNS
+    names, wildcard suffixes such as ``*.example.test``, or ``*`` for a
+    catch-all. Use one project-authorized default certificate, and configure
+    existing ALPN options if HTTP/2 is needed. Set ``https_listener_hostname``
+    on each L7 policy to one entry from the listener. Requests selecting
+    different virtual hosts by SNI and HTTP authority receive 421. Unmatched
+    authorities and matched virtual hosts without a matching policy receive
+    404. A scoped listener has no default pool and can explicitly set
+    ``default_http_response`` to status 404.
+upgrade:
+  - |
+    Enable this capability only for Amphora providers with HAProxy 3.0 or
+    newer and the updated Octavia API, workers, driver library and database
+    schema. Add their provider names to
+    ``[api_settings] enabled_https_listener_isolation_providers`` to expose
+    ``https_listener_isolation_v1`` at the provider's Gateway API capabilities
+    endpoint. Removing a provider from the setting keeps existing listeners
+    isolated and prevents enrollment and reactivation. Disable or delete
+    existing resources as needed. Remove policies that select a virtual host
+    before removing that host. To remove isolation entirely, replace the
+    listener.

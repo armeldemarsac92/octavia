@@ -72,6 +72,7 @@ class AmphoraProviderDriver(driver_base.ProviderDriver):
     supports_backend_tls_hostname = True
     supports_tls_sni_passthrough = True
     supports_tls_sni_suffix = True
+    supports_https_listener_isolation = True
 
     def __init__(self):
         super().__init__()

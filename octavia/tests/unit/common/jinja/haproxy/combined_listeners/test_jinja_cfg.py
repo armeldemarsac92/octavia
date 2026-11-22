@@ -1440,6 +1440,37 @@ class TestHaproxyCfg(base.TestCase):
         self.assertEqual(sample_configs_combined.sample_base_expected_config(
             frontend=fe, global_opts=g_opts), rendered_obj)
 
+    def test_render_https_listener_isolation_has_section_scoped_policies(self):
+        samples = sample_configs_combined
+        hostnames = ['*', '*.example.test', 'a.example.test',
+                     '*.deep.example.test']
+        policy = samples.sample_l7policy_tuple(
+            'example-only')._replace(https_listener_hostname='*.example.test')
+        listener = samples.sample_listener_tuple(
+            proto='TERMINATED_HTTPS', tls=True, include_pools=False)._replace(
+                default_pool=None, pools=[policy.redirect_pool],
+                https_virtual_hosts=hostnames, l7policies=[
+                    policy, policy._replace(id='unowned',
+                                            https_listener_hostname=None)])
+        amphora = samples.sample_amphora_tuple()
+        config = self.jinja_cfg.render_loadbalancer_obj(
+            amphora, [listener], haproxy_version='3.0.19')
+        self.assertIn('req.fhdr(host),host_only', config)
+        self.assertLess(config.index('-m str -i a.example.test'),
+                        config.index('-m end -i .deep.example.test'))
+        self.assertLess(config.index('-m end -i .deep.example.test'),
+                        config.index('-m end -i .example.test'))
+        self.assertIn('http-request return status 421', config)
+        self.assertIn('http-request return status 404', config)
+        self.assertIn(
+            'if { var(txn.octavia_https_authority_section) -m str 3 } '
+            'sample_l7rule_id_1', config)
+        self.assertEqual(1, config.count('    use_backend '))
+        self.assertRaises(
+            driver_except.AmpVersionUnsupported,
+            self.jinja_cfg.render_loadbalancer_obj,
+            amphora, [listener], haproxy_version='2.8.0')
+
     def test_render_tcp_clienthello_sni(self):
         samples = sample_configs_combined
         default_pool = samples.sample_pool_tuple(

@@ -80,7 +80,22 @@ def gateway_capabilities(driver):
         if (driver.name in api_settings.enabled_tls_sni_suffix_providers and
                 getattr(driver, 'supports_tls_sni_suffix', False) is True):
             capabilities.append(constants.GATEWAY_CAPABILITY_TLS_SNI_SUFFIX)
+    https_isolation_providers = (
+        api_settings.enabled_https_listener_isolation_providers)
+    if (driver.name in https_isolation_providers and
+            getattr(driver, 'supports_https_listener_isolation', False)
+            is True):
+        capabilities.append(
+            constants.GATEWAY_CAPABILITY_HTTPS_LISTENER_ISOLATION)
     return capabilities
+
+
+def require_https_listener_isolation(driver):
+    if (constants.GATEWAY_CAPABILITY_HTTPS_LISTENER_ISOLATION not in
+            gateway_capabilities(driver)):
+        raise exceptions.ProviderUnsupportedOptionError(
+            prov=driver.name, user_msg=_(
+                'HTTPS listener isolation is unavailable for this provider.'))
 
 
 def require_fixed_http_responses(driver):
@@ -349,8 +364,9 @@ def db_listeners_to_provider_dicts_list_of_dicts(db_listeners,
 def db_listener_to_provider_listener(db_listener, for_delete=False):
     new_listener_dict = listener_dict_to_provider_dict(
         db_listener.to_dict(recurse=True), for_delete=for_delete)
-    if new_listener_dict.get('default_http_response') is None:
-        new_listener_dict.pop('default_http_response', None)
+    for attribute in ('default_http_response', 'https_virtual_hosts'):
+        if new_listener_dict.get(attribute) is None:
+            new_listener_dict.pop(attribute, None)
     if ('default_pool' in new_listener_dict and
             new_listener_dict['default_pool']):
         provider_pool = db_pool_to_provider_pool(db_listener.default_pool,
@@ -709,8 +725,10 @@ def l7policy_dict_to_provider_dict(l7policy_dict):
     new_l7policy_dict = _base_to_provider_dict(l7policy_dict,
                                                include_project_id=True)
     new_l7policy_dict['l7policy_id'] = new_l7policy_dict.pop('id')
-    if new_l7policy_dict.get('request_header_operations') is None:
-        new_l7policy_dict.pop('request_header_operations', None)
+    for attribute in ('request_header_operations',
+                      'https_listener_hostname'):
+        if new_l7policy_dict.get(attribute) is None:
+            new_l7policy_dict.pop(attribute, None)
     # Remove the DB back references
     if 'listener' in new_l7policy_dict:
         del new_l7policy_dict['listener']
