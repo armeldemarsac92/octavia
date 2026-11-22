@@ -157,6 +157,19 @@ HTTP 501 when the capability is unavailable.
    {"rule": {"type": "HTTP_QUERY_PARAM_EXACT", "compare_type": "EQUAL_TO",
              "key": "Color", "value": "light blue"}}
 
+With ``grpc_content_type_v1`` enabled, use ``GRPC_CONTENT_TYPE`` with
+``EQUAL_TO`` and the canonical value ``application/grpc`` on HTTP or
+TERMINATED_HTTPS listeners. Omit the key and leave ``invert`` false.
+The rule matches a single Content-Type field containing the native gRPC
+media type, an optional ``+`` followed by an HTTP token, and optional
+media type parameters. Media type comparison ignores ASCII case.
+An otherwise valid rule returns HTTP 501 when the capability is unavailable.
+
+.. code-block:: json
+
+   {"rule": {"type": "GRPC_CONTENT_TYPE", "compare_type": "EQUAL_TO",
+             "value": "application/grpc"}}
+
 With ``http_method_match_v1`` enabled, use ``HTTP_METHOD`` with
 ``EQUAL_TO`` on HTTP or TERMINATED_HTTPS listeners. Omit the key and leave
 ``invert`` false. The case-sensitive value must be one of ``GET``, ``HEAD``,

@@ -57,6 +57,23 @@ ACTIVE_PENDING_STATUSES = constants.SUPPORTED_PROVISIONING_STATUSES + (
 # HAProxy's rand() reduces a 32-bit draw to the requested interval.
 HAPROXY_MAX_RANDOM_RANGE = 1 << 32
 
+# Use POSIX ERE for Amphora builds with and without PCRE. A Content-Type
+# field can contain a comma inside a quoted parameter, but cannot be a list.
+_HTTP_TOKEN = r"[A-Za-z0-9!#$%&'*+.^_`|~-]+"
+_HTTP_OWS = '[ \t]*'
+_HTTP_QUOTED_STRING = '"([^"\\\\[:cntrl:]]|\t|\\\\([^[:cntrl:]]|\t))*"'
+_GRPC_CONTENT_TYPE_PATTERN = (
+    f'^{_HTTP_OWS}{constants.GRPC_CONTENT_TYPE}([+]{_HTTP_TOKEN})?{_HTTP_OWS}'
+    f'(;{_HTTP_OWS}'
+    f'({_HTTP_TOKEN}=({_HTTP_TOKEN}|{_HTTP_QUOTED_STRING}){_HTTP_OWS})?)*$'
+)
+# Quote the fixed pattern for the HAProxy config parser, which expands
+# dollar signs and processes escapes inside double quotes.
+_GRPC_CONTENT_TYPE_ACL = '"' + _GRPC_CONTENT_TYPE_PATTERN.translate({
+    ord('\\'): r'\\', ord('"'): r'\x22', ord('$'): r'\x24',
+    ord('\t'): r'\x09',
+}) + '"'
+
 BASE_PATH = '/var/lib/octavia'
 BASE_CRT_DIR = BASE_PATH + '/certs'
 
@@ -951,6 +968,8 @@ class JinjaTemplater:
         elif l7rule.type == constants.L7RULE_TYPE_HTTP_QUERY_PARAM_EXACT:
             key = self._query_param_fetch(key)
             value = l7rule.value.encode('utf-8').hex()
+        elif l7rule.type == constants.L7RULE_TYPE_GRPC_CONTENT_TYPE:
+            value = _GRPC_CONTENT_TYPE_ACL
         else:
             value = self._escape_haproxy_config_string(l7rule.value)
 

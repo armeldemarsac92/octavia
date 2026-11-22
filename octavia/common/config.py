@@ -118,6 +118,11 @@ api_opts = [
                        'support exact HTTP query parameter L7 rules. '
                        'Enable after upgrading the database, API, workers '
                        'and Amphora fleet.')),
+    cfg.ListOpt('enabled_grpc_content_type_providers', default=[],
+                help=_('Provider driver names whose regional fleets support '
+                       'native gRPC Content-Type L7 rules. Enable after '
+                       'upgrading the database, API, workers and Amphora '
+                       'fleet.')),
     cfg.ListOpt('enabled_tcp_tls_termination_providers', default=[],
                 help=_('Providers whose regional Amphora fleets support TLS '
                        'termination on TCP listeners. Enable after upgrading '

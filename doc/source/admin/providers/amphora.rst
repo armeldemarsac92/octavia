@@ -224,6 +224,31 @@ parent that would activate it. Existing rules remain readable and can be
 disabled or deleted. Retire the rules before rolling back the workers.
 
 
+Native gRPC media type matching
+-------------------------------
+
+``GRPC_CONTENT_TYPE`` matches a single HTTP Content-Type field on HTTP and
+terminated HTTPS listeners. It accepts ``application/grpc``, an optional
+``+`` followed by an HTTP token, and optional media type parameters.
+Amphora uses a fixed POSIX expression compatible with both libc and PCRE
+builds of HAProxy. A comma can appear within a quoted parameter.
+
+Apply migration ``4f1a36c90e8b`` and upgrade the regional API, workers and
+Amphora fleet. Verify the generated configuration with the fleet's HAProxy
+build before adding the provider to the following setting on each API
+replica. The opt-in defaults to empty.
+
+.. code-block:: ini
+
+   [api_settings]
+   enabled_grpc_content_type_providers = amphora
+
+The provider then advertises ``grpc_content_type_v1``. Removing the
+provider name stops new rules, match changes and re-enabling a rule or
+parent that would activate it. Existing rules remain readable and can be
+disabled or deleted. Retire the rules before rolling back the workers.
+
+
 TLS passthrough by SNI
 ----------------------
 

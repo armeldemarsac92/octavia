@@ -843,6 +843,61 @@ class TestL7Rule(base.BaseAPITest):
         self.delete(path)
 
     @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
+    def test_grpc_content_type_rule_admission_and_removal(self, rpc):
+        lb = self.create_load_balancer(
+            uuidutils.generate_uuid(), provider='amphora')['loadbalancer']
+        lb_id = lb['id']
+        self.set_lb_status(lb_id)
+        listener = self.create_listener('HTTP', 80, lb_id)['listener']
+        self.set_lb_status(lb_id)
+        policy = self.create_l7policy(listener['id'], 'REJECT')['l7policy']
+        self.set_lb_status(lb_id)
+        policy_id = policy['id']
+        rule_type = 'GRPC_CONTENT_TYPE'
+        value = 'application/grpc'
+        self.create_l7rule(policy_id, rule_type, 'EQUAL_TO', value, status=501)
+        self.conf.config(group='api_settings',
+                         enabled_grpc_content_type_providers=['amphora'])
+        rpc.return_value.cast.reset_mock()
+        self.create_l7rule(policy_id, rule_type, 'REGEX', value, status=400)
+        self.create_l7rule(policy_id, rule_type, 'EQUAL_TO',
+                           'Application/GRPC', status=400)
+        self.create_l7rule(policy_id, rule_type, 'EQUAL_TO', value,
+                           key='Content-Type', status=400)
+        self.create_l7rule(policy_id, rule_type, 'EQUAL_TO', value,
+                           invert=True, status=400)
+        rpc.return_value.cast.assert_not_called()
+
+        legacy = self.create_l7rule(policy_id, 'HEADER', 'REGEX', '^grpc',
+                                    key='Content-Type')['rule']
+        self.set_lb_status(lb_id)
+        path = self.L7RULE_PATH.format(l7policy_id=policy_id,
+                                       l7rule_id=legacy['id'])
+        self.put(path, {'rule': {'type': rule_type, 'compare_type': 'EQUAL_TO',
+                                 'value': value}})
+        self.set_lb_status(lb_id)
+        rule = self.get(path).json['rule']
+        self.assertEqual((rule_type, 'EQUAL_TO', None, value),
+                         (rule['type'], rule['compare_type'], rule['key'],
+                          rule['value']))
+        sent = rpc.return_value.cast.call_args.kwargs
+        self.assertIsNone(sent[constants.L7RULE_UPDATES]['key'])
+
+        self.conf.config(group='api_settings',
+                         enabled_grpc_content_type_providers=[])
+        policy_path = self.L7POLICY_PATH.format(l7policy_id=policy_id)
+        self.put(policy_path, {'l7policy': {'admin_state_up': False}})
+        self.set_lb_status(lb_id)
+        self.put(policy_path, {'l7policy': {'admin_state_up': True}},
+                 status=501)
+        self.put(path, {'rule': {'admin_state_up': False}})
+        self.set_lb_status(lb_id)
+        self.put(path, {'rule': {'admin_state_up': True}}, status=501)
+        self.put(policy_path, {'l7policy': {'admin_state_up': True}})
+        self.set_lb_status(lb_id)
+        self.delete(path)
+
+    @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
     def test_convert_header_to_http_method(self, rpc):
         self.conf.config(group='api_settings',
                          enabled_http_method_match_providers=['amphora'])

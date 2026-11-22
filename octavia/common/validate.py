@@ -279,6 +279,14 @@ def l7rule_data(l7rule, *, validate_request_value=False):
                 'HTTP_METHOD requires EQUAL_TO with a supported uppercase '
                 'HTTP method. Keys and inversion are unsupported.'))
 
+    elif l7rule.type == constants.L7RULE_TYPE_GRPC_CONTENT_TYPE:
+        if (l7rule.compare_type != constants.L7RULE_COMPARE_TYPE_EQUAL_TO or
+                l7rule.value != constants.GRPC_CONTENT_TYPE or
+                l7rule.key not in (None, wtypes.Unset) or l7rule.invert):
+            raise exceptions.InvalidL7Rule(msg=_(
+                'GRPC_CONTENT_TYPE requires EQUAL_TO with application/grpc. '
+                'Keys and inversion are unsupported.'))
+
     elif l7rule.type == constants.L7RULE_TYPE_HEADER:
         if not l7rule.key:
             raise exceptions.InvalidL7Rule(msg='L7 rule type requires a key')
