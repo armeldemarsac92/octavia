@@ -119,6 +119,10 @@ api_opts = [
                        'request URL rewrites. Enable after upgrading the '
                        'database, API, provider library, workers and '
                        'Amphora images.')),
+    cfg.ListOpt('enabled_l7policy_initial_rules_providers', default=[],
+                help=_('Provider driver names that can create a disabled HTTP '
+                       'L7 policy with its initial rules in one operation. '
+                       'Enable after upgrading the API and all workers.')),
     cfg.ListOpt('enabled_http_method_match_providers', default=[],
                 help=_('Provider driver names whose regional fleets '
                        'support exact HTTP method L7 rules. Enable '

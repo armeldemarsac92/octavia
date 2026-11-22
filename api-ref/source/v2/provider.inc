@@ -202,6 +202,14 @@ listener. Operations on ``Connection``, ``Content-Length``, ``Keep-Alive``,
 return HTTP 400. A policy update preserves omitted fields. Send an empty
 list to clear the response operations.
 
+``l7policy_initial_rules_v1`` allows creating a disabled L7 policy and its
+initial rules in one POST to ``/v2/lbaas/l7policies`` on an existing HTTP or
+terminated HTTPS listener. Enable a compatible provider in
+``[api_settings] enabled_l7policy_initial_rules_providers`` after upgrading
+the API and all workers in the region. Removing a provider from that list
+disables admission of new policy posts with rules. Existing policies and rules
+can be read and managed through their regular endpoints.
+
 ``http_request_redirect_v1`` enables the L7 policy action
 ``REDIRECT_REQUEST``. Set ``redirect_request`` to an object with
 ``scheme`` (``http`` or ``https``) and ``port`` (an integer from 1 to

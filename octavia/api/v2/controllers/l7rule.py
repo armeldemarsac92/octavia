@@ -34,6 +34,13 @@ from octavia.db import prepare as db_prepare
 LOG = logging.getLogger(__name__)
 
 
+def validate_create_rule_data(rule):
+    try:
+        validate.l7rule_data(rule, validate_request_value=True)
+    except Exception as e:
+        raise exceptions.L7RuleValidation(error=e) from e
+
+
 class L7RuleController(base.BaseController):
     RBAC_TYPE = constants.RBAC_L7RULE
 
@@ -158,10 +165,7 @@ class L7RuleController(base.BaseController):
             self._auth_validate_action(context, l7rule.project_id,
                                        constants.RBAC_POST)
 
-            try:
-                validate.l7rule_data(l7rule, validate_request_value=True)
-            except Exception as e:
-                raise exceptions.L7RuleValidation(error=e)
+            validate_create_rule_data(l7rule)
 
             self._check_l7policy_max_rules(context.session)
 

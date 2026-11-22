@@ -83,6 +83,11 @@ def gateway_capabilities(driver):
             driver.name in api_settings.enabled_request_url_rewrite_providers
             and getattr(driver, 'supports_request_url_rewrite', False) is True):
         capabilities.append(constants.GATEWAY_CAPABILITY_REQUEST_URL_REWRITE)
+    initial_rules_providers = (
+        api_settings.enabled_l7policy_initial_rules_providers)
+    if (driver.name in initial_rules_providers and
+            getattr(driver, 'supports_l7policy_initial_rules', False) is True):
+        capabilities.append(constants.GATEWAY_CAPABILITY_L7POLICY_INITIAL_RULES)
     if (driver.name in api_settings.enabled_http_header_exact_providers and
             getattr(driver, 'supports_http_header_exact', False) is True):
         capabilities.append(constants.GATEWAY_CAPABILITY_HTTP_HEADER_EXACT)

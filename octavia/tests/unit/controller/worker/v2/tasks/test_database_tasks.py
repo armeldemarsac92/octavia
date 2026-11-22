@@ -408,9 +408,16 @@ class TestDatabaseTasks(base.TestCase):
 #            POOL_ID,
 #            operating_status=constants.ERROR)
 
+    @mock.patch('octavia.db.repositories.Repositories.decrement_quota')
+    @mock.patch('octavia.db.repositories.L7RuleRepository.count',
+                return_value=0)
+    @mock.patch('octavia.db.repositories.L7PolicyRepository.get_for_update')
     @mock.patch('octavia.db.repositories.L7PolicyRepository.delete')
     def test_delete_l7policy_in_db(self,
                                    mock_l7policy_repo_delete,
+                                   mock_l7policy_get_for_update,
+                                   mock_l7rule_count,
+                                   mock_decrement_quota,
                                    mock_generate_uuid,
                                    mock_LOG,
                                    mock_get_session,

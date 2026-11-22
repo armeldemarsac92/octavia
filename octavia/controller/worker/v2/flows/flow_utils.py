@@ -116,6 +116,10 @@ def get_create_l7policy_flow():
     return L7_POLICY_FLOWS.get_create_l7policy_flow()
 
 
+def get_create_l7policy_with_initial_rules_flow():
+    return L7_POLICY_FLOWS.get_create_l7policy_with_initial_rules_flow()
+
+
 def get_delete_l7policy_flow():
     return L7_POLICY_FLOWS.get_delete_l7policy_flow()
 
