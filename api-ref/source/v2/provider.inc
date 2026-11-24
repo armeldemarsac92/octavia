@@ -381,6 +381,24 @@ newer). Withdrawing enrollment preserves isolation on existing listeners.
 Delete policies selecting a section before removing it from the listener.
 Replace the listener to remove isolation.
 
+``frontend_client_auth_insecure_fallback_v1`` enables insecure fallback for
+client certificate validation on a ``TERMINATED_HTTPS`` listener. Configure
+``client_authentication: MANDATORY``, a project-authorized client CA
+certificate bundle and ``client_authentication_insecure_fallback: true``.
+Amphora requests the client certificate and uses the configured CA to
+verify it. Clients can connect when the certificate is absent or invalid.
+The existing ``X-SSL-Client-Has-Cert`` and ``X-SSL-Client-Verify`` listener
+header insertions expose the certificate presence and verification result
+to the backend. Set the flag to false to restore strict verification.
+
+Enroll the provider in ``[api_settings]
+enabled_frontend_client_auth_insecure_fallback_providers`` after upgrading
+the driver library, database, API, workers and all Amphora agents. Each
+Amphora agent must confirm support in its details response (HAProxy 3.0 or newer
+with OpenSSL). If one peer cannot confirm support or stage the required
+TLS material, both peers omit the affected listener from their generated
+configuration. Other listeners retain their own TLS settings.
+
 ``tcp_tls_termination_v1`` enables ``tcp_tls_termination: true`` on TCP
 listeners. Set the field on creation with a project-authorized
 ``default_tls_container_ref``. Route the decrypted stream to TCP pools

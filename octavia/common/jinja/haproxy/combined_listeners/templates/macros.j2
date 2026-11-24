@@ -35,6 +35,9 @@ peers {{ "%s_peers"|format(loadbalancer.id.replace("-", ""))|trim() }}
     {% endif %}
     {% if listener.client_ca_tls_path and listener.client_auth %}
         {% set client_ca_opt = " ca-file %s verify %s"|format(listener.client_ca_tls_path, listener.client_auth) %}
+        {% if listener.client_auth_insecure_fallback %}
+            {% set client_ca_opt = client_ca_opt + " ca-ignore-err all crt-ignore-err all" %}
+        {% endif %}
     {% else %}
         {% set client_ca_opt = "" %}
     {% endif %}

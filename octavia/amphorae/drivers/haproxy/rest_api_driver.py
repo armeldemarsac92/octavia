@@ -138,12 +138,13 @@ class HaproxyAmphoraLoadBalancerDriver(
             return
 
         opted_in, protected = self._backend_tls_pools(loadbalancer)
-        if opted_in:
+        fallback = self._frontend_client_auth_fallback_listeners(loadbalancer)
+        if opted_in or fallback:
             peers = {amp.id: amp for amp in loadbalancer.amphorae
                      if amp.status != consts.DELETED}
             peers[amphora.id] = amphora
-            self._update_backend_tls_listeners(
-                loadbalancer, [amphora], peers.values(), protected,
+            self._update_protected_tls_listeners(
+                loadbalancer, [amphora], peers.values(), protected, fallback,
                 timeout_dict=timeout_dict)
         else:
             self._update_amphora_listeners(
@@ -152,6 +153,7 @@ class HaproxyAmphoraLoadBalancerDriver(
     def _update_amphora_listeners(
             self, loadbalancer, amphora, timeout_dict=None, *,
             amp_details=None, backend_tls_certs=None,
+            frontend_tls_certs=None, closed_frontend=(),
             l7policy_activation=False):
         if not loadbalancer.listeners:
             LOG.debug('No listeners found to update.')
@@ -165,6 +167,7 @@ class HaproxyAmphoraLoadBalancerDriver(
 
         has_tcp = False
         certs = dict(backend_tls_certs or {})
+        frontend_tls_certs = frontend_tls_certs or {}
         listeners_to_update = []
         for listener in loadbalancer.listeners:
             LOG.debug("%s updating listener %s on amphora %s",
@@ -181,6 +184,15 @@ class HaproxyAmphoraLoadBalancerDriver(
             else:
                 has_tcp = True
                 obj_id = loadbalancer.id
+                client_auth_fallback = getattr(
+                    listener, 'client_authentication_insecure_fallback',
+                    None) is True
+                if client_auth_fallback and (
+                        listener.id in closed_frontend or
+                        listener.provisioning_status in
+                        (consts.PENDING_DELETE, consts.DELETED) or
+                        not (listener.enabled and loadbalancer.enabled)):
+                    continue
                 tcp_tls_termination = getattr(listener, 'tcp_tls_termination',
                                               False) is True
                 if (tcp_tls_termination and
@@ -191,20 +203,11 @@ class HaproxyAmphoraLoadBalancerDriver(
                     continue
 
                 try:
-                    certs.update({
-                        listener.tls_certificate_id:
-                        self._process_tls_certificates(
-                            listener, amphora, obj_id)['tls_cert']})
-                    certs.update({listener.client_ca_tls_certificate_id:
-                                  self._process_secret(
-                                      listener,
-                                      listener.client_ca_tls_certificate_id,
-                                      amphora, obj_id)})
-                    certs.update({listener.client_crl_container_id:
-                                  self._process_secret(
-                                      listener,
-                                      listener.client_crl_container_id,
-                                      amphora, obj_id)})
+                    if client_auth_fallback:
+                        certs.update(frontend_tls_certs[listener.id])
+                    else:
+                        certs.update(self._process_listener_tls_certs(
+                            listener, amphora, obj_id))
 
                     certs.update(self._process_listener_pool_certs(
                         listener, amphora, obj_id))
@@ -269,9 +272,10 @@ class HaproxyAmphoraLoadBalancerDriver(
         if l7policy_activation and not amphorae:
             raise driver_except.ListenerProvisioningError()
         opted_in, protected = self._backend_tls_pools(loadbalancer)
-        if opted_in and amphorae:
-            self._update_backend_tls_listeners(
-                loadbalancer, amphorae, amphorae, protected,
+        fallback = self._frontend_client_auth_fallback_listeners(loadbalancer)
+        if (opted_in or fallback) and amphorae:
+            self._update_protected_tls_listeners(
+                loadbalancer, amphorae, amphorae, protected, fallback,
                 l7policy_activation=l7policy_activation)
         else:
             for amphora in amphorae:
@@ -282,18 +286,20 @@ class HaproxyAmphoraLoadBalancerDriver(
     def update_failover_listeners(self, loadbalancer, amphora_index,
                                   amphorae_status, timeout_dict=None):
         opted_in, protected = self._backend_tls_pools(loadbalancer)
-        if opted_in and amphora_index == 0:
+        fallback = self._frontend_client_auth_fallback_listeners(loadbalancer)
+        coordinated = opted_in or bool(fallback)
+        if coordinated and amphora_index == 0:
             peers = [amp for amp in loadbalancer.amphorae
                      if amp.status != consts.DELETED]
             unreachable = {amp.id for amp in peers
                            if amphorae_status.get(amp.id, {}).get(
                                consts.UNREACHABLE)}
-            self._update_backend_tls_listeners(
+            self._update_protected_tls_listeners(
                 loadbalancer, [amp for amp in peers
                                if amp.id not in unreachable],
-                peers, protected, timeout_dict=timeout_dict,
+                peers, protected, fallback, timeout_dict=timeout_dict,
                 unreachable=unreachable)
-        return opted_in
+        return coordinated
 
     @staticmethod
     def _backend_tls_pools(loadbalancer):
@@ -313,14 +319,23 @@ class HaproxyAmphoraLoadBalancerDriver(
                     pools[pool.id] = (listener, pool)
         return opted_in, pools
 
-    def _update_backend_tls_listeners(self, loadbalancer, amphorae, peers,
-                                      protected, timeout_dict=None,
-                                      unreachable=(),
-                                      l7policy_activation=False):
-        # Preflight the entire pair and stage the trust material before any
-        # reload. Both amphorae use an empty backend if either lacks support.
+    @staticmethod
+    def _frontend_client_auth_fallback_listeners(loadbalancer):
+        return [
+            listener for listener in loadbalancer.listeners
+            if loadbalancer.enabled and listener.enabled and
+            listener.provisioning_status not in
+            (consts.PENDING_DELETE, consts.DELETED) and
+            getattr(listener, 'client_authentication_insecure_fallback',
+                    None) is True
+        ]
+
+    def _update_protected_tls_listeners(
+            self, loadbalancer, amphorae, peers, protected, fallback,
+            timeout_dict=None, unreachable=(), l7policy_activation=False):
+        # Preflight the pair and stage the TLS material before any reload.
         details = {}
-        for amphora in peers if protected else amphorae:
+        for amphora in peers if protected or fallback else amphorae:
             if amphora.id in unreachable:
                 details[amphora.id] = {}
                 continue
@@ -333,6 +348,11 @@ class HaproxyAmphoraLoadBalancerDriver(
             except (driver_except.AmphoraDriverError, exc.APIException,
                     requests.RequestException, ValueError):
                 details[amphora.id] = {}
+
+        frontend_certs, closed_frontend = self._stage_frontend_client_auth(
+            loadbalancer.id, amphorae, peers, details, fallback)
+        if l7policy_activation and closed_frontend:
+            raise driver_except.ListenerProvisioningError()
 
         certs = {amphora.id: {} for amphora in amphorae}
         closed = set()
@@ -378,6 +398,8 @@ class HaproxyAmphoraLoadBalancerDriver(
                     loadbalancer, amphora, timeout_dict=timeout_dict,
                     amp_details=details[amphora.id],
                     backend_tls_certs=certs[amphora.id],
+                    frontend_tls_certs=frontend_certs[amphora.id],
+                    closed_frontend=closed_frontend,
                     l7policy_activation=l7policy_activation)
                 reloaded_listeners.append(configured)
             except Exception as error:
@@ -400,8 +422,49 @@ class HaproxyAmphoraLoadBalancerDriver(
             with db_api.session().begin() as session:
                 pool_repo.set_backend_tls_pool_statuses(
                     session, closed=closed, recovered=recovered)
+        if closed_frontend:
+            listener_repo = repo.ListenerRepository()
+            with db_api.session().begin() as session:
+                for listener_id in closed_frontend:
+                    listener_repo.update(session, listener_id,
+                                         provisioning_status=consts.ERROR,
+                                         operating_status=consts.ERROR)
         if reload_error is not None:
             raise reload_error
+
+    def _stage_frontend_client_auth(
+            self, lb_id, amphorae, peers, details, listeners):
+        certs = {amphora.id: {} for amphora in amphorae}
+        closed = set()
+        if not listeners:
+            return certs, closed
+
+        capability = (
+            consts.GATEWAY_CAPABILITY_FRONTEND_CLIENT_AUTH_INSECURE_FALLBACK)
+        unsupported = [amp_id for amp_id, detail in details.items()
+                       if detail.get(capability) is not True]
+        for listener in listeners:
+            if unsupported:
+                LOG.warning('Frontend client authentication fallback on '
+                            'listener %s requires support on amphorae %s.',
+                            listener.id, unsupported)
+            else:
+                try:
+                    material = {
+                        amphora.id: self._process_listener_tls_certs(
+                            listener, amphora, lb_id, validate_client_ca=True)
+                        for amphora in peers
+                    }
+                except Exception as error:
+                    LOG.warning('Frontend client authentication fallback on '
+                                'listener %s could not stage TLS material '
+                                '(%s).', listener.id, type(error).__name__)
+                else:
+                    for amphora in amphorae:
+                        certs[amphora.id][listener.id] = material[amphora.id]
+                    continue
+            closed.add(listener.id)
+        return certs, closed
 
     def upload_cert_amp(self, amp, pem):
         LOG.debug("Amphora %s updating cert in REST driver "
@@ -595,6 +658,28 @@ class HaproxyAmphoraLoadBalancerDriver(
             LOG.warning('Network with MAC %(mac)s already exists on amphora, '
                         'skipping post_network_plug',
                         {'mac': port.mac_address})
+
+    def _process_listener_tls_certs(self, listener, amphora, obj_id, *,
+                                    validate_client_ca=False):
+        server_certs = self._process_tls_certificates(listener, amphora, obj_id)
+        ca_options = {}
+        crl_options = {}
+        if validate_client_ca:
+            if (not listener.client_ca_tls_certificate_id or not (
+                    server_certs['tls_cert'] or server_certs['sni_certs'])):
+                raise driver_except.ListenerProvisioningError()
+            ca_options['validate_pem'] = (
+                cert_parser.load_frontend_client_ca_certificates)
+            crl_options['validate_pem'] = x509.load_pem_x509_crl
+        return {
+            listener.tls_certificate_id: server_certs['tls_cert'],
+            listener.client_ca_tls_certificate_id: self._process_secret(
+                listener, listener.client_ca_tls_certificate_id,
+                amphora, obj_id, **ca_options),
+            listener.client_crl_container_id: self._process_secret(
+                listener, listener.client_crl_container_id,
+                amphora, obj_id, **crl_options),
+        }
 
     def _process_tls_certificates(self, listener, amphora=None, obj_id=None):
         """Processes TLS data from the listener.

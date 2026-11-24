@@ -190,6 +190,23 @@ class TestGatewayCapabilities(base.BaseAPITest):
         self.assertEqual(empty,
                          self.get(self.capabilities_path('noop_driver')).json)
 
+    def test_frontend_client_auth_fallback_capability(self):
+        field = 'gateway_capabilities'
+        path = self.capabilities_path()
+        self.assertEqual([], self.get(path).json[field])
+        self.conf.config(
+            group='api_settings',
+            enabled_frontend_client_auth_insecure_fallback_providers=[
+                'amphora', 'noop_driver'])
+        self.assertEqual(['frontend_client_auth_insecure_fallback_v1'],
+                         self.get(path).json[field])
+        with mock.patch('octavia.api.drivers.utils.'
+                        'FRONTEND_CLIENT_AUTH_INSECURE_FALLBACK_'
+                        'PAYLOAD_AVAILABLE', False):
+            self.assertEqual([], self.get(path).json[field])
+        self.assertEqual([], self.get(self.capabilities_path(
+            'noop_driver')).json[field])
+
     def test_tls_sni_capability_is_independent_and_provider_specific(self):
         self.conf.config(group='api_settings',
                          enabled_tls_sni_providers=['amphora', 'noop_driver'])

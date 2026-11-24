@@ -1238,6 +1238,74 @@ class TestListener(base.BaseAPITest):
         self.assertEqual(optionals['client_authentication'],
                          listener_api.get('client_authentication'))
 
+    @mock.patch('octavia.common.tls_utils.cert_parser.load_certificates_data')
+    @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
+    def test_frontend_client_auth_fallback(self, rpc, certs):
+        field = 'client_authentication_insecure_fallback'
+        certs.return_value = {
+            'tls_cert': data_models.TLSContainer(certificate='cert'),
+            'sni_certs': [],
+        }
+        lb = self.create_load_balancer(
+            uuidutils.generate_uuid(), provider='amphora')['loadbalancer']
+        self.set_lb_status(lb['id'])
+        args = (constants.PROTOCOL_TERMINATED_HTTPS, 443, lb['id'])
+        options = {
+            'default_tls_container_ref': uuidutils.generate_uuid(),
+            'client_ca_tls_container_ref': uuidutils.generate_uuid(),
+            'client_authentication': constants.CLIENT_AUTH_MANDATORY,
+            field: True,
+        }
+        rpc.return_value.cast.reset_mock()
+        self.create_listener(*args, status=501, **options)
+        self.conf.config(
+            group='api_settings',
+            enabled_frontend_client_auth_insecure_fallback_providers=[
+                'amphora'])
+        self.create_listener(
+            *args, status=400,
+            **dict(options, client_ca_tls_container_ref=None))
+        self.cert_manager_mock().get_secret.return_value = sample_certs.X509_CERT
+        self.create_listener(*args, status=400, **options)
+        self.cert_manager_mock().get_secret.side_effect = RuntimeError
+        self.create_listener(*args, status=400, **options)
+        rpc.return_value.cast.assert_not_called()
+        self.cert_manager_mock().get_secret.side_effect = None
+        self.cert_manager_mock().get_secret.return_value = (
+            sample_certs.X509_CA_CERT)
+        created = self.create_listener(*args, **options)['listener']
+        self.assertIs(True, created[field])
+        path = self.LISTENER_PATH.format(listener_id=created['id'])
+        self.assertIs(True, self.get(path).json['listener'][field])
+        self.set_lb_status(lb['id'])
+        self.put(path, {'listener': {'client_ca_tls_container_ref': None}},
+                 status=400)
+        self.put(path, {'listener': {'default_tls_container_ref': None}},
+                 status=400)
+        unchanged = self.put(path, {'listener': {'name': 'retained'}})
+        self.assertIs(True, unchanged.json['listener'][field])
+        self.set_lb_status(lb['id'])
+        lb_path = self.LB_PATH.format(lb_id=lb['id'])
+        self.put(lb_path, {'loadbalancer': {'admin_state_up': False}})
+        self.set_lb_status(lb['id'])
+        self.conf.config(
+            group='api_settings',
+            enabled_frontend_client_auth_insecure_fallback_providers=[])
+        self.put(lb_path, {'loadbalancer': {'admin_state_up': True}}, status=501)
+        self.put(path, {'listener': {field: True}}, status=501)
+        cleared = self.put(path, {'listener': {field: False}}).json['listener']
+        self.assertIs(False, cleared[field])
+        self.assertEqual(constants.CLIENT_AUTH_MANDATORY,
+                         cleared['client_authentication'])
+        self.assertEqual(options['client_ca_tls_container_ref'],
+                         cleared['client_ca_tls_container_ref'])
+        self.assertIs(False, self.get(path).json['listener'][field])
+        listener_updates = rpc.return_value.cast.call_args.kwargs[
+            'listener_updates']
+        self.assertIs(False, listener_updates[field])
+        self.set_lb_status(lb['id'])
+        self.put(lb_path, {'loadbalancer': {'admin_state_up': True}})
+
     def test_create_with_ca_cert_and_crl(self):
         # Load up sample certs to test the validation
         self.cert_manager_mock().get_secret.side_effect = [

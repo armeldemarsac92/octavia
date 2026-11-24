@@ -1272,6 +1272,15 @@ class ListenerRepository(BaseRepository):
             model.https_virtual_hosts.isnot(None))
             .with_for_update().first() is not None)
 
+    def has_enabled_frontend_client_auth_fallback(self, session, lb_id):
+        model = self.model_class
+        return (session.query(model.id).filter(
+            model.load_balancer_id == lb_id, model.enabled.is_(True),
+            model.client_authentication_insecure_fallback.is_(True),
+            model.provisioning_status.notin_(
+                (consts.PENDING_DELETE, consts.DELETED)))
+            .with_for_update().first() is not None)
+
     def has_default_pool(self, session, id):
         """Checks if a listener has a default pool."""
         listener = self.get(session, id=id)

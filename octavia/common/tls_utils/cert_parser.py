@@ -291,6 +291,16 @@ def get_host_names(certificate):
         raise exceptions.UnreadableCert from e
 
 
+def load_frontend_client_ca_certificates(ca_pem):
+    certificates = x509.load_pem_x509_certificates(ca_pem)
+    for certificate in certificates:
+        constraints = certificate.extensions.get_extension_for_class(
+            x509.BasicConstraints).value
+        if not constraints.ca:
+            raise ValueError('Expected a CA certificate.')
+    return certificates
+
+
 def get_cert_expiration(certificate_pem):
     """Extract the expiration date from the Pem encoded X509 certificate
 
