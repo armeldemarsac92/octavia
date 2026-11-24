@@ -264,11 +264,39 @@ def is_tls_sni_rule(rule):
     return False
 
 
-def validate_tcp_redirect_pool_protocol(protocol, tls_enabled):
-    if protocol != constants.PROTOCOL_TCP or tls_enabled:
+def validate_tcp_tls_backend_listener(tcp_tls_termination, protocol, hostname):
+    if (protocol == constants.PROTOCOL_TCP and hostname is not None and
+            not tcp_tls_termination):
+        raise exceptions.ValidationException(detail=_(
+            'A TCP pool with backend TLS hostname authentication requires '
+            'a TCP listener that terminates TLS.'))
+
+
+def validate_tcp_redirect_pool_protocol(protocol, tls_enabled, *,
+                                        tcp_tls_termination=False,
+                                        hostname=None, ca_ref=None):
+    if (tcp_tls_termination and protocol == constants.PROTOCOL_TCP and
+            tls_enabled is True and is_exact_sni_name(hostname) and ca_ref):
+        return
+    if (protocol != constants.PROTOCOL_TCP or tls_enabled or
+            hostname is not None):
+        if tcp_tls_termination:
+            raise exceptions.ValidationException(detail=_(
+                'A terminating TCP listener requires a plaintext TCP pool '
+                'or a TCP pool with TLS, a backend DNS hostname and a CA '
+                'certificate reference.'))
         raise exceptions.ValidationException(detail=_(
             'TCP listener policies require a TCP pool with '
             'tls_enabled false.'))
+
+
+def validate_tcp_tls_backend_monitor(monitor_type):
+    if monitor_type not in (
+            constants.HEALTH_MONITOR_TCP, constants.HEALTH_MONITOR_TLS_HELLO,
+            constants.HEALTH_MONITOR_HTTP, constants.HEALTH_MONITOR_HTTPS):
+        raise exceptions.ValidationException(detail=_(
+            'A TCP pool with backend TLS hostname authentication requires '
+            'a health monitor that can verify its TLS identity.'))
 
 
 # Note that we can evaluate this outside the context of any L7 Policy because

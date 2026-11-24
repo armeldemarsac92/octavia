@@ -59,20 +59,28 @@ def _validate_backend_tls_hostname(driver, protocol, hostname, tls_enabled,
     if not validate.is_exact_sni_name(hostname):
         raise exceptions.ValidationException(detail=_(
             'backend_tls_hostname must be a literal DNS hostname.'))
-    if (protocol != constants.PROTOCOL_HTTP or tls_enabled is not True or
-            not ca_ref):
+    if (protocol not in (constants.PROTOCOL_HTTP, constants.PROTOCOL_TCP) or
+            tls_enabled is not True or not ca_ref):
         raise exceptions.ValidationException(detail=_(
-            'backend_tls_hostname requires an HTTP pool with tls_enabled '
-            'true and a CA certificate reference.'))
-    if (enrolling and constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME
-            not in driver_utils.gateway_capabilities(driver)):
+            'backend_tls_hostname requires an HTTP or TCP pool with '
+            'tls_enabled true and a CA certificate reference.'))
+    if not enrolling:
+        return
+    if protocol == constants.PROTOCOL_TCP:
+        driver_utils.require_tcp_tls_backend_auth(driver)
+    elif (constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME not in
+          driver_utils.gateway_capabilities(driver)):
         raise exceptions.ProviderUnsupportedOptionError(
             prov=driver.name, user_msg=_(
                 'Backend TLS hostname authentication is unavailable '
                 'for this provider.'))
 
 
-def _validate_backend_tls_require_h2(driver, hostname, *, enrolling):
+def _validate_backend_tls_require_h2(driver, protocol, hostname, *,
+                                     enrolling):
+    if protocol == constants.PROTOCOL_TCP:
+        raise exceptions.ValidationException(detail=_(
+            'backend_tls_require_h2 is unavailable on TCP pools.'))
     if hostname is None:
         raise exceptions.ValidationException(detail=_(
             'backend_tls_require_h2 requires backend_tls_hostname.'))
@@ -84,7 +92,11 @@ def _validate_backend_tls_require_h2(driver, hostname, *, enrolling):
                 'for this provider.'))
 
 
-def _validate_backend_tls_subject_alt_names(driver, hostname, *, enrolling):
+def _validate_backend_tls_subject_alt_names(driver, protocol, hostname, *,
+                                            enrolling):
+    if protocol == constants.PROTOCOL_TCP:
+        raise exceptions.ValidationException(detail=_(
+            'backend_tls_subject_alt_names is unavailable on TCP pools.'))
     if hostname is None:
         raise exceptions.ValidationException(detail=_(
             'backend_tls_subject_alt_names requires backend_tls_hostname.'))
@@ -204,10 +216,11 @@ class PoolsController(base.BaseController):
                 pool_dict['tls_enabled'],
                 pool_dict.get('ca_tls_certificate_id'), enrolling=True)
         if require_h2:
-            _validate_backend_tls_require_h2(driver, hostname, enrolling=True)
+            _validate_backend_tls_require_h2(
+                driver, pool_dict['protocol'], hostname, enrolling=True)
         if sans:
             _validate_backend_tls_subject_alt_names(
-                driver, hostname, enrolling=True)
+                driver, pool_dict['protocol'], hostname, enrolling=True)
 
         # Make sure we have a client CA if they specify a CRL
         if (pool_dict.get('crl_container_id') and
@@ -275,24 +288,53 @@ class PoolsController(base.BaseController):
 
     def _validate_tcp_listener_pool_update(self, session, pool_id, current,
                                            changes, driver):
-        reopening = changes.admin_state_up is True and not current.enabled
-        if current.protocol != constants.PROTOCOL_TCP or not (
-                changes.tls_enabled is True or reopening):
+        if current.protocol != constants.PROTOCOL_TCP:
             return
-        tls_enabled = changes.tls_enabled
-        if tls_enabled is wtypes.Unset:
-            tls_enabled = current.tls_enabled
+        reopening = changes.admin_state_up is True and not current.enabled
+        hostname = (current.backend_tls_hostname
+                    if changes.backend_tls_hostname is wtypes.Unset
+                    else changes.backend_tls_hostname)
+        identity_changed = hostname != current.backend_tls_hostname
+        if not (identity_changed or reopening or changes.tls_enabled is True):
+            return
+        tls_enabled = (current.tls_enabled
+                       if changes.tls_enabled is wtypes.Unset
+                       else changes.tls_enabled)
+        ca_ref = (current.ca_tls_certificate_id
+                  if changes.ca_tls_container_ref is wtypes.Unset
+                  else changes.ca_tls_container_ref)
         policy_repo = self.repositories.l7policy
-        if (self.repositories.listener.has_tcp_tls_default_pool(
-                session, pool_id) or policy_repo.get_tcp_policy_using_pool(
+        listener_repo = self.repositories.listener
+        if (listener_repo.has_default_pool_listener(
+                session, pool_id, tcp_tls_termination=True) or
+                policy_repo.get_policy_using_pool(
                     session, pool_id, tcp_tls_termination=True)):
+            if identity_changed and hostname is None:
+                raise exceptions.ValidationException(detail=_(
+                    'Detach the pool from terminating TCP listeners and '
+                    'their policies before removing backend TLS hostname '
+                    'authentication.'))
             validate.validate_tcp_redirect_pool_protocol(
-                current.protocol, tls_enabled)
+                current.protocol, tls_enabled, tcp_tls_termination=True,
+                hostname=hostname, ca_ref=ca_ref)
             if reopening:
                 driver_utils.require_tcp_tls_termination(driver)
 
-        if (driver_utils.uses_tls_sni_policy_path(driver, current.protocol) and
-                policy_repo.get_tcp_policy_using_pool(session, pool_id)):
+        if hostname is not None and (identity_changed or reopening):
+            if (listener_repo.has_default_pool_listener(
+                    session, pool_id, tcp_tls_termination=False) or
+                    policy_repo.get_policy_using_pool(
+                        session, pool_id, tcp_only=False)):
+                validate.validate_tcp_tls_backend_listener(
+                    False, current.protocol, hostname)
+            monitor_repo = self.repositories.health_monitor
+            monitor_type = monitor_repo.get_enabled_type_for_pool(
+                session, pool_id)
+            if monitor_type is not None:
+                validate.validate_tcp_tls_backend_monitor(monitor_type)
+        elif (driver_utils.uses_tls_sni_policy_path(
+                driver, current.protocol) and
+                policy_repo.get_policy_using_pool(session, pool_id)):
             validate.validate_tcp_redirect_pool_protocol(
                 current.protocol, tls_enabled)
             driver_utils.require_tls_sni_passthrough(driver)
@@ -425,8 +467,11 @@ class PoolsController(base.BaseController):
                     pool_dict['id'])
                 if listener.tcp_tls_termination:
                     driver_utils.require_tcp_tls_termination(driver)
-                    validate.validate_tcp_redirect_pool_protocol(
-                        pool_dict['protocol'], pool_dict['tls_enabled'])
+                driver_utils.validate_tcp_pool_attachment(
+                    driver, pool_dict['protocol'], pool_dict['tls_enabled'],
+                    tcp_tls_termination=listener.tcp_tls_termination,
+                    hostname=pool_dict.get('backend_tls_hostname'),
+                    ca_ref=pool_dict.get('ca_tls_certificate_id'))
                 listener.provisioning_status = constants.PENDING_UPDATE
 
             db_pool = self._validate_create_pool(
@@ -541,7 +586,7 @@ class PoolsController(base.BaseController):
                 'HTTP/2 ALPN.'))
         if require_h2:
             _validate_backend_tls_require_h2(
-                driver, hostname, enrolling=(
+                driver, current.protocol, hostname, enrolling=(
                     pool.backend_tls_require_h2 is True or reopening))
         requested_sans = pool.backend_tls_subject_alt_names
         if requested_sans is None:
@@ -551,7 +596,8 @@ class PoolsController(base.BaseController):
                 else current.backend_tls_subject_alt_names)
         if sans:
             _validate_backend_tls_subject_alt_names(
-                driver, hostname, enrolling=reopening or has_san_update)
+                driver, current.protocol, hostname,
+                enrolling=reopening or has_san_update)
         if hostname is None:
             if current.backend_tls_hostname and (current.enabled or reopening):
                 raise exceptions.ValidationException(detail=_(
@@ -563,9 +609,12 @@ class PoolsController(base.BaseController):
                   if pool.ca_tls_container_ref is wtypes.Unset
                   else pool.ca_tls_container_ref)
         enrolling_hostname = hostname != current.backend_tls_hostname
+        tcp_trust_changed = (current.protocol == constants.PROTOCOL_TCP and
+                             ca_ref != current.ca_tls_certificate_id)
         _validate_backend_tls_hostname(
             driver, current.protocol, hostname, tls, ca_ref,
-            enrolling=enrolling_hostname or reopening or enrolling_h2)
+            enrolling=(enrolling_hostname or tcp_trust_changed or
+                       reopening or enrolling_h2))
 
     def _validate_request_transform_exposure(self, session, driver, pool_id,
                                              current, changes, lb_id):
@@ -791,8 +840,10 @@ class PoolsController(base.BaseController):
             policy_repo = self.repositories.l7policy
             policy_id = (policy_repo.get_weighted_policy_using_pool(
                 context.session, db_pool.id) or
-                policy_repo.get_tcp_policy_using_pool(
-                    context.session, db_pool.id))
+                policy_repo.get_policy_using_pool(
+                    context.session, db_pool.id) or
+                policy_repo.get_policy_using_pool(
+                    context.session, db_pool.id, tcp_tls_termination=True))
             if policy_id:
                 raise exceptions.PoolInUseByL7Policy(
                     id=db_pool.id, l7policy_id=policy_id)

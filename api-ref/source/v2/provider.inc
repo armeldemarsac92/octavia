@@ -411,6 +411,15 @@ and add the provider name to ``enabled_tcp_tls_termination_providers`` after
 upgrading the regional database, API, workers, driver library and Amphora
 fleet. This enrollment is independent of TLS passthrough.
 
+``tcp_tls_backend_auth_v1`` also allows a terminating TCP listener to route to
+a TCP pool with ``tls_enabled: true``, a literal DNS ``backend_tls_hostname``,
+and a ``ca_tls_container_ref``. The backend hostname controls SNI and
+certificate verification for application and health-check connections.
+Both ``tcp_tls_termination_v1`` and ``backend_tls_hostname_v1`` are required.
+Enroll the provider in
+``[api_settings] enabled_tcp_tls_backend_auth_providers`` after qualifying
+the regional API, workers and Amphora fleet.
+
 .. rest_status_code:: success ../http-status.yaml
 
    - 200

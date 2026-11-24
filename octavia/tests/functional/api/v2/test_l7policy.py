@@ -4158,6 +4158,199 @@ class TestL7Policy(base.BaseAPITest):
 
     @mock.patch('octavia.common.tls_utils.cert_parser.load_certificates_data')
     @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
+    def test_tcp_tls_backend_auth_admission_and_withdrawal(self, rpc, certs):
+        certs.return_value = {
+            'tls_cert': data_models.TLSContainer(certificate='test')}
+        self.cert_manager_mock().get_secret.return_value = (
+            sample_certs.X509_CA_CERT)
+        self.conf.config(
+            group='api_settings',
+            enabled_tcp_tls_termination_providers=['amphora'],
+            enabled_tcp_tls_backend_auth_providers=['amphora', 'noop_driver'],
+            enabled_tls_sni_providers=['amphora'],
+            allow_ping_health_monitors=True)
+        lb = self.create_load_balancer(
+            uuidutils.generate_uuid(), provider='amphora')['loadbalancer']
+        lb_id = lb['id']
+        capability_path = self.PROVIDERS_PATH + '/{}/gateway_capabilities'
+        capability = 'tcp_tls_backend_auth_v1'
+        self.assertNotIn(capability, self.get(capability_path.format(
+            'amphora')).json['gateway_capabilities'])
+        self.set_lb_status(lb_id)
+        args = lb_id, 'TCP', 'ROUND_ROBIN'
+        protected = {'tls_enabled': True,
+                     'backend_tls_hostname': 'abc.example.com',
+                     'ca_tls_container_ref': uuidutils.generate_uuid()}
+        self.create_pool(*args, **protected, status=501)
+        self.conf.config(group='api_settings',
+                         enabled_backend_tls_hostname_providers=['amphora'])
+        self.assertIn(capability, self.get(capability_path.format(
+            'amphora')).json['gateway_capabilities'])
+        self.assertNotIn(capability, self.get(capability_path.format(
+            'noop_driver')).json['gateway_capabilities'])
+        self.create_pool(*args, **dict(protected, ca_tls_container_ref=None),
+                         status=400)
+        listener = self.create_listener(
+            'TCP', 443, lb_id, tcp_tls_termination=True,
+            default_tls_container_ref=uuidutils.generate_uuid())['listener']
+        self.set_lb_status(lb_id)
+        pool = self.create_pool(*args, **protected)['pool']
+        pool_id = pool['id']
+        pool_path = self.POOL_PATH.format(pool_id=pool_id)
+        self.set_lb_status(lb_id)
+        self.assertEqual('abc.example.com', rpc.return_value.cast.call_args
+                         .kwargs['pool']['backend_tls_hostname'])
+
+        passthrough = self.create_listener('TCP', 8443, lb_id)['listener']
+        self.set_lb_status(lb_id)
+        self.create_listener('TCP', 9443, lb_id, default_pool_id=pool_id,
+                             status=400)
+        passthrough_path = self.LISTENER_PATH.format(
+            listener_id=passthrough['id'])
+        self.put(passthrough_path, {'listener': {'default_pool_id': pool_id}},
+                 status=400)
+        self.create_l7policy(passthrough['id'], 'REDIRECT_TO_POOL',
+                             redirect_pool_id=pool_id, status=400)
+        self.create_pool(*args, listener_id=passthrough['id'], **protected,
+                         status=400)
+
+        self.create_health_monitor(pool_id, 'PING', 5, 2, 2, 2, status=400)
+        self.create_health_monitor(pool_id, 'TCP', 5, 2, 2, 2)
+        self.set_lb_status(lb_id)
+        member = self.create_member(
+            pool_id, '192.0.2.10', 8443)['member']
+        self.set_lb_status(lb_id)
+        policy = self.create_l7policy(
+            listener['id'], 'REDIRECT_TO_POOL',
+            redirect_pool_id=pool_id)['l7policy']
+        self.set_lb_status(lb_id)
+        rule = self.create_l7rule(
+            policy['id'], 'TLS_SNI', 'EQUAL_TO', 'tls.example.com')['rule']
+        self.set_lb_status(lb_id)
+        listener_path = self.LISTENER_PATH.format(listener_id=listener['id'])
+        self.put(listener_path, {'listener': {'default_pool_id': pool_id}})
+        self.set_lb_status(lb_id)
+        self.put(pool_path, {'pool': {'tls_enabled': False}}, status=400)
+
+        self.conf.config(group='api_settings',
+                         enabled_tcp_tls_backend_auth_providers=[])
+        ca_ref = protected['ca_tls_container_ref']
+        self.put(pool_path, {'pool': {'ca_tls_container_ref': ca_ref}})
+        self.set_lb_status(lb_id)
+        self.put(pool_path, {'pool': {
+            'ca_tls_container_ref': uuidutils.generate_uuid()}}, status=501)
+        self.assertEqual(ca_ref, self.get(pool_path).json['pool'][
+            'ca_tls_container_ref'])
+        self.create_member(pool_id, '192.0.2.11', 8443, status=501)
+        members_path = self.MEMBERS_PATH.format(pool_id=pool_id)
+        member_path = self.MEMBER_PATH.format(
+            pool_id=pool_id, member_id=member['id'])
+        # Older members can have a NULL weight, which uses the default.
+        with self.session.begin():
+            self.session.get(models.Member, member['id']).weight = None
+        self.put(member_path, {'member': {'name': 'draining'}})
+        self.set_lb_status(lb_id)
+        self.put(member_path, {'member': {'weight': 0}})
+        self.set_lb_status(lb_id)
+        self.put(member_path, {'member': {'weight': 1}}, status=501)
+        self.put(member_path, {'member': {'admin_state_up': False}})
+        self.set_lb_status(lb_id)
+        self.put(member_path, {'member': {
+            'admin_state_up': True, 'weight': 1}}, status=501)
+        candidate = {'address': '192.0.2.10', 'protocol_port': 8443}
+        self.put(members_path, {'members': [candidate]}, status=501)
+        new_member = dict(candidate, address='192.0.2.12')
+        self.put(members_path + '?additive_only=true',
+                 {'members': [new_member]}, status=501)
+        self.assertEqual([member['id']], [
+            row['id'] for row in self.get(members_path).json['members']])
+        self.assertFalse(
+            self.get(member_path).json['member']['admin_state_up'])
+        self.put(members_path, {'members': []}, status=202)
+        self.set_lb_status(lb_id)
+        rule_path = self.L7RULE_PATH.format(l7policy_id=policy['id'],
+                                            l7rule_id=rule['id'])
+        policy_path = self.L7POLICY_PATH.format(l7policy_id=policy['id'])
+        lb_path = self.LB_PATH.format(lb_id=lb_id)
+        for resource, path in (
+                ('loadbalancer', lb_path), ('listener', listener_path),
+                ('l7policy', policy_path), ('rule', rule_path),
+                ('pool', pool_path)):
+            with self.subTest(resource=resource):
+                self.put(path, {resource: {'admin_state_up': False}})
+                self.set_lb_status(lb_id)
+                self.put(path, {resource: {'admin_state_up': True}},
+                         status=501)
+                current = self.get(path).json[resource]
+                self.assertFalse(current['admin_state_up'])
+        self.put(pool_path, {'pool': {'backend_tls_hostname': None,
+                                      'tls_enabled': False}}, status=400)
+        self.put(listener_path, {'listener': {'default_pool_id': None}})
+        self.set_lb_status(lb_id)
+        self.delete(rule_path)
+        self.set_lb_status(lb_id)
+        self.delete(policy_path)
+        database_tasks.DeleteL7PolicyInDB().execute(
+            {constants.L7POLICY_ID: policy['id']})
+        self.set_lb_status(lb_id)
+        self.put(pool_path, {'pool': {'backend_tls_hostname': None,
+                                      'tls_enabled': False}})
+        self.set_lb_status(lb_id)
+        self.delete(pool_path)
+
+    @mock.patch('octavia.common.tls_utils.cert_parser.load_certificates_data')
+    @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
+    def test_tcp_tls_backend_auth_upgrades_existing_pool(self, rpc, certs):
+        certs.return_value = {
+            'tls_cert': data_models.TLSContainer(certificate='test')}
+        self.cert_manager_mock().get_secret.return_value = (
+            sample_certs.X509_CA_CERT)
+        self.conf.config(
+            group='api_settings',
+            enabled_tcp_tls_termination_providers=['amphora'],
+            enabled_backend_tls_hostname_providers=['amphora'],
+            enabled_tcp_tls_backend_auth_providers=['amphora'],
+            allow_ping_health_monitors=True)
+        lb = self.create_load_balancer(
+            uuidutils.generate_uuid(), provider='amphora')['loadbalancer']
+        lb_id = lb['id']
+        self.set_lb_status(lb_id)
+        listener = self.create_listener(
+            'TCP', 443, lb_id, tcp_tls_termination=True,
+            default_tls_container_ref=uuidutils.generate_uuid())['listener']
+        self.set_lb_status(lb_id)
+        pool = self.create_pool(
+            lb_id, 'TCP', 'ROUND_ROBIN', listener_id=listener['id'])['pool']
+        pool_id = pool['id']
+        self.set_lb_status(lb_id)
+        monitor = self.create_health_monitor(
+            pool_id, 'PING', 5, 2, 2, 2)['healthmonitor']
+        self.set_lb_status(lb_id)
+        member = self.create_member(
+            pool_id, '192.0.2.10', 8443, monitor_port=9443)['member']
+        self.set_lb_status(lb_id)
+
+        monitor_path = self.HM_PATH.format(healthmonitor_id=monitor['id'])
+        pool_path = self.POOL_PATH.format(pool_id=pool_id)
+        auth = {'pool': {'tls_enabled': True,
+                         'backend_tls_hostname': 'abc.example.com',
+                         'ca_tls_container_ref': uuidutils.generate_uuid()}}
+        self.put(pool_path, auth, status=400)
+        self.put(monitor_path, {'healthmonitor': {'admin_state_up': False}})
+        self.set_lb_status(lb_id)
+        result = self.put(pool_path, auth).json['pool']
+        self.assertEqual('abc.example.com', result['backend_tls_hostname'])
+        self.set_lb_status(lb_id)
+        self.put(monitor_path, {'healthmonitor': {'admin_state_up': True}},
+                 status=400)
+        member_path = self.MEMBER_PATH.format(
+            pool_id=pool_id, member_id=member['id'])
+        updated = self.put(member_path, {'member': {'weight': 2}}).json[
+            'member']
+        self.assertEqual(9443, updated['monitor_port'])
+
+    @mock.patch('octavia.common.tls_utils.cert_parser.load_certificates_data')
+    @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
     def test_tcp_tls_termination_nested_create(self, rpc, certs):
         certs.return_value = {
             'tls_cert': data_models.TLSContainer(certificate='test')}
@@ -4196,6 +4389,25 @@ class TestL7Policy(base.BaseAPITest):
         listener_path = self.LISTENER_PATH.format(listener_id=saved['id'])
         self.assertTrue(self.get(listener_path).json['listener'][
             'tcp_tls_termination'])
+
+        self.cert_manager_mock().get_secret.return_value = (
+            sample_certs.X509_CA_CERT)
+        pool.update(tls_enabled=True, backend_tls_hostname='abc.example.com',
+                    ca_tls_container_ref=uuidutils.generate_uuid())
+        listener['default_pool'] = {'name': pool['name']}
+        self.conf.config(group='api_settings',
+                         enabled_backend_tls_hostname_providers=['amphora'])
+        self.post(self.LBS_PATH, body, status=501)
+        self.conf.config(
+            group='api_settings',
+            enabled_tcp_tls_backend_auth_providers=['amphora'])
+        lb = self.post(self.LBS_PATH, body).json['loadbalancer']
+        backend = lb['pools'][0]
+        self.assertEqual('abc.example.com', backend['backend_tls_hostname'])
+        self.assertEqual(backend['id'], lb['listeners'][0]['default_pool_id'])
+        self.assertEqual(
+            backend['id'],
+            lb['listeners'][0]['l7policies'][0]['redirect_pool_id'])
 
     @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
     def test_tls_sni_nested_create(self, rpc):

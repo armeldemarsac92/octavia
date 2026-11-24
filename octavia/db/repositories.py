@@ -1017,6 +1017,14 @@ class HealthMonitorRepository(BaseRepository):
     model_class = models.HealthMonitor
     activation_parent = ('pool', 'load_balancer')
 
+    def get_enabled_type_for_pool(self, session, pool_id):
+        monitor = self.model_class
+        return (session.query(monitor.type)
+                .filter_by(pool_id=pool_id, enabled=True)
+                .filter(monitor.provisioning_status.notin_(
+                    (consts.PENDING_DELETE, consts.DELETED)))
+                .with_for_update().scalar())
+
     def get_all_API_list(self, session, pagination_helper=None, **filters):
         """Get a list of health monitors for the API list call.
 
@@ -1176,6 +1184,19 @@ class MemberRepository(BaseRepository):
     model_class = models.Member
     activation_parent = ('pool', 'load_balancer')
 
+    def get_routing_for_update(self, session, pool_id, member_ids):
+        if not member_ids:
+            return {}
+        member = self.model_class
+        rows = (session.query(member.id, member.enabled, member.weight,
+                              member.backup, member.monitor_address,
+                              member.monitor_port, member.subnet_id)
+                .filter(member.pool_id == pool_id, member.id.in_(member_ids),
+                        member.provisioning_status.not_in(
+                            (consts.PENDING_DELETE, consts.DELETED)))
+                .order_by(member.id).with_for_update())
+        return {row.id: row for row in rows}
+
     def get_all_API_list(self, session, pagination_helper=None, **filters):
         """Get a list of members for the API list call.
 
@@ -1227,10 +1248,12 @@ class ListenerRepository(BaseRepository):
                     (consts.PENDING_DELETE, consts.DELETED)))
                 .populate_existing().with_for_update().all())
 
-    def has_tcp_tls_default_pool(self, session, pool_id):
+    def has_default_pool_listener(self, session, pool_id, *,
+                                  tcp_tls_termination):
         listener = self.model_class
         return (session.query(listener.id)
-                .filter_by(default_pool_id=pool_id, tcp_tls_termination=True)
+                .filter_by(default_pool_id=pool_id,
+                           tcp_tls_termination=tcp_tls_termination)
                 .filter(listener.provisioning_status.notin_(
                     (consts.PENDING_DELETE, consts.DELETED)))
                 .with_for_update().limit(1).scalar() is not None)
@@ -2160,10 +2183,26 @@ class L7PolicyRepository(BaseRepository):
                 resource=data_models.Pool._name(), id=pool_id)
         return pool
 
-    def validate_tcp_redirect_pool(self, session, listener, pool_id):
-        pool = self.get_redirect_pool_for_update(session, listener, pool_id)
-        validate.validate_tcp_redirect_pool_protocol(
-            pool.protocol, pool.tls_enabled)
+    def get_active_protected_tcp_policy_pools(self, session, listener_id):
+        policy = self.model_class
+        rule = models.L7Rule
+        pool = models.Pool
+        inactive = (consts.PENDING_DELETE, consts.DELETED)
+        return (session.query(pool)
+                .join(policy, policy.redirect_pool_id == pool.id)
+                .join(policy.l7rules)
+                .filter(
+                    policy.listener_id == listener_id,
+                    policy.enabled.is_(True),
+                    policy.action == consts.L7POLICY_ACTION_REDIRECT_TO_POOL,
+                    policy.provisioning_status.notin_(inactive),
+                    rule.enabled.is_(True),
+                    rule.provisioning_status.notin_(inactive),
+                    pool.protocol == consts.PROTOCOL_TCP,
+                    pool.backend_tls_hostname.is_not(None),
+                    pool.enabled.is_(True),
+                    pool.provisioning_status.notin_(inactive))
+                .populate_existing().with_for_update().all())
 
     def get_https_listener_hostnames(self, session, listener_id):
         model = self.model_class
@@ -2248,20 +2287,22 @@ class L7PolicyRepository(BaseRepository):
             session, consts.L7RULE_TYPE_TLS_SNI,
             compare_type=consts.L7RULE_COMPARE_TYPE_ENDS_WITH, **filters)
 
-    def get_tcp_policy_using_pool(self, session, pool_id, *,
-                                  tcp_tls_termination=False):
+    def get_policy_using_pool(self, session, pool_id, *,
+                              tcp_tls_termination=False, tcp_only=True):
         model = self.model_class
-        return (session.query(model.id)
-                .join(model.listener)
-                .filter(models.Listener.protocol == consts.PROTOCOL_TCP)
-                .filter(models.Listener.tcp_tls_termination.is_(
-                    tcp_tls_termination))
-                .filter(model.redirect_pool_id == pool_id)
-                .filter(model.action ==
-                        consts.L7POLICY_ACTION_REDIRECT_TO_POOL)
-                .filter(model.provisioning_status.notin_(
-                    (consts.PENDING_DELETE, consts.DELETED)))
-                .with_for_update().limit(1).scalar())
+        query = (session.query(model.id)
+                 .join(model.listener)
+                 .filter(models.Listener.tcp_tls_termination.is_(
+                     tcp_tls_termination))
+                 .filter(model.redirect_pool_id == pool_id)
+                 .filter(model.action ==
+                         consts.L7POLICY_ACTION_REDIRECT_TO_POOL)
+                 .filter(model.provisioning_status.notin_(
+                     (consts.PENDING_DELETE, consts.DELETED))))
+        if tcp_only:
+            query = query.filter(
+                models.Listener.protocol == consts.PROTOCOL_TCP)
+        return query.with_for_update().limit(1).scalar()
 
     def _validate_l7policy_pool_data(self, session, l7policy, old_policy=None):
         """Does validations on a given L7 policy."""

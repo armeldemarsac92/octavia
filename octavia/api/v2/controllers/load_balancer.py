@@ -620,7 +620,7 @@ class LoadBalancersController(base.BaseController):
                 lock_session.expire_all()
 
                 db_pools, db_lists = self._graph_create(
-                    lock_session, db_lb, listeners, pools)
+                    lock_session, db_lb, listeners, pools, driver)
 
             # Prepare the data for the driver data model
             driver_lb_dict = driver_utils.lb_dict_to_provider_dict(
@@ -710,18 +710,21 @@ class LoadBalancersController(base.BaseController):
         pools_by_name = {p.get('name'): p for p in pools}
         for li in listeners:
             tcp_tls_termination = li.get('tcp_tls_termination')
-            if tcp_tls_termination and li.get('default_pool'):
-                target = pools_by_name[li['default_pool']['name']]
-                validate.validate_tcp_redirect_pool_protocol(
-                    target.get('protocol'), target.get('tls_enabled'))
-            if driver_utils.uses_tls_sni_policy_path(
-                    driver, li['protocol'], tcp_tls_termination):
-                for policy in li.get('l7policies') or []:
-                    target = pools_by_name[policy['redirect_pool']['name']]
-                    validate.validate_tcp_redirect_pool_protocol(
-                        target.get('protocol'), target.get('tls_enabled'))
+            tcp_policy = driver_utils.uses_tls_sni_policy_path(
+                driver, li['protocol'], tcp_tls_termination)
+            for policy in li.get('l7policies') or []:
+                redirect_pool = policy.get('redirect_pool')
+                if redirect_pool:
+                    target = pools_by_name[redirect_pool['name']]
+                    driver_utils.validate_tcp_pool_attachment(
+                        driver, target.get('protocol'),
+                        target.get('tls_enabled'),
+                        tcp_tls_termination=tcp_tls_termination,
+                        hostname=target.get('backend_tls_hostname'),
+                        ca_ref=target.get('ca_tls_certificate_id'),
+                        tls_sni_policy=tcp_policy)
 
-    def _graph_create(self, session, db_lb, listeners, pools):
+    def _graph_create(self, session, db_lb, listeners, pools, driver):
         # Check quotas for pools.
         if pools and self.repositories.check_quota_met(
                 session, data_models.Pool, db_lb.project_id,
@@ -769,7 +772,7 @@ class LoadBalancersController(base.BaseController):
             li['load_balancer_id'] = db_lb.id
             li['project_id'] = db_lb.project_id
             new_lists.append(listener.ListenersController()._graph_create(
-                session, li, pool_name_ids=pool_name_ids))
+                session, li, driver, pool_name_ids=pool_name_ids))
 
         return new_pools, new_lists
 
