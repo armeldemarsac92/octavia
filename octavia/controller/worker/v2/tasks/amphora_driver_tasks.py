@@ -345,6 +345,8 @@ class ApplyL7PolicyActivation(BaseAmphoraTask):
                                            else constants.OFFLINE)
             status = constants.ACTIVE if healthy else constants.ERROR
             lb.provisioning_status = status
+            if not healthy and listener.frontend_fallback_owns_error is True:
+                listener.frontend_fallback_owns_error = False
             listener.provisioning_status = status
             if applied:
                 phase = 'applied'

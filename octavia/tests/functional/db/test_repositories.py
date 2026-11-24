@@ -2782,6 +2782,57 @@ class TestListenerRepositoryTest(BaseRepositoryTest):
         self.assertEqual(1025, new_listener.peer_port)
         self.assertTrue(new_listener.enabled)
 
+    def test_frontend_fallback_error_ownership(self):
+        listener_id = self.FAKE_UUID_3
+        self.listener_repo.create(
+            self.session, id=listener_id, project_id=self.FAKE_UUID_2,
+            load_balancer_id=self.load_balancer.id, enabled=True,
+            protocol=constants.PROTOCOL_TERMINATED_HTTPS, protocol_port=443,
+            client_authentication_insecure_fallback=True,
+            provisioning_status=constants.ACTIVE,
+            operating_status=constants.ONLINE)
+        self.session.commit()
+        amp = self.create_amphora(self.FAKE_UUID_4, self.load_balancer.id)
+
+        def current():
+            return self.listener_repo.get(self.session, id=listener_id)
+
+        def withdrawn(closed):
+            health = self.amphora_repo.get_lb_for_health_update(
+                self.session, amp.id)
+            self.assertEqual(closed, health['listeners'][listener_id].get(
+                'frontend_fallback_closed', False))
+
+        self.listener_repo.set_frontend_fallback_statuses(
+            self.session, closed={listener_id}, restored=set())
+        self.assertEqual(constants.ERROR, current().provisioning_status)
+        self.assertIs(True, current().frontend_fallback_owns_error)
+        withdrawn(True)
+        self.listener_repo.set_frontend_fallback_statuses(
+            self.session, closed=set(), restored={listener_id})
+        self.assertEqual(constants.ACTIVE, current().provisioning_status)
+        self.assertIsNone(current().frontend_fallback_owns_error)
+        withdrawn(False)
+
+        self.listener_repo.set_frontend_fallback_statuses(
+            self.session, closed={listener_id}, restored=set())
+        self.listener_repo.update(self.session, listener_id,
+                                  provisioning_status=constants.ERROR)
+        self.assertIs(False, current().frontend_fallback_owns_error)
+        withdrawn(True)
+        self.listener_repo.set_frontend_fallback_statuses(
+            self.session, closed=set(), restored={listener_id})
+        self.assertEqual(constants.ERROR, current().provisioning_status)
+        self.assertIsNone(current().frontend_fallback_owns_error)
+        withdrawn(False)
+
+        self.listener_repo.set_frontend_fallback_statuses(
+            self.session, closed={listener_id}, restored=set())
+        self.assertIs(False, current().frontend_fallback_owns_error)
+        self.listener_repo.set_frontend_fallback_statuses(
+            self.session, closed=set(), restored={listener_id})
+        self.assertEqual(constants.ERROR, current().provisioning_status)
+
     def test_create_no_peer_port(self):
         lb = self.create_loadbalancer(uuidutils.generate_uuid())
         listener = self.listener_repo.create(

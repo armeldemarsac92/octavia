@@ -270,6 +270,30 @@ class FixedHTTPResponse(BaseType):
     status_code = wtypes.wsattr(FixedHTTPStatusCode(), mandatory=True)
 
 
+class StrictBoolean(wtypes.UserType):
+    # Preserve the JSON value before WSME can coerce it to a bool.
+    basetype = object
+    name = 'strict_boolean'
+
+    @staticmethod
+    def validate(value):
+        if type(value) is not bool:
+            raise ValueError(_('Expected a JSON boolean.'))
+        return value
+
+
+class StrictBooleanAttribute(wtypes.wsattr):
+    def __init__(self):
+        super().__init__(StrictBoolean())
+
+    def __set__(self, instance, value):
+        # WSME bypasses type validation for explicit JSON null.
+        if value is None:
+            raise wsme_exc.InvalidInput(
+                self.name, value, _('Expected a JSON boolean.'))
+        super().__set__(instance, value)
+
+
 class HTTPRequestRedirect(wtypes.UserType):
     # Keep the original JSON types and reject unknown keys.
     basetype = object

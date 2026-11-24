@@ -664,6 +664,7 @@ def listener_dict_to_provider_dict(listener_dict, for_delete=False,
             'load_balancer_id')
 
     # Preserve the existing driver payload for ordinary listeners.
+    new_listener_dict.pop('frontend_fallback_owns_error', None)
     if not new_listener_dict.get('tcp_tls_termination'):
         new_listener_dict.pop('tcp_tls_termination', None)
     if (not FRONTEND_CLIENT_AUTH_INSECURE_FALLBACK_PAYLOAD_AVAILABLE or
