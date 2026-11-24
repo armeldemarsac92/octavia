@@ -87,9 +87,14 @@ class BaseRepository:
         if lb_id is None:
             return False
         lb = LoadBalancerRepository().get_for_update(session, lb_id)
+        operation = lb.l7policy_activation if lb else None
+        if (operation and
+                operation['phase'] == consts.L7POLICY_ACTIVATION_FENCED and
+                session.info.get(consts.FAILOVER_LOADBALANCER_ID) == lb.id):
+            return False
         # A terminal receipt also guards against old deliveries. New CRUD
         # admissions invalidate it under the same load balancer row lock.
-        return lb is not None and lb.l7policy_activation is not None
+        return operation is not None
 
     model_class = None
 
@@ -906,14 +911,54 @@ class LoadBalancerRepository(BaseRepository):
               .with_for_update()
               .filter_by(id=id).one())
         if (lb.provisioning_status not in consts.FAILOVERABLE_STATUSES or
-                self._batch_pending(lb)):
+                (self._batch_pending(lb) and
+                 not self._fence_failed_activation(session, lb, status))):
             if raise_exception:
                 raise exceptions.ImmutableObject(
                     resource='Load Balancer', id=id)
             return False
-        self._invalidate_batch(lb)
+        operation = lb.l7policy_activation or {}
+        if operation.get('phase') == consts.L7POLICY_ACTIVATION_FENCED:
+            lb.l7policy_graph_generation = uuidutils.generate_uuid()
+        else:
+            self._invalidate_batch(lb)
         lb.provisioning_status = status
         session.add(lb)
+        return True
+
+    @staticmethod
+    def _fence_failed_activation(session, lb, status):
+        operation = lb.l7policy_activation
+        if (lb.provisioning_status != consts.ERROR or
+                status != consts.PENDING_UPDATE or
+                operation['phase'] != 'reverting'):
+            return False
+
+        # Do not wait for a worker that may itself be waiting for this row.
+        # After releasing the render lock, an old delivery must acquire the
+        # row and observe token invalidation before it can render again.
+        with db_api.listener_render_lock(lb.id) as acquired:
+            if not acquired:
+                return False
+            listener_id = (session.query(models.Listener.id)
+                           .filter_by(id=operation['listener_id'],
+                                      load_balancer_id=lb.id,
+                                      project_id=lb.project_id)
+                           .with_for_update().scalar())
+            if listener_id:
+                policy_repo = L7PolicyRepository()
+                policies = policy_repo.get_listener_policies_for_update(
+                    session, listener_id)
+                for policy in policies:
+                    if (policy.project_id == lb.project_id and
+                            policy.id in operation['request']['policies']):
+                        policy.enabled = False
+                        policy.operating_status = consts.OFFLINE
+                        policy.provisioning_status = consts.ERROR
+            # Revoke the batch delivery while retaining its guard against
+            # ordinary tasks already persisted by the jobboard.
+            lb.l7policy_activation = {
+                **operation, 'phase': consts.L7POLICY_ACTIVATION_FENCED}
         return True
 
     @staticmethod

@@ -101,6 +101,20 @@ class ListenerProvisioningError(ProvisioningErrors):
     message = _('couldn\'t provision Listener')
 
 
+class CoordinatedListenerUpdateError(ListenerProvisioningError):
+
+    message = _('Listener update failed on one or more failover amphorae.')
+
+    def __init__(self, amphora_errors):
+        self.amphora_errors = amphora_errors
+        super().__init__()
+
+
+class ListenerRenderLockBusy(ListenerProvisioningError):
+
+    message = _('The load balancer listener render lock is busy.')
+
+
 class LoadBalancerProvisoningError(ProvisioningErrors):
 
     message = _('couldn\'t provision LoadBalancer')

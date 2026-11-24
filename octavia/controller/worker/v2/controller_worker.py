@@ -1118,6 +1118,8 @@ class ControllerWorker:
                                               amphora_id,
                                               status=constants.ERROR)
                     if amphora and amphora.load_balancer_id:
+                        session.info[constants.FAILOVER_LOADBALANCER_ID] = (
+                            amphora.load_balancer_id)
                         self._lb_repo.update(
                             session, amphora.load_balancer_id,
                             provisioning_status=constants.ERROR)
@@ -1269,6 +1271,8 @@ class ControllerWorker:
                 LOG.exception("LB %(lbid)s failover exception: %(exc)s",
                               {'lbid': load_balancer_id, 'exc': str(e)})
                 with session.begin():
+                    session.info[constants.FAILOVER_LOADBALANCER_ID] = (
+                        load_balancer_id)
                     self._lb_repo.update(
                         session, load_balancer_id,
                         provisioning_status=constants.ERROR)

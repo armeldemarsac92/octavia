@@ -23,6 +23,7 @@ from stevedore import driver as stevedore_driver
 from taskflow import retry
 from taskflow import task
 from taskflow.types import failure
+import tenacity
 
 from octavia.amphorae.backends.agent import agent_jinja_cfg
 from octavia.amphorae.driver_exceptions import exceptions as driver_except
@@ -37,6 +38,17 @@ from octavia.network import data_models
 
 CONF = cfg.CONF
 LOG = logging.getLogger(__name__)
+
+
+def _retry_render(operation, *args):
+    config = CONF.haproxy_amphora
+    wait_for_render = tenacity.Retrying(
+        retry=tenacity.retry_if_exception_type(
+            driver_except.ListenerRenderLockBusy),
+        stop=tenacity.stop_after_attempt(config.connection_max_retries),
+        wait=tenacity.wait_fixed(config.connection_retry_interval),
+        reraise=True)
+    return wait_for_render(operation, *args)
 
 
 class BaseAmphoraTask(task.Task):
@@ -112,8 +124,14 @@ class AmphoraIndexListenerUpdate(BaseAmphoraTask):
         with session.begin():
             db_lb = self.loadbalancer_repo.get(
                 session, id=loadbalancer[constants.LOADBALANCER_ID])
-        if self.amphora_driver.update_failover_listeners(
-                db_lb, amphora_index, amphorae_status, timeout_dict) is True:
+        try:
+            if self.amphora_driver.update_failover_listeners(
+                    db_lb, amphora_index, amphorae_status,
+                    timeout_dict) is True:
+                return
+        except driver_except.CoordinatedListenerUpdateError as error:
+            for amphora_id, cause in error.amphora_errors.items():
+                self._handle_update_failure(amphora_id, new_amphora_id, cause)
             return
 
         # Note, we don't want this to cause a revert as it may be used
@@ -136,17 +154,19 @@ class AmphoraIndexListenerUpdate(BaseAmphoraTask):
                     id=amphorae[amphora_index][constants.ID])
             self.amphora_driver.update_amphora_listeners(
                 db_lb, db_amp, timeout_dict)
-        except Exception as e:
-            LOG.error('Failed to update listeners on amphora %s. Skipping '
-                      'this amphora as it is failing to update due to: %s',
-                      amphora_id, str(e))
-            # Update only the status of the newly created amphora during the
-            # failover
-            if amphora_id == new_amphora_id:
-                session = db_apis.get_session()
-                with session.begin():
-                    self.amphora_repo.update(session, amphora_id,
-                                             status=constants.ERROR)
+        except Exception as error:
+            self._handle_update_failure(amphora_id, new_amphora_id, error)
+
+    def _handle_update_failure(self, amphora_id, new_amphora_id, error):
+        LOG.error('Failed to update listeners on amphora %s. Skipping '
+                  'this amphora as it is failing to update due to: %s',
+                  amphora_id, str(error))
+        # Health manager handles a surviving peer. Only mark the replacement.
+        if amphora_id == new_amphora_id:
+            session = db_apis.get_session()
+            with session.begin():
+                self.amphora_repo.update(session, amphora_id,
+                                         status=constants.ERROR)
 
 
 class ListenersUpdate(BaseAmphoraTask):
@@ -154,12 +174,17 @@ class ListenersUpdate(BaseAmphoraTask):
 
     def execute(self, loadbalancer_id):
         """Execute updates per listener for an amphora."""
-        if CONF.api_settings.enabled_l7policy_batch_activation_providers:
-            with db_apis.listener_render_lock(loadbalancer_id) as lock:
-                if lock:
-                    self._update(loadbalancer_id, guard_batch=True)
+        if not CONF.api_settings.enabled_l7policy_batch_activation_providers:
+            self._update(loadbalancer_id, guard_batch=False)
             return
-        self._update(loadbalancer_id, guard_batch=False)
+
+        _retry_render(self._locked_update, loadbalancer_id)
+
+    def _locked_update(self, loadbalancer_id):
+        with db_apis.listener_render_lock(loadbalancer_id) as lock:
+            if not lock:
+                raise driver_except.ListenerRenderLockBusy()
+            self._update(loadbalancer_id, guard_batch=True)
 
     def _update(self, loadbalancer_id, *, guard_batch):
         session = db_apis.get_session()
@@ -328,7 +353,7 @@ class ApplyL7PolicyActivation(BaseAmphoraTask):
                         policy.enabled = False
             return candidate, False
 
-    def _finish(self, delivery, *, applied, healthy):
+    def _finish(self, delivery, *, applied, healthy, recovered_pools=None):
         with db_apis.session().begin() as session:
             owned = self._owned(session, delivery)
             if not owned:
@@ -337,6 +362,9 @@ class ApplyL7PolicyActivation(BaseAmphoraTask):
             if applied and not self._matches(session, lb, listener,
                                              operation['request']):
                 return False
+            if recovered_pools:
+                self.repositories.pool.set_backend_tls_pool_statuses(
+                    session, closed=(), recovered=recovered_pools)
             for policy in self._selected(lb, listener, operation):
                 policy.enabled = applied
                 policy.provisioning_status = (constants.ACTIVE if applied
@@ -345,9 +373,9 @@ class ApplyL7PolicyActivation(BaseAmphoraTask):
                                            else constants.OFFLINE)
             status = constants.ACTIVE if healthy else constants.ERROR
             lb.provisioning_status = status
-            if not healthy and listener.frontend_fallback_owns_error is True:
-                listener.frontend_fallback_owns_error = False
-            listener.provisioning_status = status
+            listener.provisioning_status = (
+                constants.ERROR if listener.frontend_fallback_owns_error
+                is True else status)
             if applied:
                 phase = 'applied'
             else:
@@ -365,17 +393,21 @@ class ApplyL7PolicyActivation(BaseAmphoraTask):
 
     def _restore(self, delivery, graph):
         try:
-            self.amphora_driver.update(graph, l7policy_activation=True)
+            recovered = self.amphora_driver.update(
+                graph, l7policy_activation=True, l7policy_restoration=True)
         except Exception:
             self._finish(delivery, applied=False, healthy=False)
             raise
-        self._finish(delivery, applied=False, healthy=True)
+        self._finish(delivery, applied=False, healthy=True,
+                     recovered_pools=recovered)
 
     def execute(self, l7policy_activation):
-        delivery = l7policy_activation
+        _retry_render(self._execute_locked, l7policy_activation)
+
+    def _execute_locked(self, delivery):
         with db_apis.listener_render_lock(delivery['loadbalancer_id']) as lock:
             if not lock:
-                return
+                raise driver_except.ListenerRenderLockBusy()
             graph, restoring = self._prepare(delivery)
             if graph is None:
                 return
@@ -383,13 +415,15 @@ class ApplyL7PolicyActivation(BaseAmphoraTask):
                 self._restore(delivery, graph)
                 return
             try:
-                self.amphora_driver.update(graph, l7policy_activation=True)
+                recovered = self.amphora_driver.update(
+                    graph, l7policy_activation=True)
             except Exception:
                 graph, _restoring = self._prepare(delivery, revert=True)
                 if graph is not None:
                     self._restore(delivery, graph)
                 raise
-            if not self._finish(delivery, applied=True, healthy=True):
+            if not self._finish(delivery, applied=True, healthy=True,
+                                recovered_pools=recovered):
                 graph, _restoring = self._prepare(delivery, revert=True)
                 if graph is not None:
                     self._restore(delivery, graph)
