@@ -176,6 +176,11 @@ api_opts = [
                        'require negotiated HTTP/2 on protected TLS pools. '
                        'Enable after upgrading octavia-lib, the database, '
                        'API, workers and all Amphora images.')),
+    cfg.ListOpt('enabled_backend_tls_subject_alt_names_providers', default=[],
+                help=_('Provider drivers whose regional Amphora fleets '
+                       'support explicit backend TLS subject alternative '
+                       'names. Enable after upgrading octavia-lib, the '
+                       'database, API, workers and all Amphora images.')),
     cfg.IntOpt('udp_connect_min_interval_health_monitor',
                default=3,
                help=_("The minimum health monitor delay interval for the "

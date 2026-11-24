@@ -340,6 +340,9 @@ class HaproxyAmphoraLoadBalancerDriver(
             required = [consts.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME]
             if getattr(pool, 'backend_tls_require_h2', False) is True:
                 required.append(consts.GATEWAY_CAPABILITY_BACKEND_TLS_H2_ALPN)
+            if getattr(pool, 'backend_tls_subject_alt_names', None):
+                required.append(
+                    consts.GATEWAY_CAPABILITY_BACKEND_TLS_SUBJECT_ALT_NAMES)
             unsupported = [
                 amp_id for amp_id, detail in details.items()
                 if any(detail.get(capability) is not True

@@ -101,6 +101,8 @@ MAX_L7POLICY_BATCH_ACTIVATION = 64
 GATEWAY_CAPABILITY_BACKEND_H2C = 'backend_h2c_v1'
 GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME = 'backend_tls_hostname_v1'
 GATEWAY_CAPABILITY_BACKEND_TLS_H2_ALPN = 'backend_tls_h2_alpn_v1'
+GATEWAY_CAPABILITY_BACKEND_TLS_SUBJECT_ALT_NAMES = (
+    'backend_tls_subject_alt_names_v1')
 GATEWAY_BACKEND_TLS_POOL_TAG = 'gateway-api-openstack.backend-tls=v1'
 GATEWAY_CAPABILITY_TCP_TLS_TERMINATION = 'tcp_tls_termination_v1'
 GATEWAY_CAPABILITY_TLS_SNI = 'tls_sni_passthrough_v1'

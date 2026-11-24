@@ -227,7 +227,7 @@ class TestHaproxyAmphoraLoadBalancerDriverTest(base.TestCase):
             [mock.call(amp, timeout_dict=None) for amp in amphorae],
             details.call_args_list)
 
-    def test_missing_h2_capability_closes_only_h2_pool_on_both_peers(self):
+    def test_missing_tls_capabilities_close_only_affected_pools(self):
         hostname = constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME
         h2_alpn = constants.GATEWAY_CAPABILITY_BACKEND_TLS_H2_ALPN
         amphorae = [
@@ -242,11 +242,17 @@ class TestHaproxyAmphoraLoadBalancerDriverTest(base.TestCase):
             id='grpc', enabled=True,
             backend_tls_hostname='backend.example.test',
             backend_tls_require_h2=True)
-        listener = mock.Mock(enabled=True, pools=[tls_pool, grpc_pool],
-                             protocol=constants.PROTOCOL_HTTP)
+        san_pool = data_models.Pool(
+            id='sans', enabled=True,
+            backend_tls_hostname='sni.example.test',
+            backend_tls_subject_alt_names=[
+                {'type': 'Hostname', 'hostname': 'id.example.test'}])
+        listener = mock.Mock(enabled=True, protocol=constants.PROTOCOL_HTTP,
+                             pools=[tls_pool, grpc_pool, san_pool])
         lb = mock.Mock(enabled=True, listeners=[listener], amphorae=amphorae)
+        sans = constants.GATEWAY_CAPABILITY_BACKEND_TLS_SUBJECT_ALT_NAMES
         self.driver.clients[API_VERSION].get_details.side_effect = [
-            {hostname: True, h2_alpn: True}, {hostname: True}]
+            {hostname: True, h2_alpn: True, sans: True}, {hostname: True}]
         trust = {'ca_cert': '/ca.pem'}
         with (
             mock.patch.object(self.driver, '_process_pool_certs',
@@ -263,9 +269,11 @@ class TestHaproxyAmphoraLoadBalancerDriverTest(base.TestCase):
         self.assertEqual(2, arm.call_count)
         for call in arm.call_args_list:
             self.assertEqual(
-                {tls_pool.id: trust, grpc_pool.id: {'closed': True}},
+                {tls_pool.id: trust, grpc_pool.id: {'closed': True},
+                 san_pool.id: {'closed': True}},
                 call.kwargs['backend_tls_certs'])
-        self.assertEqual({grpc_pool.id}, status.call_args.kwargs['closed'])
+        self.assertEqual({grpc_pool.id, san_pool.id},
+                         status.call_args.kwargs['closed'])
 
     @mock.patch('octavia.db.api.session')
     @mock.patch('octavia.db.repositories.PoolRepository.'

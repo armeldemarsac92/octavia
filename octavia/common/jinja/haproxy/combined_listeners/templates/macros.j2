@@ -582,7 +582,11 @@ frontend {{ listener.id }}
     {% endif %}
     {% if pool.tls_enabled %}
         {% set def_opt_prefix = " ssl" %}
-        {% if pool.backend_tls_hostname %}
+        {% if pool.backend_tls_san_options %}
+            {% set def_sni_opt = " sni str(%s) verify-san %s"|format(
+                pool.backend_tls_hostname,
+                pool.backend_tls_san_options|join(" verify-san ")) %}
+        {% elif pool.backend_tls_hostname %}
             {% set def_sni_opt = " sni str(%s) verifyhost-strict %s"|format(
                 pool.backend_tls_hostname, pool.backend_tls_hostname) %}
         {% else %}
@@ -726,7 +730,10 @@ backend {{ pool.id }}:{{ listener.id }}
         {% if (pool.health_monitor.type ==
                constants.HEALTH_MONITOR_HTTP or pool.health_monitor.type ==
                constants.HEALTH_MONITOR_HTTPS) %}
-            {% if pool.health_monitor.http_version %}
+            {% if pool.backend_tls_require_h2 %}
+    option httpchk
+    http-check send meth {{ pool.health_monitor.http_method }} uri {{ pool.health_monitor.url_path }} ver HTTP/2 hdr Host {{ pool.health_monitor.domain_name or pool.backend_tls_hostname }}
+            {% elif pool.health_monitor.http_version %}
     option httpchk {{ pool.health_monitor.http_method }} {{ pool.health_monitor.url_path }} HTTP/{{ pool.health_monitor.http_version }}
                 {% if (pool.health_monitor.http_version == 1.1 and
                        pool.health_monitor.domain_name) %}

@@ -83,8 +83,9 @@ class ToDictMixin:
         for attr, value in self.__dict__.items():
             if attr.startswith('_') or not kwargs.get(attr, True):
                 continue
-            if attr in ('tags', 'https_virtual_hosts'):
-                # Lists of scalar values also belong in shallow payloads.
+            if attr in ('tags', 'https_virtual_hosts',
+                        'backend_tls_subject_alt_names'):
+                # Preserve JSON attributes in shallow payloads.
                 ret[attr] = value
                 continue
             ret[attr] = self._to_dict(value, calling_classes=calling_classes,
@@ -304,7 +305,8 @@ class Pool(BaseDataModel):
                  ca_tls_certificate_id=None, crl_container_id=None,
                  tls_enabled=None, tls_ciphers=None, tls_versions=None,
                  alpn_protocols=None, backend_h2c=False,
-                 backend_tls_hostname=None, backend_tls_require_h2=False):
+                 backend_tls_hostname=None, backend_tls_require_h2=False,
+                 backend_tls_subject_alt_names=None):
         self.id = id
         self.project_id = project_id
         self.name = name
@@ -334,6 +336,7 @@ class Pool(BaseDataModel):
         self.backend_h2c = backend_h2c
         self.backend_tls_hostname = backend_tls_hostname
         self.backend_tls_require_h2 = backend_tls_require_h2
+        self.backend_tls_subject_alt_names = backend_tls_subject_alt_names
 
     def update(self, update_dict):
         for key, value in update_dict.items():

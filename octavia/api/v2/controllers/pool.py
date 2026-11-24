@@ -84,6 +84,19 @@ def _validate_backend_tls_require_h2(driver, hostname, *, enrolling):
                 'for this provider.'))
 
 
+def _validate_backend_tls_subject_alt_names(driver, hostname, *, enrolling):
+    if hostname is None:
+        raise exceptions.ValidationException(detail=_(
+            'backend_tls_subject_alt_names requires backend_tls_hostname.'))
+    if (enrolling and
+            constants.GATEWAY_CAPABILITY_BACKEND_TLS_SUBJECT_ALT_NAMES not in
+            driver_utils.gateway_capabilities(driver)):
+        raise exceptions.ProviderUnsupportedOptionError(
+            prov=driver.name, user_msg=_(
+                'Explicit backend TLS subject alternative names are '
+                'unavailable for this provider.'))
+
+
 class PoolsController(base.BaseController):
     RBAC_TYPE = constants.RBAC_POOL
 
@@ -172,7 +185,11 @@ class PoolsController(base.BaseController):
             raise exceptions.ValidationException(
                 detail=_('backend_tls_require_h2 must be true or false.'))
         hostname = pool_dict.get('backend_tls_hostname')
-        if pool_dict.get('backend_h2c') or hostname is not None or require_h2:
+        sans = pool_dict.get('backend_tls_subject_alt_names', [])
+        if sans is None:
+            validate.backend_tls_subject_alt_names(sans)
+        if (pool_dict.get('backend_h2c') or hostname is not None or
+                require_h2 or sans):
             if driver is None:
                 # Fully populated load balancer creation uses this path too.
                 provider = self._get_db_lb(
@@ -188,6 +205,9 @@ class PoolsController(base.BaseController):
                 pool_dict.get('ca_tls_certificate_id'), enrolling=True)
         if require_h2:
             _validate_backend_tls_require_h2(driver, hostname, enrolling=True)
+        if sans:
+            _validate_backend_tls_subject_alt_names(
+                driver, hostname, enrolling=True)
 
         # Make sure we have a client CA if they specify a CRL
         if (pool_dict.get('crl_container_id') and
@@ -382,8 +402,10 @@ class PoolsController(base.BaseController):
                 raise exceptions.QuotaException(
                     resource=data_models.Pool._name())
 
-            pool_dict = db_prepare.create_pool(
-                pool.to_dict(render_unsets=True))
+            pool_dict = pool.to_dict(render_unsets=True)
+            if pool.backend_tls_subject_alt_names is wtypes.Unset:
+                pool_dict.pop('backend_tls_subject_alt_names')
+            pool_dict = db_prepare.create_pool(pool_dict)
 
             listener_id = pool_dict.pop('listener_id', None)
             self._test_lb_and_listener_statuses(
@@ -521,6 +543,15 @@ class PoolsController(base.BaseController):
             _validate_backend_tls_require_h2(
                 driver, hostname, enrolling=(
                     pool.backend_tls_require_h2 is True or reopening))
+        requested_sans = pool.backend_tls_subject_alt_names
+        if requested_sans is None:
+            validate.backend_tls_subject_alt_names(requested_sans)
+        has_san_update = requested_sans is not wtypes.Unset
+        sans = (requested_sans if has_san_update
+                else current.backend_tls_subject_alt_names)
+        if sans:
+            _validate_backend_tls_subject_alt_names(
+                driver, hostname, enrolling=reopening or has_san_update)
         if hostname is None:
             if current.backend_tls_hostname and (current.enabled or reopening):
                 raise exceptions.ValidationException(detail=_(
@@ -620,13 +651,16 @@ class PoolsController(base.BaseController):
             self._validate_tls_refs([pool.tls_container_ref])
 
         # Validate the client CA cert and optional client CRL
-        # Recheck unchanged CA material on activation or HTTP/2 enrollment.
+        # Recheck unchanged CA material on activation or TLS enrollment.
         if ca_ref and (not current.backend_tls_hostname or
                        pool.backend_tls_hostname not in (wtypes.Unset, None) or
                        pool.ca_tls_container_ref is not wtypes.Unset or
                        pool.crl_container_ref is not wtypes.Unset or
                        (pool.backend_tls_require_h2 is True and
                         not current.backend_tls_require_h2) or
+                       (pool.backend_tls_subject_alt_names and
+                        pool.backend_tls_subject_alt_names !=
+                        current.backend_tls_subject_alt_names) or
                        (pool.admin_state_up is True and not current.enabled)):
             self._validate_client_ca_and_crl_refs(ca_ref, crl_ref)
 

@@ -4,8 +4,10 @@ set -eu
 binary=/tmp/in_target.d/octavia-haproxy-strict
 if [[ -f "$binary" ]]; then
     version=$("$binary" -v)
-    if [[ "$version" != "HAProxy version 3.0.19-ade9c1262-octavia-strict-dns-v1 "* &&
-          "$version" != "HAProxy version 3.0.19-ade9c1262-octavia-strict-dns-v1-h2-alpn-v1 "* ]]; then
+    prefix="HAProxy version 3.0.19-ade9c1262-octavia-strict-dns-v1"
+    if [[ "$version" != "$prefix "* &&
+          "$version" != "$prefix-h2-alpn-v1 "* &&
+          "$version" != "$prefix-h2-alpn-v1-backend-sans-v1 "* ]]; then
         echo "Expected the Octavia HAProxy strict DNS build" >&2
         exit 1
     fi

@@ -26,6 +26,7 @@ import uuid
 
 from octavia_lib.common import constants as lib_consts
 from oslo_config import cfg
+from rfc3986 import exceptions as uri_exceptions
 from rfc3986 import uri_reference
 from rfc3986 import validators
 from wsme import types as wtypes
@@ -128,6 +129,9 @@ def regex(regex):
 
 DNS_LABEL_RE = re.compile(
     r'[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?')
+SAN_URI_AUTHORITY_RE = re.compile(
+    r"(?:(?:[A-Za-z0-9._~!$&'()*+,;=:-]|%[A-Fa-f0-9]{2})*@)?"
+    r"(?P<host>\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9.-]+)(?::[0-9]*)?")
 
 
 def is_exact_sni_name(value):
@@ -139,6 +143,62 @@ def is_exact_sni_name(value):
     except ValueError:
         return True
     return False
+
+
+def _is_backend_tls_san_uri(value):
+    uri = uri_reference(value)
+    # rfc3986 can encode malformed input while parsing. The original ASCII
+    # URI must be valid because the certificate comparison uses its bytes.
+    if (not uri.scheme or uri.unsplit() != value or
+            value.split('#', 1)[0] == f'{uri.scheme}:'):
+        return False
+    try:
+        (validators.Validator()
+         .check_validity_of('scheme', 'path', 'query', 'fragment')
+         .validate(uri))
+        if uri.authority is None:
+            return not value[len(uri.scheme) + 1:].startswith('//')
+        # For a certificate identity, the port is a string of digits and
+        # userinfo may be empty. Keep the original bytes for SAN matching.
+        authority = SAN_URI_AUTHORITY_RE.fullmatch(uri.authority)
+        if authority is None:
+            return False
+        host = authority['host']
+        if host.startswith('['):
+            # The Amphora parser supports IPv6 literals without zone IDs.
+            return '%' not in host and bool(ipaddress.IPv6Address(host[1:-1]))
+        name = host.removesuffix('.')
+        return '.' in host and all(
+            DNS_LABEL_RE.fullmatch(label) for label in name.split('.'))
+    except (uri_exceptions.RFC3986Exception, ValueError):
+        return False
+
+
+def backend_tls_subject_alt_names(values):
+    if not isinstance(values, list) or len(values) > 5:
+        raise exceptions.ValidationException(detail=_(
+            'backend_tls_subject_alt_names must be a list of at most five '
+            'identities.'))
+    for entry in values:
+        if isinstance(entry, dict):
+            name_type = entry.get('type')
+            if (name_type == 'Hostname' and
+                    entry.keys() == {'type', 'hostname'}):
+                hostname = entry['hostname']
+                if (isinstance(hostname, str) and len(hostname) <= 253 and
+                        is_exact_sni_name(hostname.removeprefix('*.'))):
+                    continue
+            if name_type == 'URI' and entry.keys() == {'type', 'uri'}:
+                uri = entry['uri']
+                if (isinstance(uri, str) and 0 < len(uri) <= 253 and
+                        uri.isascii() and
+                        not INVALID_URL_CHARS_RE.search(uri) and
+                        _is_backend_tls_san_uri(uri)):
+                    continue
+        raise exceptions.ValidationException(detail=_(
+            'Each backend TLS subject alternative name must specify a '
+            'Hostname with a DNS name or a URI with an absolute URI.'))
+    return values
 
 
 def https_listener_hostname(value):
