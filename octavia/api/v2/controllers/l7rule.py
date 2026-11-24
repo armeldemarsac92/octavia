@@ -213,9 +213,10 @@ class L7RuleController(base.BaseController):
             if tcp_policy:
                 driver_utils.require_tls_sni_rule_comparison(
                     driver, l7rule.compare_type, tcp_tls_termination)
-                self.repositories.l7policy.validate_tcp_redirect_pool(
-                    context.session, db_l7policy.listener,
-                    db_l7policy.redirect_pool_id)
+                driver_utils.validate_existing_tcp_pool_attachment(
+                    driver, self.repositories.l7policy, context.session,
+                    db_l7policy.listener, db_l7policy.redirect_pool_id,
+                    tls_sni_policy=True)
 
             db_l7rule = self._validate_create_l7rule(context.session,
                                                      l7rule_dict)
@@ -388,9 +389,10 @@ class L7RuleController(base.BaseController):
                         'compare_type', db_l7rule.compare_type)
                     driver_utils.require_tls_sni_rule_comparison(
                         driver, compare_type, tcp_tls_termination)
-                    self.repositories.l7policy.validate_tcp_redirect_pool(
-                        context.session, db_l7policy.listener,
-                        db_l7policy.redirect_pool_id)
+                    driver_utils.validate_existing_tcp_pool_attachment(
+                        driver, self.repositories.l7policy, context.session,
+                        db_l7policy.listener, db_l7policy.redirect_pool_id,
+                        tls_sni_policy=True)
             l7rule_dict['id'] = id
             provider_l7rule_dict = (
                 driver_utils.l7rule_dict_to_provider_dict(l7rule_dict))

@@ -296,6 +296,14 @@ class JinjaTemplater:
                         raise driver_except.AmpVersionUnsupported(
                             version='HAProxy requires strict backend DNS '
                                     'authentication support')
+                    tcp = pool['protocol'] == PROTOCOL_MAP[
+                        constants.PROTOCOL_TCP]
+                    if tcp and (amp_details or {}).get(
+                            constants.GATEWAY_CAPABILITY_TCP_TLS_BACKEND_AUTH
+                    ) is not True:
+                        raise driver_except.AmpVersionUnsupported(
+                            version='HAProxy requires strict TCP backend TLS '
+                                    'authentication support')
                     if require_h2 and (amp_details or {}).get(
                             constants.GATEWAY_CAPABILITY_BACKEND_TLS_H2_ALPN
                     ) is not True:
@@ -308,14 +316,20 @@ class JinjaTemplater:
                             version='HAProxy requires explicit backend TLS '
                                     'subject alternative name support')
                     if (not validate.is_exact_sni_name(hostname) or
-                            pool['protocol'] !=
-                            PROTOCOL_MAP[constants.PROTOCOL_HTTP] or
+                            pool['protocol'] not in (
+                                PROTOCOL_MAP[constants.PROTOCOL_HTTP],
+                                PROTOCOL_MAP[constants.PROTOCOL_TCP]) or
+                            (tcp and (require_h2 or sans)) or
                             pool['tls_enabled'] is not True or
                             not pool.get('ca_cert') or
                             pool.get('backend_h2c')):
                         raise exceptions.ValidationException(detail=(
                             'Missing or invalid backend TLS identity or '
                             'trust configuration.'))
+                    monitor = pool['health_monitor']
+                    if tcp and monitor and monitor['enabled']:
+                        validate.validate_tcp_tls_backend_monitor(
+                            monitor['type'])
                     if sans:
                         pool['backend_tls_san_options'] = [
                             ('dns:' + entry['hostname']
@@ -593,14 +607,23 @@ class JinjaTemplater:
         pool_gen = (pool for pool in listener.pools if
                     pool.provisioning_status != constants.PENDING_DELETE)
         for pool in pool_gen:
-            if tcp_tls_termination and active:
-                validate.validate_tcp_redirect_pool_protocol(
-                    pool.protocol, pool.tls_enabled)
-            kwargs = {}
-            if tls_certs is not None and tls_certs.get(pool.id):
-                kwargs = {'pool_tls_certs': tls_certs.get(pool.id)}
+            pool_certs = (tls_certs or {}).get(pool.id)
+            hostname = getattr(pool, 'backend_tls_hostname', None)
+            if tcp_tls_termination and active and pool.enabled:
+                try:
+                    validate.validate_tcp_redirect_pool_protocol(
+                        pool.protocol, pool.tls_enabled,
+                        tcp_tls_termination=True, hostname=hostname,
+                        ca_ref=pool.ca_tls_certificate_id)
+                except exceptions.ValidationException:
+                    pool_certs = {'closed': True}
+            if (not tcp_tls_termination and
+                    pool.protocol == constants.PROTOCOL_TCP and
+                    hostname is not None):
+                pool_certs = {'closed': True}
             rendered_pool = self._transform_pool(
-                pool, feature_compatibility, tls_enabled, **kwargs)
+                pool, feature_compatibility, tls_enabled,
+                pool_tls_certs=pool_certs)
             if tcp_tls_termination and not pool.enabled:
                 # Keep the matched route closed without falling back.
                 rendered_pool['closed'] = True
@@ -637,7 +660,8 @@ class JinjaTemplater:
         if listener.protocol == constants.PROTOCOL_TCP:
             policy_gen = (policy for policy in policy_gen
                           if self._is_routable_sni_policy(
-                              policy, available_pool_ids))
+                              policy, available_pool_ids,
+                              tcp_tls_termination))
         else:
             policy_gen = (policy for policy in policy_gen if not any(
                 rule.enabled and rule.type == constants.L7RULE_TYPE_TLS_SNI
@@ -931,7 +955,8 @@ class JinjaTemplater:
                 rule.provisioning_status not in (constants.PENDING_DELETE,
                                                  constants.DELETED)]
 
-    def _is_routable_sni_policy(self, policy, available_pool_ids):
+    def _is_routable_sni_policy(self, policy, available_pool_ids,
+                                tcp_tls_termination):
         pool = policy.redirect_pool
         if (not policy.enabled or
                 policy.provisioning_status == constants.DELETED or
@@ -939,7 +964,8 @@ class JinjaTemplater:
                 policy.request_header_operations or
                 policy.response_header_operations or
                 not pool or pool.id not in available_pool_ids or
-                pool.protocol != constants.PROTOCOL_TCP or pool.tls_enabled or
+                pool.protocol != constants.PROTOCOL_TCP or
+                (not tcp_tls_termination and pool.tls_enabled) or
                 pool.provisioning_status == constants.DELETED):
             return False
         rules = self._active_l7rules(policy)

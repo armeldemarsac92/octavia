@@ -105,6 +105,7 @@ GATEWAY_CAPABILITY_BACKEND_TLS_SUBJECT_ALT_NAMES = (
     'backend_tls_subject_alt_names_v1')
 GATEWAY_BACKEND_TLS_POOL_TAG = 'gateway-api-openstack.backend-tls=v1'
 GATEWAY_CAPABILITY_TCP_TLS_TERMINATION = 'tcp_tls_termination_v1'
+GATEWAY_CAPABILITY_TCP_TLS_BACKEND_AUTH = 'tcp_tls_backend_auth_v1'
 GATEWAY_CAPABILITY_TLS_SNI = 'tls_sni_passthrough_v1'
 GATEWAY_CAPABILITY_TLS_SNI_SUFFIX = 'tls_sni_suffix_v1'
 GATEWAY_CAPABILITY_HTTPS_LISTENER_ISOLATION = 'https_listener_isolation_v1'

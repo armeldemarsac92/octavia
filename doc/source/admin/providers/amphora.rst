@@ -422,6 +422,30 @@ can continue, and operators can still disable or delete the endpoint. Drain
 and remove these listeners before downgrading workers.
 
 This listener mode is chosen at creation. Use a different listener for TLS
-passthrough. Supported targets have ``protocol=TCP`` and
-``tls_enabled=false``. Backend TLS re-encryption requires a separate
-capability.
+passthrough. Plaintext targets have ``protocol=TCP`` and
+``tls_enabled=false``.
+
+Authenticated TLS backends on terminating TCP listeners
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Enroll the provider in
+``[api_settings] enabled_tcp_tls_backend_auth_providers`` after qualifying
+the regional API, workers and every Amphora image. The provider publishes
+``tcp_tls_backend_auth_v1`` when ``tcp_tls_termination_v1`` and
+``backend_tls_hostname_v1`` are also enabled.
+
+Use a TCP pool with ``tls_enabled=true``, a literal DNS
+``backend_tls_hostname``, and a trusted CA in ``ca_tls_container_ref``.
+Attach it through a TCP listener default or a TLS SNI policy on a TCP
+listener that terminates TLS. HAProxy sends the configured backend name as
+SNI and verifies the certificate chain and its DNS subject alternative
+names for traffic and health checks, including checks on a separate port.
+Use TCP, TLS-HELLO, HTTP, or HTTPS health monitors with these pools.
+
+A backend that cannot be authenticated or whose Amphora credentials or
+capabilities cannot be prepared closes independently of other routes.
+Removing regional enrollment blocks new protected pools, protected routing
+changes and reopening. Changing a pool's trusted CA or opening a member
+on an active protected pool also requires regional enrollment. Existing
+protected pools can keep serving, drain or be removed. Disable and detach a pool before clearing its hostname
+requirement.

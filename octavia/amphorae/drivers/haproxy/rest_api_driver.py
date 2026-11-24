@@ -369,6 +369,8 @@ class HaproxyAmphoraLoadBalancerDriver(
         closed = set()
         for pool_id, (listener, pool) in protected.items():
             required = [consts.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME]
+            if pool.protocol == consts.PROTOCOL_TCP:
+                required.append(consts.GATEWAY_CAPABILITY_TCP_TLS_BACKEND_AUTH)
             if getattr(pool, 'backend_tls_require_h2', False) is True:
                 required.append(consts.GATEWAY_CAPABILITY_BACKEND_TLS_H2_ALPN)
             if getattr(pool, 'backend_tls_subject_alt_names', None):
@@ -803,13 +805,24 @@ class HaproxyAmphoraLoadBalancerDriver(
         hostname = getattr(pool, 'backend_tls_hostname', None)
         if utils.is_protected_backend_tls_pool(pool) and (
                 not validate.is_exact_sni_name(hostname) or
-                pool.protocol != consts.PROTOCOL_HTTP or
+                pool.protocol not in (consts.PROTOCOL_HTTP,
+                                      consts.PROTOCOL_TCP) or
                 pool.tls_enabled is not True or
                 not pool.ca_tls_certificate_id or
                 getattr(pool, 'backend_h2c', False)):
             raise exceptions.ValidationException(detail=(
                 'Missing or invalid backend TLS identity or trust '
                 'configuration.'))
+        if pool.protocol == consts.PROTOCOL_TCP and hostname is not None:
+            if (getattr(pool, 'backend_tls_require_h2', False) or
+                    getattr(pool, 'backend_tls_subject_alt_names', None)):
+                raise exceptions.ValidationException(detail=(
+                    'Unsupported backend TLS options for a TCP pool.'))
+            monitor = pool.health_monitor
+            if (monitor and monitor.enabled and
+                    monitor.provisioning_status not in
+                    (consts.PENDING_DELETE, consts.DELETED)):
+                validate.validate_tcp_tls_backend_monitor(monitor.type)
 
         # Handle the client cert(s) and key
         if pool.tls_certificate_id:

@@ -82,6 +82,7 @@ class AmphoraProviderDriver(driver_base.ProviderDriver):
     supports_backend_tls_h2_alpn = True
     supports_backend_tls_subject_alt_names = True
     supports_tcp_tls_termination = True
+    supports_tcp_tls_backend_auth = True
     supports_tls_sni_passthrough = True
     supports_tls_sni_suffix = True
     supports_https_listener_isolation = True

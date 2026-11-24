@@ -240,11 +240,14 @@ backend-tls-hostname:
   description: |
     Literal DNS hostname sent as backend SNI. With no explicit
     ``backend_tls_subject_alt_names``, it also authenticates the backend
-    certificate against its DNS subject alternative names. Requires an HTTP pool with
-    ``tls_enabled`` set to true, a ``ca_tls_container_ref`` and the provider
-    capability ``backend_tls_hostname_v1``. A partial update preserves the
-    setting when omitted. To clear it, disable the pool first and then
-    explicitly send null while leaving the pool disabled.
+    certificate against its DNS subject alternative names. Requires
+    ``tls_enabled`` set to true and a ``ca_tls_container_ref``. HTTP pools use
+    ``backend_tls_hostname_v1``. TCP pools use
+    ``tcp_tls_backend_auth_v1`` and can only be attached to TCP listeners
+    that terminate TLS. A partial update preserves the setting when omitted.
+    To clear it, disable the pool, detach it from any terminating TCP
+    listener defaults and policies, and explicitly send null while leaving
+    the pool disabled.
   in: body
   required: false
   type: string

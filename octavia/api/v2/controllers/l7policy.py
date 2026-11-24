@@ -340,6 +340,9 @@ class L7PolicyController(base.BaseController):
         pool = self.repositories.l7policy.get_redirect_pool_for_update(
             session, listener, pool_id)
         self._validate_protocol(listener.protocol, pool.protocol)
+        validate.validate_tcp_tls_backend_listener(
+            listener.tcp_tls_termination, pool.protocol,
+            pool.backend_tls_hostname)
 
     def _validate_create_l7policy(self, lock_session, l7policy_dict):
         try:
@@ -453,8 +456,9 @@ class L7PolicyController(base.BaseController):
             pool_id = l7policy_dict.get('redirect_pool_id')
             if driver_utils.uses_tls_sni_policy_path(
                     driver, listener.protocol, listener.tcp_tls_termination):
-                self.repositories.l7policy.validate_tcp_redirect_pool(
-                    lock_session, listener, pool_id)
+                driver_utils.validate_existing_tcp_pool_attachment(
+                    driver, self.repositories.l7policy, lock_session,
+                    listener, pool_id, tls_sni_policy=True)
             elif pool_id:
                 self._validate_redirect_pool_protocol(
                     lock_session, listener, pool_id)
@@ -660,8 +664,9 @@ class L7PolicyController(base.BaseController):
                         driver_utils.require_tls_sni_suffix(driver)
                     target = l7policy_dict.get(
                         'redirect_pool_id', db_l7policy.redirect_pool_id)
-                    self.repositories.l7policy.validate_tcp_redirect_pool(
-                        lock_session, listener, target)
+                    driver_utils.validate_existing_tcp_pool_attachment(
+                        driver, policy_repo, lock_session, listener, target,
+                        tls_sni_policy=True)
             validate_policy_headers(
                 l7policy_dict, listener.protocol, driver,
                 old_policy=db_l7policy)

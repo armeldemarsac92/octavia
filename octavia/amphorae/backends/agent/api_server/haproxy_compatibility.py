@@ -39,19 +39,19 @@ def get_haproxy_capabilities():
             constants.GATEWAY_CAPABILITY_FRONTEND_CLIENT_AUTH_INSECURE_FALLBACK
         ] = True
     strict_dns = 'HAProxy version 3.0.19-ade9c1262-octavia-strict-dns-v1'
-    if output.startswith(f'{strict_dns}-h2-alpn-v1-backend-sans-v1 '):
-        capabilities.update({
-            constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME: True,
-            constants.GATEWAY_CAPABILITY_BACKEND_TLS_H2_ALPN: True,
-            constants.GATEWAY_CAPABILITY_BACKEND_TLS_SUBJECT_ALT_NAMES: True,
-        })
-    elif output.startswith(f'{strict_dns}-h2-alpn-v1 '):
-        capabilities.update({
-            constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME: True,
-            constants.GATEWAY_CAPABILITY_BACKEND_TLS_H2_ALPN: True,
-        })
-    elif output.startswith(f'{strict_dns} '):
-        capabilities[constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME] = True
+    strict_dns_builds = (
+        f'{strict_dns} ', f'{strict_dns}-h2-alpn-v1 ',
+        f'{strict_dns}-h2-alpn-v1-backend-sans-v1 ',
+    )
+    if not output.startswith(strict_dns_builds):
+        return capabilities
+    capabilities[constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME] = True
+    capabilities[constants.GATEWAY_CAPABILITY_TCP_TLS_BACKEND_AUTH] = True
+    if output.startswith(strict_dns_builds[1:]):
+        capabilities[constants.GATEWAY_CAPABILITY_BACKEND_TLS_H2_ALPN] = True
+    if output.startswith(strict_dns_builds[2]):
+        capabilities[
+            constants.GATEWAY_CAPABILITY_BACKEND_TLS_SUBJECT_ALT_NAMES] = True
     return capabilities
 
 
