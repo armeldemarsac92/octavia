@@ -272,6 +272,12 @@ def validate_tcp_tls_backend_listener(tcp_tls_termination, protocol, hostname):
             'a TCP listener that terminates TLS.'))
 
 
+def validate_tcp_tls_mixed_default_pool(pool):
+    if pool is not None:
+        raise exceptions.ValidationException(detail=_(
+            'A mixed TLS listener cannot have a default pool.'))
+
+
 def validate_tcp_redirect_pool_protocol(protocol, tls_enabled, *,
                                         tcp_tls_termination=False,
                                         hostname=None, ca_ref=None):

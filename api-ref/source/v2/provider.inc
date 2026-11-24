@@ -413,6 +413,16 @@ and add the provider name to ``enabled_tcp_tls_termination_providers`` after
 upgrading the regional database, API, workers, driver library and Amphora
 fleet. This enrollment is independent of TLS passthrough.
 
+``tcp_tls_mixed_mode_v1`` combines terminating and passthrough TLS SNI
+policies on one TCP listener. It requires both ``tcp_tls_termination_v1`` and
+``tls_sni_passthrough_v1``. Add the provider name to
+``[api_settings] enabled_tcp_tls_mixed_mode_providers`` after upgrading
+octavia-lib, the database, API, workers and the Amphora fleet to HAProxy 3.0
+or newer. Use
+``tcp_tls_mixed_mode: true`` and the terminating listener's certificate
+parameters, and omit a default pool. The listener closes connections that
+match no active TLS SNI policy.
+
 ``tcp_tls_backend_auth_v1`` also allows a terminating TCP listener to route to
 a TCP pool with ``tls_enabled: true``, a literal DNS ``backend_tls_hostname``,
 and a ``ca_tls_container_ref``. The backend hostname controls SNI and

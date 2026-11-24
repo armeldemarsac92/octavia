@@ -16,7 +16,7 @@
 {% extends 'base.j2' %}
 
 
-{% from 'macros.j2' import frontend_macro, backend_macro, closed_backend_macro, fixed_response_backend_macro, request_redirect_backend_macro %}
+{% from 'macros.j2' import frontend_macro, mixed_tls_frontend_macro, backend_macro, closed_backend_macro, fixed_response_backend_macro, request_redirect_backend_macro %}
 {% from 'macros.j2' import peers_macro %}
 
 
@@ -51,8 +51,13 @@ backend prometheus-exporter-internal
 {% block proxies %}
     {% if loadbalancer.enabled %}
          {% for listener in loadbalancer.listeners if listener.enabled %}
+             {% if listener.tcp_tls_mixed_mode is defined %}
+             {{- mixed_tls_frontend_macro(constants, lib_consts, listener, loadbalancer.vip_address,
+                                          loadbalancer.additional_vips) }}
+             {% else %}
              {{- frontend_macro(constants, lib_consts, listener, loadbalancer.vip_address,
                                 loadbalancer.additional_vips) }}
+             {% endif %}
              {% if listener.default_http_status_code is defined %}
                {{- fixed_response_backend_macro(constants, listener, 'default',
                                                  listener.default_http_status_code) }}

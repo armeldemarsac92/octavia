@@ -67,9 +67,13 @@ def validate_policy_options_on_create(
             listener.get('tls_certificate_id'), listener.get('sni_containers'))
         driver_utils.require_frontend_client_auth_fallback(driver)
     tcp_tls_termination = listener.get('tcp_tls_termination', False)
+    mixed_mode = listener.get('tcp_tls_mixed_mode', False)
     if not isinstance(tcp_tls_termination, bool):
         raise exceptions.ValidationException(detail=_(
             'tcp_tls_termination must be true or false.'))
+    if not isinstance(mixed_mode, bool):
+        raise exceptions.ValidationException(detail=_(
+            'tcp_tls_mixed_mode must be true or false.'))
     if tcp_tls_termination:
         if protocol != constants.PROTOCOL_TCP:
             raise exceptions.ValidationException(detail=_(
@@ -78,6 +82,13 @@ def validate_policy_options_on_create(
             raise exceptions.ValidationException(detail=_(
                 'tcp_tls_termination requires default_tls_container_ref.'))
         driver_utils.require_tcp_tls_termination(driver)
+    if mixed_mode:
+        if not tcp_tls_termination:
+            raise exceptions.ValidationException(detail=_(
+                'tcp_tls_mixed_mode requires tcp_tls_termination.'))
+        validate.validate_tcp_tls_mixed_default_pool(
+            listener.get('default_pool_id') or listener.get('default_pool'))
+        driver_utils.require_tcp_tls_mixed_mode(driver)
 
     default_response = listener.get('default_http_response')
     hosts = listener.get('https_virtual_hosts')
@@ -99,6 +110,9 @@ def validate_policy_options_on_create(
     tcp_policy = driver_utils.uses_tls_sni_policy_path(
         driver, protocol, tcp_tls_termination)
     for policy in listener.get('l7policies') or []:
+        passthrough = policy.get('tcp_tls_passthrough', False)
+        driver_utils.validate_tcp_tls_policy_mode(
+            driver, mixed_mode, passthrough)
         hostname = validate.validate_https_policy_hostname(
             hosts, policy.get('https_listener_hostname'))
         if hostname is not None:
@@ -114,7 +128,8 @@ def validate_policy_options_on_create(
                 except exceptions.InvalidL7Rule as e:
                     raise exceptions.L7RuleValidation(error=e) from e
                 driver_utils.require_tls_sni_rule_comparison(
-                    driver, rule['compare_type'], tcp_tls_termination)
+                    driver, rule['compare_type'],
+                    tcp_tls_termination and not passthrough)
         if (not tcp_policy and
                 action not in (constants.L7POLICY_ACTION_FIXED_RESPONSE,
                                constants.L7POLICY_ACTION_WEIGHTED_TARGETS,
@@ -717,6 +732,12 @@ class ListenersController(base.BaseController):
             raise exceptions.ValidationException(detail=_(
                 'tcp_tls_termination can only be set at listener creation.'))
         pool_id = updates.get('default_pool_id', listener.default_pool_id)
+        mixed_mode = listener.tcp_tls_mixed_mode
+        if updates.pop('tcp_tls_mixed_mode', mixed_mode) is not mixed_mode:
+            raise exceptions.ValidationException(detail=_(
+                'tcp_tls_mixed_mode can only be set at listener creation.'))
+        if mixed_mode:
+            validate.validate_tcp_tls_mixed_default_pool(pool_id)
         new_pool = pool_id and pool_id != listener.default_pool_id
         if not listener.tcp_tls_termination:
             if new_pool:
@@ -735,6 +756,8 @@ class ListenersController(base.BaseController):
         checks_tls = reopening or tls_fields.intersection(updates)
         if checks_tls or admits_pool:
             driver_utils.require_tcp_tls_termination(driver)
+            if mixed_mode:
+                driver_utils.require_tcp_tls_mixed_mode(driver)
         if checks_tls:
             server_cert = updates.get('tls_certificate_id',
                                       listener.tls_certificate_id)
@@ -767,6 +790,10 @@ class ListenersController(base.BaseController):
                 driver, policy_repo, session, listener, pool_id,
                 skip_disabled_pool=not new_pool)
         if reopening:
+            if (mixed_mode and policy_repo.has_enabled_tls_sni_suffix_rule(
+                    session, listener_id=listener.id,
+                    tcp_tls_passthrough=True)):
+                driver_utils.require_tls_sni_suffix(driver)
             for pool in policy_repo.get_active_protected_tcp_policy_pools(
                     session, listener.id):
                 driver_utils.validate_tcp_pool_attachment(

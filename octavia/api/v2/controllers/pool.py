@@ -305,6 +305,10 @@ class PoolsController(base.BaseController):
                   else changes.ca_tls_container_ref)
         policy_repo = self.repositories.l7policy
         listener_repo = self.repositories.listener
+        if reopening and policy_repo.get_policy_using_pool(
+                session, pool_id, tcp_tls_termination=None,
+                tcp_tls_mixed_mode=True):
+            driver_utils.require_tcp_tls_mixed_mode(driver)
         if (listener_repo.has_default_pool_listener(
                 session, pool_id, tcp_tls_termination=True) or
                 policy_repo.get_policy_using_pool(
@@ -465,6 +469,8 @@ class PoolsController(base.BaseController):
                 if listener.https_virtual_hosts is not None:
                     raise exceptions.ValidationException(detail=_(
                         'A scoped HTTPS listener cannot have a default pool.'))
+                if listener.tcp_tls_mixed_mode:
+                    validate.validate_tcp_tls_mixed_default_pool(pool_dict)
                 if listener.default_pool_id:
                     raise exceptions.DuplicatePoolEntry()
                 validate.validate_default_http_response(
