@@ -43,9 +43,29 @@ CONF = cfg.CONF
 LOG = logging.getLogger(__name__)
 
 
+def _validate_frontend_client_auth_fallback(
+        protocol, client_auth, ca_ref, server_cert, sni_certs):
+    if (protocol != constants.PROTOCOL_TERMINATED_HTTPS or
+            client_auth != constants.CLIENT_AUTH_MANDATORY or not ca_ref):
+        raise exceptions.ValidationException(detail=_(
+            'Insecure frontend client authentication fallback requires a '
+            'TERMINATED_HTTPS listener with MANDATORY client authentication '
+            'and a client CA reference.'))
+    if not (server_cert or sni_certs):
+        raise exceptions.ValidationException(detail=_(
+            'Insecure frontend client authentication fallback requires a '
+            'default or SNI server certificate reference.'))
+
+
 def validate_policy_options_on_create(
         driver, listener, *, creating_load_balancer=False):
     protocol = listener['protocol']
+    if listener.get('client_authentication_insecure_fallback') is True:
+        _validate_frontend_client_auth_fallback(
+            protocol, listener.get('client_authentication'),
+            listener.get('client_ca_tls_certificate_id'),
+            listener.get('tls_certificate_id'), listener.get('sni_containers'))
+        driver_utils.require_frontend_client_auth_fallback(driver)
     tcp_tls_termination = listener.get('tcp_tls_termination', False)
     if not isinstance(tcp_tls_termination, bool):
         raise exceptions.ValidationException(detail=_(
@@ -379,7 +399,9 @@ class ListenersController(base.BaseController):
         if listener_dict.get('client_ca_tls_certificate_id'):
             self._validate_client_ca_and_crl_refs(
                 listener_dict.get('client_ca_tls_certificate_id'),
-                listener_dict.get('client_crl_container_id', None))
+                listener_dict.get('client_crl_container_id', None),
+                require_ca_bundle=(listener_dict.get(
+                    'client_authentication_insecure_fallback') is True))
 
         # Validate that the L4 protocol (UDP, TCP or SCTP) is not already used
         # for the specified protocol_port in this load balancer
@@ -679,7 +701,11 @@ class ListenersController(base.BaseController):
                 "specify a client authentication revocation list."))
 
         if ca_ref or crl_ref:
-            self._validate_client_ca_and_crl_refs(ca_ref, crl_ref)
+            fallback = listener.client_authentication_insecure_fallback
+            if fallback is wtypes.Unset:
+                fallback = db_listener.client_authentication_insecure_fallback
+            self._validate_client_ca_and_crl_refs(
+                ca_ref, crl_ref, require_ca_bundle=fallback is True)
 
     def _validate_tcp_tls_update(self, session, listener, updates, driver,
                                  reopening):
@@ -767,6 +793,32 @@ class ListenersController(base.BaseController):
                     driver, policy_repo, session, listener_id=db_listener.id,
                     removed_https_hosts=removed)
 
+    @staticmethod
+    def _validate_frontend_client_auth_fallback_update(
+            listener, updates, driver, reopening):
+        field = 'client_authentication_insecure_fallback'
+        previous = listener.client_authentication_insecure_fallback
+        if updates.get(field) is None and field in updates:
+            updates[field] = False
+        if updates.get(field, previous) is not True:
+            return
+
+        ca_ref = updates.get('client_ca_tls_certificate_id',
+                             listener.client_ca_tls_certificate_id)
+        client_auth = updates.get('client_authentication',
+                                  listener.client_authentication)
+        server_cert = updates.get('tls_certificate_id',
+                                  listener.tls_certificate_id)
+        sni_certs = updates.get('sni_containers', listener.sni_containers)
+        _validate_frontend_client_auth_fallback(
+            listener.protocol, client_auth, ca_ref, server_cert, sni_certs)
+        if (reopening or
+                {field, 'client_ca_tls_certificate_id',
+                 'client_crl_container_id',
+                 'client_authentication', 'tls_certificate_id',
+                 'sni_containers'}.intersection(updates)):
+            driver_utils.require_frontend_client_auth_fallback(driver)
+
     def _set_default_on_none(self, listener, tcp_tls_termination=False):
         """Reset settings to their default values if None/null was passed in
 
@@ -824,7 +876,6 @@ class ListenersController(base.BaseController):
             self._auth_validate_action(context, project_id, constants.RBAC_PUT)
 
             self._validate_listener_PUT(listener, db_listener)
-
             self._set_default_on_none(listener,
                                       db_listener.tcp_tls_termination)
 
@@ -851,6 +902,8 @@ class ListenersController(base.BaseController):
                 'default_http_response', db_listener.default_http_response)
             reopening = (listener_dict.get('enabled') is True and
                          not db_listener.enabled)
+            self._validate_frontend_client_auth_fallback_update(
+                db_listener, listener_dict, driver, reopening)
             self._validate_tcp_tls_update(context.session, db_listener,
                                           listener_dict, driver, reopening)
             if (reopening or 'default_http_response' in listener_dict or
@@ -892,7 +945,12 @@ class ListenersController(base.BaseController):
             # Prepare the data for the driver data model
             provider_listener_dict = (
                 driver_utils.listener_dict_to_provider_dict(
-                    dict(listener_dict, id=id)))
+                    dict(listener_dict, id=id),
+                    clear_client_auth_fallback=(
+                        db_listener.client_authentication_insecure_fallback
+                        is True and listener_dict.get(
+                            'client_authentication_insecure_fallback')
+                        is False)))
 
             # Also prepare the baseline object data
             old_provider_listener = (

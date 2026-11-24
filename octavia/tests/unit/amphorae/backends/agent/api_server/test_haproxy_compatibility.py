@@ -122,8 +122,22 @@ class HAProxyCompatTestCase(base.TestCase):
                  {hostname: True, h2_alpn: True, sans: True})):
             with self.subTest(version=version):
                 check_output.return_value = version
-                result = haproxy_compatibility.get_backend_tls_capabilities()
+                result = haproxy_compatibility.get_haproxy_capabilities()
                 self.assertEqual(expected, result)
+
+    @mock.patch.object(haproxy_compatibility.subprocess, 'check_output')
+    def test_frontend_client_auth_fallback_capability(self, check_output):
+        capability = (
+            constants.GATEWAY_CAPABILITY_FRONTEND_CLIENT_AUTH_INSECURE_FALLBACK)
+        for version, feature, supported in (
+                ('3.0.19', '+OPENSSL', True),
+                ('3.0.19', '-OPENSSL', False),
+                ('2.8.19', '+OPENSSL', False)):
+            with self.subTest(version=version, feature=feature):
+                check_output.return_value = (
+                    f'HAProxy version {version} fake\nFeature list : {feature}')
+                result = haproxy_compatibility.get_haproxy_capabilities()
+                self.assertEqual(supported, capability in result)
 
     @mock.patch('octavia.amphorae.backends.agent.api_server.'
                 'haproxy_compatibility.get_haproxy_versions')

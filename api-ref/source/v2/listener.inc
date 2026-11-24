@@ -49,6 +49,7 @@ Response Parameters
    - allowed_cidrs: allowed_cidrs
    - alpn_protocols: alpn_protocols-listener
    - client_authentication: client_authentication
+   - client_authentication_insecure_fallback: client_authentication_insecure_fallback
    - client_ca_tls_container_ref: client_ca_tls_container_ref
    - client_crl_container_ref: client_crl_container_ref
    - connection_limit: connection_limit
@@ -151,6 +152,7 @@ Request
    - allowed_cidrs: allowed_cidrs-optional
    - alpn_protocols: alpn_protocols-listener-optional
    - client_authentication: client_authentication-optional
+   - client_authentication_insecure_fallback: client_authentication_insecure_fallback
    - client_ca_tls_container_ref: client_ca_tls_container_ref-optional
    - client_crl_container_ref: client_crl_container_ref-optional
    - connection_limit: connection_limit-optional
@@ -279,6 +281,7 @@ Response Parameters
    - allowed_cidrs: allowed_cidrs
    - alpn_protocols: alpn_protocols-listener
    - client_authentication: client_authentication
+   - client_authentication_insecure_fallback: client_authentication_insecure_fallback
    - client_ca_tls_container_ref: client_ca_tls_container_ref
    - client_crl_container_ref: client_crl_container_ref
    - connection_limit: connection_limit
@@ -364,6 +367,7 @@ Response Parameters
    - allowed_cidrs: allowed_cidrs
    - alpn_protocols: alpn_protocols-listener
    - client_authentication: client_authentication
+   - client_authentication_insecure_fallback: client_authentication_insecure_fallback
    - client_ca_tls_container_ref: client_ca_tls_container_ref
    - client_crl_container_ref: client_crl_container_ref
    - connection_limit: connection_limit
@@ -440,6 +444,7 @@ Request
    - allowed_cidrs: allowed_cidrs-optional
    - alpn_protocols: alpn_protocols-listener-optional
    - client_authentication: client_authentication-optional
+   - client_authentication_insecure_fallback: client_authentication_insecure_fallback
    - client_ca_tls_container_ref: client_ca_tls_container_ref-optional
    - client_crl_container_ref: client_crl_container_ref-optional
    - connection_limit: connection_limit-optional
@@ -482,6 +487,7 @@ Response Parameters
    - allowed_cidrs: allowed_cidrs
    - alpn_protocols: alpn_protocols-listener
    - client_authentication: client_authentication
+   - client_authentication_insecure_fallback: client_authentication_insecure_fallback
    - client_ca_tls_container_ref: client_ca_tls_container_ref
    - client_crl_container_ref: client_crl_container_ref
    - connection_limit: connection_limit

@@ -433,7 +433,8 @@ class Listener(BaseDataModel):
                  alpn_protocols=None, hsts_max_age=None,
                  hsts_include_subdomains=None, hsts_preload=None,
                  default_http_response=None, https_virtual_hosts=None,
-                 tcp_tls_termination=False):
+                 tcp_tls_termination=False,
+                 client_authentication_insecure_fallback=None):
         self.id = id
         self.project_id = project_id
         self.name = name
@@ -467,6 +468,8 @@ class Listener(BaseDataModel):
         self.tags = tags
         self.client_ca_tls_certificate_id = client_ca_tls_certificate_id
         self.client_authentication = client_authentication
+        self.client_authentication_insecure_fallback = (
+            client_authentication_insecure_fallback)
         self.client_crl_container_id = client_crl_container_id
         self.allowed_cidrs = allowed_cidrs or []
         self.tls_ciphers = tls_ciphers
