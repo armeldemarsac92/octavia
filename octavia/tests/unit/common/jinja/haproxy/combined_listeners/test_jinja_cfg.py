@@ -945,6 +945,57 @@ class TestHaproxyCfg(base.TestCase):
         self.assertIn(' alpn h2 require-alpn-h2', config)
         self.assertNotIn('h2,http/1.1', config)
 
+    def test_backend_tls_sans_use_dns_and_uri_for_requests_and_checks(self):
+        hostname = 'sni.example.test'
+        uri = 'spiffe://id.example.test/workload%2fa?key=value#ID'
+        listener = sample_configs_combined.sample_listener_tuple()
+        pool = SimpleNamespace(**dict(
+            listener.pools[0]._asdict(), tls_enabled=True,
+            backend_tls_hostname=hostname, backend_tls_require_h2=True,
+            backend_tls_subject_alt_names=[
+                {'type': 'Hostname', 'hostname': '*.example.test'},
+                {'type': 'URI', 'uri': uri},
+            ],
+            ca_tls_certificate_id='ca-certificate'))
+        args = (sample_configs_combined.sample_amphora_tuple(),
+                [listener._replace(default_pool=pool, pools=[pool])])
+        certs = {pool.id: {'ca_cert': '/path/to/backend-ca.pem'}}
+        details = {
+            constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME: True,
+            constants.GATEWAY_CAPABILITY_BACKEND_TLS_H2_ALPN: True,
+        }
+        self.assertRaises(driver_except.AmpVersionUnsupported,
+                          self.jinja_cfg.render_loadbalancer_obj,
+                          *args, tls_certs=certs, amp_details=details)
+        san_capability = (
+            constants.GATEWAY_CAPABILITY_BACKEND_TLS_SUBJECT_ALT_NAMES)
+        details[san_capability] = True
+        self.assertRaises(exceptions.ValidationException,
+                          self.jinja_cfg.render_loadbalancer_obj,
+                          *args, amp_details=details)
+        config = self.jinja_cfg.render_loadbalancer_obj(
+            *args, tls_certs=certs, amp_details=details)
+        self.assertIn(f'check-ssl check-sni {hostname} check-alpn h2 ', config)
+        self.assertIn(
+            'http-check send meth GET uri /index.html ver HTTP/2 '
+            f'hdr Host {hostname}', config)
+        self.assertIn('ca-file /path/to/backend-ca.pem verify required',
+                      config)
+        self.assertIn(
+            f'sni str({hostname}) verify-san dns:*.example.test '
+            f'verify-san uri-hex:{uri.encode("ascii").hex()}', config)
+        self.assertIn(' alpn h2 require-alpn-h2', config)
+        self.assertNotIn('verifyhost', config)
+        self.assertNotIn('verify none', config)
+
+        pool.backend_tls_subject_alt_names = []
+        del details[san_capability]
+        cleared = self.jinja_cfg.render_loadbalancer_obj(
+            *args, tls_certs=certs, amp_details=details)
+        self.assertIn(f'sni str({hostname}) verifyhost-strict {hostname}',
+                      cleared)
+        self.assertNotIn('verify-san', cleared)
+
     def test_disabled_protected_pool_keeps_its_l7_match(self):
         listener = sample_configs_combined.sample_listener_tuple(l7=True)
         healthy, target = listener.pools
