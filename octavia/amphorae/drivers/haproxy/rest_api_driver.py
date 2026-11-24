@@ -266,7 +266,8 @@ class HaproxyAmphoraLoadBalancerDriver(
                 self.clients[amp.api_version].reload_listener(
                     amp, listener.id)
 
-    def update(self, loadbalancer, *, l7policy_activation=False):
+    def update(self, loadbalancer, *, l7policy_activation=False,
+               l7policy_restoration=False):
         amphorae = [amphora for amphora in loadbalancer.amphorae
                     if amphora.status != consts.DELETED]
         if l7policy_activation and not amphorae:
@@ -274,9 +275,10 @@ class HaproxyAmphoraLoadBalancerDriver(
         opted_in, protected = self._backend_tls_pools(loadbalancer)
         fallback, withdrawn = self._frontend_fallback_listeners(loadbalancer)
         if (opted_in or fallback or withdrawn) and amphorae:
-            self._update_protected_tls_listeners(
+            return self._update_protected_tls_listeners(
                 loadbalancer, amphorae, amphorae, protected, fallback, withdrawn,
-                l7policy_activation=l7policy_activation)
+                l7policy_activation=l7policy_activation,
+                l7policy_restoration=l7policy_restoration)
         else:
             for amphora in amphorae:
                 self._update_amphora_listeners(
@@ -299,7 +301,7 @@ class HaproxyAmphoraLoadBalancerDriver(
                                if amp.id not in unreachable],
                 peers, protected, fallback, withdrawn,
                 timeout_dict=timeout_dict,
-                unreachable=unreachable)
+                unreachable=unreachable, coordinating_failover=True)
         return coordinated
 
     @staticmethod
@@ -339,7 +341,8 @@ class HaproxyAmphoraLoadBalancerDriver(
 
     def _update_protected_tls_listeners(
             self, loadbalancer, amphorae, peers, protected, fallback, withdrawn,
-            timeout_dict=None, unreachable=(), l7policy_activation=False):
+            timeout_dict=None, unreachable=(), l7policy_activation=False,
+            coordinating_failover=False, l7policy_restoration=False):
         # Preflight the pair and stage the TLS material before any reload.
         details = {}
         for amphora in peers if protected or fallback else amphorae:
@@ -358,7 +361,8 @@ class HaproxyAmphoraLoadBalancerDriver(
 
         frontend_certs, closed_frontend = self._stage_frontend_client_auth(
             loadbalancer.id, amphorae, peers, details, fallback)
-        if l7policy_activation and closed_frontend:
+        if (l7policy_activation and not l7policy_restoration and
+                closed_frontend):
             raise driver_except.ListenerProvisioningError()
 
         certs = {amphora.id: {} for amphora in amphorae}
@@ -397,7 +401,7 @@ class HaproxyAmphoraLoadBalancerDriver(
             for amphora in amphorae:
                 certs[amphora.id][pool_id] = {'closed': True}
 
-        reload_error = None
+        reload_errors = {}
         reloaded_listeners = []
         for amphora in amphorae:
             try:
@@ -412,31 +416,33 @@ class HaproxyAmphoraLoadBalancerDriver(
             except Exception as error:
                 LOG.warning('Could not reload listeners on amphora %s (%s).',
                             amphora.id, type(error).__name__)
-                if reload_error is None:
-                    reload_error = error
+                reload_errors[amphora.id] = error
 
         recovered = set()
         restored_frontend = set()
-        if (reload_error is None and amphorae and
-                len(amphorae) == len(peers)):
+        if not reload_errors and amphorae and len(amphorae) == len(peers):
             recovered = {pool_id
                          for pool_id, (listener, pool) in protected.items()
                          if pool_id not in closed and
                          pool.provisioning_status == consts.ERROR and
                          all(listener.id in configured
                              for configured in reloaded_listeners)}
-            if withdrawn:
+            paired = loadbalancer.topology == consts.TOPOLOGY_ACTIVE_STANDBY
+            if withdrawn and (not paired or len(peers) >= 2):
                 restored_frontend = withdrawn.intersection(
                     *reloaded_listeners)
                 restored_frontend.update(
                     listener.id for listener in loadbalancer.listeners
                     if (listener.id in withdrawn and
                         not (listener.enabled and loadbalancer.enabled)))
-        if closed or recovered:
+        # The activation worker publishes recoveries after comparing the
+        # original graph and in the same transaction as its policy changes.
+        publish_recovered = set() if l7policy_activation else recovered
+        if closed or publish_recovered:
             pool_repo = repo.PoolRepository()
             with db_api.session().begin() as session:
                 pool_repo.set_backend_tls_pool_statuses(
-                    session, closed=closed, recovered=recovered)
+                    session, closed=closed, recovered=publish_recovered)
         if not reloaded_listeners:
             closed_frontend = set()
         if closed_frontend or restored_frontend:
@@ -444,8 +450,13 @@ class HaproxyAmphoraLoadBalancerDriver(
             with db_api.session().begin() as session:
                 listener_repo.set_frontend_fallback_statuses(
                     session, closed=closed_frontend, restored=restored_frontend)
-        if reload_error is not None:
-            raise reload_error
+        if reload_errors:
+            if coordinating_failover:
+                raise driver_except.CoordinatedListenerUpdateError(
+                    reload_errors)
+            raise next(iter(reload_errors.values()))
+        if l7policy_activation:
+            return recovered
 
     def _stage_frontend_client_auth(
             self, lb_id, amphorae, peers, details, listeners):

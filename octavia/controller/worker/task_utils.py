@@ -175,16 +175,21 @@ class TaskUtils:
                       "%(except)s", {'list': listener_id, 'except': str(e)})
 
     @status_update_retry
-    def mark_loadbalancer_prov_status_error(self, loadbalancer_id):
+    def mark_loadbalancer_prov_status_error(
+            self, loadbalancer_id, *, for_failover=False):
         """Sets a load balancer provisioning status to ERROR.
 
         NOTE: This should only be called from revert methods.
 
         :param loadbalancer_id: Load balancer ID to set provisioning
                                 status to ERROR
+        :param for_failover: Publish an error for the replacement workflow.
         """
         try:
             with db_apis.session().begin() as session:
+                if for_failover:
+                    session.info[constants.FAILOVER_LOADBALANCER_ID] = (
+                        loadbalancer_id)
                 self.loadbalancer_repo.update(
                     session,
                     id=loadbalancer_id,

@@ -1053,29 +1053,30 @@ class MarkLBActiveInDB(BaseDatabaseTask):
         :returns: None
         """
 
+        lb_id = loadbalancer[constants.LOADBALANCER_ID]
         if self.mark_subobjects:
-            LOG.debug("Marking all listeners of loadbalancer %s ACTIVE",
-                      loadbalancer[constants.LOADBALANCER_ID])
+            LOG.debug("Marking all listeners of loadbalancer %s ACTIVE", lb_id)
             with db_apis.session().begin() as session:
-                db_lb = self.loadbalancer_repo.get(
-                    session, id=loadbalancer[constants.LOADBALANCER_ID])
+                session.info[constants.FAILOVER_LOADBALANCER_ID] = lb_id
+                db_lb = self.loadbalancer_repo.get(session, id=lb_id)
                 for listener in db_lb.listeners:
                     self._mark_listener_status(session, listener,
                                                constants.ACTIVE)
                 for pool in db_lb.pools:
                     self._mark_pool_status(session, pool, constants.ACTIVE)
 
-        LOG.info("Mark ACTIVE in DB for load balancer id: %s",
-                 loadbalancer[constants.LOADBALANCER_ID])
+        LOG.info("Mark ACTIVE in DB for load balancer id: %s", lb_id)
         with db_apis.session().begin() as session:
+            if self.mark_subobjects:
+                session.info[constants.FAILOVER_LOADBALANCER_ID] = lb_id
             self.loadbalancer_repo.update(
-                session, loadbalancer[constants.LOADBALANCER_ID],
-                provisioning_status=constants.ACTIVE)
+                session, lb_id, provisioning_status=constants.ACTIVE)
 
     def _mark_listener_status(self, session, listener, status):
-        self.listener_repo.update(session,
-                                  listener.id,
-                                  provisioning_status=status)
+        # Only a confirmed render by all peers clears fallback's ERROR.
+        if listener.frontend_fallback_owns_error is not True:
+            self.listener_repo.update(session, listener.id,
+                                      provisioning_status=status)
         LOG.debug("Marking all l7policies of listener %s %s",
                   listener.id, status)
         for l7policy in listener.l7policies:

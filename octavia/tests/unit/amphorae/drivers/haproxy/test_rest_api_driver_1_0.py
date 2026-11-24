@@ -315,6 +315,54 @@ class TestHaproxyAmphoraLoadBalancerDriverTest(base.TestCase):
     @mock.patch('octavia.db.api.session')
     @mock.patch('octavia.db.repositories.ListenerRepository.'
                 'set_frontend_fallback_statuses')
+    def test_activation_restores_reachable_peer_on_frontend_trust_loss(
+            self, status, session):
+        capability = 'frontend_client_auth_insecure_fallback_v1'
+        peers = [data_models.Amphora(id=name, status=constants.ACTIVE)
+                 for name in ('reachable', 'unreachable')]
+        for peer in peers:
+            peer.api_version = API_VERSION
+        fallback = data_models.Listener(
+            id='fallback', protocol=constants.PROTOCOL_TERMINATED_HTTPS,
+            enabled=True, client_authentication_insecure_fallback=True)
+        policy = data_models.L7Policy(id='activated', enabled=True)
+        http = data_models.Listener(
+            id='http', protocol=constants.PROTOCOL_HTTP, enabled=True,
+            l7policies=[policy])
+        lb = data_models.LoadBalancer(id='lb', enabled=True,
+                                      listeners=[fallback, http],
+                                      amphorae=peers)
+        client = self.driver.clients[API_VERSION]
+        render = self.driver.jinja_combo.build_config
+        with mock.patch.object(self.driver, '_process_listener_tls_certs',
+                               return_value={}):
+            client.get_details.return_value = {capability: True}
+            client.reload_listener.side_effect = [None, RuntimeError()]
+            self.assertRaises(RuntimeError, self.driver.update, lb,
+                              l7policy_activation=True)
+            status.assert_not_called()
+
+            policy.enabled = False
+            render.reset_mock()
+            client.reload_listener.reset_mock()
+            client.get_details.side_effect = [{capability: True}, {}]
+            client.reload_listener.side_effect = [None, RuntimeError()]
+            self.assertRaises(RuntimeError, self.driver.update, lb,
+                              l7policy_activation=True,
+                              l7policy_restoration=True)
+
+        first = render.call_args_list[0].kwargs
+        self.assertEqual(peers[0], first['host_amphora'])
+        self.assertEqual([http], first['listeners'])
+        self.assertFalse(first['listeners'][0].l7policies[0].enabled)
+        self.assertEqual(peers[0],
+                         client.reload_listener.call_args_list[0].args[0])
+        status.assert_called_once_with(session().begin().__enter__(),
+                                       closed={fallback.id}, restored=set())
+
+    @mock.patch('octavia.db.api.session')
+    @mock.patch('octavia.db.repositories.ListenerRepository.'
+                'set_frontend_fallback_statuses')
     def test_fallback_recovers_after_both_peers_apply(self, status, session):
         peers = [data_models.Amphora(id=name, status=constants.ACTIVE)
                  for name in ('current-one', 'current-two')]
@@ -325,14 +373,19 @@ class TestHaproxyAmphoraLoadBalancerDriverTest(base.TestCase):
             enabled=True, client_authentication_insecure_fallback=True,
             provisioning_status=constants.ERROR,
             frontend_fallback_owns_error=True)
-        lb = data_models.LoadBalancer(id='lb', enabled=True,
-                                      listeners=[listener], amphorae=peers)
+        lb = data_models.LoadBalancer(
+            id='lb', enabled=True, topology=constants.TOPOLOGY_ACTIVE_STANDBY,
+            listeners=[listener], amphorae=peers)
         capability = (
             constants.GATEWAY_CAPABILITY_FRONTEND_CLIENT_AUTH_INSECURE_FALLBACK)
         client = self.driver.clients[API_VERSION]
         client.get_details.return_value = {capability: True}
         with mock.patch.object(self.driver, '_process_listener_tls_certs',
                                return_value={}):
+            lb.amphorae = peers[:1]
+            self.driver.update_amphora_listeners(lb, peers[0])
+            status.assert_not_called()
+            lb.amphorae = peers
             client.reload_listener.side_effect = [None, RuntimeError()]
             self.assertRaises(RuntimeError, self.driver.update, lb)
             status.assert_not_called()
@@ -392,9 +445,13 @@ class TestHaproxyAmphoraLoadBalancerDriverTest(base.TestCase):
         client.reset_mock(side_effect=True)
         build.reset_mock()
         status.reset_mock()
-        client.reload_listener.side_effect = [None, RuntimeError('reload')]
-        self.assertRaises(RuntimeError, self.driver.update_failover_listeners,
-                          lb, 0, {})
+        reload_error = RuntimeError('reload')
+        client.reload_listener.side_effect = [None, reload_error]
+        with self.assertRaises(
+                driver_except.CoordinatedListenerUpdateError) as caught:
+            self.driver.update_failover_listeners(lb, 0, {})
+        self.assertEqual({amphorae[1].id: reload_error},
+                         caught.exception.amphora_errors)
         status.assert_not_called()
 
         client.reset_mock(side_effect=True)

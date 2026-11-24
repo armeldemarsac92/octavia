@@ -12,6 +12,7 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import contextlib
 from unittest import mock
 
 import fixtures
@@ -34,6 +35,8 @@ from octavia.common import policy
 from octavia.controller.queue.v2 import endpoints
 from octavia.controller.worker.v2.tasks import amphora_driver_tasks
 from octavia.controller.worker.v2.tasks import database_tasks
+from octavia.controller.worker.v2.tasks import lifecycle_tasks
+from octavia.db import api as db_api
 from octavia.db import models
 from octavia.db import repositories
 from octavia.tests.common import constants as c_const
@@ -206,6 +209,50 @@ class TestInitialL7Rules(base.BaseAPITest):
         })
         self.assertEqual({'loadbalancer_id': self.lb_id}, partial)
 
+    def test_batch_activation_publishes_its_protected_pool_recovery(self):
+        self.conf.config(group='api_settings',
+                         enabled_backend_tls_hostname_providers=['amphora'])
+        self.cert_manager_mock().get_secret.return_value = (
+            sample_certs.X509_CA_CERT)
+        pool = self.create_pool(
+            self.lb_id, 'HTTP', 'ROUND_ROBIN', tls_enabled=True,
+            backend_tls_hostname='backend.example.test',
+            ca_tls_container_ref=uuidutils.generate_uuid())['pool']
+        self.set_lb_status(self.lb_id)
+        with self.session.begin():
+            self.pool_repo.update(self.session, pool['id'],
+                                  provisioning_status=constants.ERROR)
+            self.create_amphora(uuidutils.generate_uuid(), self.lb_id,
+                                role=constants.ROLE_STANDALONE,
+                                lb_network_ip='192.0.2.100')
+        path, payload = self._prepare_activation_group(
+            action='REDIRECT_TO_POOL', redirect_pool_id=pool['id'],
+            redirect_prefix=None)
+        self.post(path, payload, status=204)
+        delivery = self.rpc.cast.call_args.kwargs
+        pool_path = self.POOL_PATH.format(pool_id=pool['id'])
+        self.conf.config(group='controller_worker',
+                         amphora_driver='amphora_haproxy_rest_driver')
+        client = rest_api_driver.AmphoraAPIClient1_0
+        caps = {constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME: True}
+        with (mock.patch.object(rest_api_driver.AmphoraAPIClientBase,
+                                'get_api_version',
+                                return_value={'api_version': '1.0'}),
+              mock.patch.object(client, 'get_info', return_value={
+                  'haproxy_version': '3.0.19'}),
+              mock.patch.object(client, 'get_details', return_value=caps),
+              mock.patch.object(client, 'get_cert_md5sum'),
+              mock.patch.object(client, 'upload_cert_pem'),
+              mock.patch.object(client, 'upload_config'),
+              mock.patch.object(client, '_action') as reload):
+            endpoints.Endpoints().activate_l7policies({}, **delivery)
+        reload.assert_called_once()
+        self.assertEqual(constants.ACTIVE, self.get(pool_path).json[
+            'pool']['provisioning_status'])
+        self.assertEqual([True, True, False],
+                         [p['admin_state_up'] for p in
+                          self._activation_policies(path)])
+
     def test_batch_activation_rejects_stale_or_foreign_state(self):
         path, payload = self._prepare_activation_group()
         activation = payload['l7policy_activation']
@@ -306,6 +353,106 @@ class TestInitialL7Rules(base.BaseAPITest):
         listener = self.get_listener(self.listener_id)['listener']
         self.assertEqual(constants.ACTIVE, listener['provisioning_status'])
         self.post(path, payload, status=409)
+
+    def test_batch_activation_failed_restore_can_fail_over(self):
+        path, payload = self._prepare_activation_group()
+        self.post(path, payload, status=204)
+        activation = self.rpc.cast.call_args.kwargs
+        worker = endpoints.Endpoints()
+        with mock.patch.object(amphora_noop.NoopAmphoraLoadBalancerDriver,
+                               'update', side_effect=RuntimeError('offline')):
+            self.assertRaises(RuntimeError, worker.activate_l7policies,
+                              {}, **activation)
+
+        failover = self._get_full_path(
+            self.LB_PATH.format(lb_id=self.lb_id) + '/failover')
+        with db_api.listener_render_lock(self.lb_id) as lock:
+            self.assertTrue(lock)
+            self.app.put(failover, status=409)
+        self.app.put(failover, status=202)
+        self.post(path, payload, status=409)
+        with mock.patch.object(amphora_noop.NoopAmphoraLoadBalancerDriver,
+                               'update') as update:
+            worker.activate_l7policies({}, **activation)
+        update.assert_not_called()
+
+        policy_id = payload['l7policy_activation']['expected_order'][0]
+        obsolete = {constants.L7POLICY_ID: policy_id}
+        lb = {constants.LOADBALANCER_ID: self.lb_id}
+        listener = {constants.LISTENER_ID: self.listener_id}
+        # A jobboard flow can resume at its write and publication steps.
+        policy_update = database_tasks.UpdateL7PolicyInDB()
+        policy_update.execute(obsolete, {'enabled': True})
+        database_tasks.MarkLBAndListenersActiveInDB().execute(
+            self.lb_id, [listener])
+        self.assertEqual(constants.PENDING_UPDATE, self.get(
+            self.LB_PATH.format(lb_id=self.lb_id)).json['loadbalancer'][
+                'provisioning_status'])
+        lifecycle_tasks.LoadBalancerToErrorOnRevertTask(
+            for_failover=True).revert(lb)
+        self.assertEqual(constants.ERROR, self.get(
+            self.LB_PATH.format(lb_id=self.lb_id)).json['loadbalancer'][
+                'provisioning_status'])
+        self.app.put(failover, status=202)
+
+        with self.session.begin():
+            replacement = self.create_amphora(
+                uuidutils.generate_uuid(), self.lb_id,
+                role=constants.ROLE_STANDALONE, lb_network_ip='192.0.2.100')
+        with mock.patch.object(amphora_noop.NoopAmphoraLoadBalancerDriver,
+                               'update_amphora_listeners') as render:
+            amphora_driver_tasks.AmpListenersUpdate().execute(
+                lb, {'id': replacement.id})
+        render.assert_called_once()
+        rendered = render.call_args.args[0].listeners[0].l7policies
+        self.assertEqual([False] * 3, [policy.enabled for policy in rendered])
+        database_tasks.MarkLBActiveInDB(mark_subobjects=True).execute(lb)
+        self.assertEqual(constants.ACTIVE, self.get(
+            self.LB_PATH.format(lb_id=self.lb_id)).json['loadbalancer'][
+                'provisioning_status'])
+        policy_update.execute(obsolete, {'enabled': True})
+        self.post(path, payload, status=409)
+        self.assertEqual([False] * 3,
+                         [p['admin_state_up'] for p in
+                          self._activation_policies(path)])
+
+    def test_batch_activation_waits_for_an_ordinary_render(self):
+        path, payload = self._prepare_activation_group()
+        self.post(path, payload, status=204)
+        delivery = self.rpc.cast.call_args.kwargs
+        self.conf.config(group='haproxy_amphora', connection_max_retries=2,
+                         connection_retry_interval=0)
+        real_lock = db_api.listener_render_lock
+        busy_once = iter((True, False, False))
+
+        @contextlib.contextmanager
+        def render_lock(lb_id):
+            if next(busy_once):
+                yield False
+            else:
+                with real_lock(lb_id) as acquired:
+                    yield acquired
+
+        with (mock.patch.object(db_api, 'listener_render_lock', render_lock),
+              mock.patch.object(amphora_noop.NoopAmphoraLoadBalancerDriver,
+                                'update', return_value=None) as update):
+            worker = endpoints.Endpoints()
+            worker.activate_l7policies({}, **delivery)
+            worker.activate_l7policies({}, **delivery)
+        update.assert_called_once()
+        self.assertEqual([True, True, False],
+                         [p['admin_state_up'] for p in
+                          self._activation_policies(path)])
+
+    def test_failover_completion_preserves_unrestored_frontend_error(self):
+        with self.session.begin():
+            listener = self.session.get(models.Listener, self.listener_id)
+            listener.provisioning_status = constants.ERROR
+            listener.frontend_fallback_owns_error = True
+        lb = {constants.LOADBALANCER_ID: self.lb_id}
+        database_tasks.MarkLBActiveInDB(mark_subobjects=True).execute(lb)
+        listener = self.get_listener(self.listener_id)['listener']
+        self.assertEqual(constants.ERROR, listener['provisioning_status'])
 
     def test_batch_activation_replays_after_interruption(self):
         path, payload = self._prepare_activation_group()
@@ -432,7 +579,7 @@ class TestInitialL7Rules(base.BaseAPITest):
         with self.session.begin():
             self.session.get(models.L7Policy, policy_id).enabled = True
         with mock.patch.object(amphora_noop.NoopAmphoraLoadBalancerDriver,
-                               'update') as update:
+                               'update', return_value=None) as update:
             endpoints.Endpoints().activate_l7policies({}, **delivery)
         update.assert_called_once()
         rendered = update.call_args.args[0].listeners[0].l7policies
