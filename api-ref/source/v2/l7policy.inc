@@ -134,6 +134,7 @@ Response Parameters
    - provisioning_status: provisioning_status
    - redirect_http_code: l7policy-redirect-http-code
    - redirect_pool_id: l7policy-redirect-pool_id
+   - tcp_tls_passthrough: tcp_tls_passthrough
    - redirect_prefix: l7policy-redirect-prefix
    - redirect_request: l7policy-redirect-request
    - request_url_rewrite: l7policy-request-url-rewrite
@@ -219,7 +220,15 @@ For TCP listeners, the Amphora provider supports ``REDIRECT_TO_POOL``
 policies with ``TLS_SNI`` rules. TCP TLS termination requires
 ``tcp_tls_termination_v1``. TCP TLS passthrough requires
 ``tls_sni_passthrough_v1``, with ``tls_sni_suffix_v1`` for wildcard rules.
-The redirect pool must use TCP with ``tls_enabled`` set to ``false``.
+
+On a listener with ``tcp_tls_mixed_mode: true``, set
+``tcp_tls_passthrough: true`` at policy creation for a passthrough target.
+For listener TLS termination, set it to false or omit it. Responses include
+the boolean for either target on a mixed TLS listener. Add rules through the
+TLS SNI rule API. Exact matches precede suffix matches. Longer suffixes
+precede shorter suffixes, and policy position resolves equal specificity.
+For passthrough, the redirect pool must use TCP with ``tls_enabled`` set
+to ``false``.
 
 .. rest_status_code:: success ../http-status.yaml
 
@@ -249,6 +258,7 @@ Request
    - project_id: project_id-optional
    - redirect_http_code: l7policy-redirect-http-code-optional
    - redirect_pool_id: l7policy-redirect-pool_id-optional
+   - tcp_tls_passthrough: tcp_tls_passthrough
    - redirect_prefix: l7policy-redirect-prefix-optional
    - redirect_request: l7policy-redirect-request
    - request_url_rewrite: l7policy-request-url-rewrite
@@ -287,6 +297,7 @@ Response Parameters
    - provisioning_status: provisioning_status
    - redirect_http_code: l7policy-redirect-http-code
    - redirect_pool_id: l7policy-redirect-pool_id
+   - tcp_tls_passthrough: tcp_tls_passthrough
    - redirect_prefix: l7policy-redirect-prefix
    - redirect_request: l7policy-redirect-request
    - request_url_rewrite: l7policy-request-url-rewrite
@@ -358,6 +369,7 @@ Response Parameters
    - provisioning_status: provisioning_status
    - redirect_http_code: l7policy-redirect-http-code
    - redirect_pool_id: l7policy-redirect-pool_id
+   - tcp_tls_passthrough: tcp_tls_passthrough
    - redirect_prefix: l7policy-redirect-prefix
    - redirect_request: l7policy-redirect-request
    - request_url_rewrite: l7policy-request-url-rewrite
@@ -419,6 +431,7 @@ Request
    - position: l7policy-position-optional
    - redirect_http_code: l7policy-redirect-http-code-optional
    - redirect_pool_id: l7policy-redirect-pool_id-optional
+   - tcp_tls_passthrough: tcp_tls_passthrough
    - redirect_prefix: l7policy-redirect-prefix-optional
    - redirect_request: l7policy-redirect-request
    - request_url_rewrite: l7policy-request-url-rewrite
@@ -456,6 +469,7 @@ Response Parameters
    - provisioning_status: provisioning_status
    - redirect_http_code: l7policy-redirect-http-code
    - redirect_pool_id: l7policy-redirect-pool_id
+   - tcp_tls_passthrough: tcp_tls_passthrough
    - redirect_prefix: l7policy-redirect-prefix
    - redirect_request: l7policy-redirect-request
    - request_url_rewrite: l7policy-request-url-rewrite

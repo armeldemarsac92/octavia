@@ -433,7 +433,7 @@ class Listener(BaseDataModel):
                  alpn_protocols=None, hsts_max_age=None,
                  hsts_include_subdomains=None, hsts_preload=None,
                  default_http_response=None, https_virtual_hosts=None,
-                 tcp_tls_termination=False,
+                 tcp_tls_termination=False, tcp_tls_mixed_mode=False,
                  client_authentication_insecure_fallback=None,
                  frontend_fallback_owns_error=None):
         self.id = id
@@ -444,6 +444,7 @@ class Listener(BaseDataModel):
         self.default_http_response = default_http_response
         self.https_virtual_hosts = https_virtual_hosts
         self.tcp_tls_termination = tcp_tls_termination
+        self.tcp_tls_mixed_mode = tcp_tls_mixed_mode
         self.load_balancer_id = load_balancer_id
         self.protocol = protocol
         self.protocol_port = protocol_port
@@ -737,7 +738,7 @@ class L7Policy(BaseDataModel):
                  updated_at=None, redirect_prefix=None, tags=None,
                  redirect_http_code=None, fixed_response=None,
                  targets=None, request_header_operations=None,
-                 https_listener_hostname=None,
+                 https_listener_hostname=None, tcp_tls_passthrough=False,
                  response_header_operations=None, redirect_request=None,
                  request_url_rewrite=None, request_cors=None):
         self.id = id
@@ -767,6 +768,7 @@ class L7Policy(BaseDataModel):
         self.request_header_operations = request_header_operations
         self.response_header_operations = response_header_operations
         self.https_listener_hostname = https_listener_hostname
+        self.tcp_tls_passthrough = tcp_tls_passthrough
         self.targets = targets or []
 
     def _conditionally_remove_pool_links(self, pool):

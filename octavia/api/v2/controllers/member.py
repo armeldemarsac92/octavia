@@ -136,9 +136,19 @@ class MemberController(base.BaseController):
         # enrollment of a previously unprotected TCP pool.
         transport = self.repositories.pool.get_transport_for_update(
             session, pool.id)
-        if (not transport.enabled or transport.backend_tls_hostname is None or
-                constants.GATEWAY_CAPABILITY_TCP_TLS_BACKEND_AUTH in
-                driver_utils.gateway_capabilities(driver)):
+        if not transport.enabled:
+            return
+        capabilities = driver_utils.gateway_capabilities(driver)
+        backend_auth_withdrawn = (
+            transport.backend_tls_hostname is not None and
+            constants.GATEWAY_CAPABILITY_TCP_TLS_BACKEND_AUTH not in
+            capabilities)
+        mixed_mode_withdrawn = (
+            constants.GATEWAY_CAPABILITY_TCP_TLS_MIXED_MODE not in
+            capabilities and self.repositories.l7policy.get_policy_using_pool(
+                session, pool.id, tcp_tls_termination=None,
+                tcp_tls_mixed_mode=True))
+        if not (backend_auth_withdrawn or mixed_mode_withdrawn):
             return
         member_ids = [member_id for member_id, _ in changes if member_id]
         current = self.repositories.member.get_routing_for_update(
@@ -162,7 +172,10 @@ class MemberController(base.BaseController):
                         desired[field] != getattr(previous, field)
                         for field in ('monitor_address', 'monitor_port',
                                       'subnet_id'))):
-                driver_utils.require_tcp_tls_backend_auth(driver)
+                if backend_auth_withdrawn:
+                    driver_utils.require_tcp_tls_backend_auth(driver)
+                if mixed_mode_withdrawn:
+                    driver_utils.require_tcp_tls_mixed_mode(driver)
 
     def _validate_create_member(self, lock_session, member_dict):
         """Validate creating member on pool."""

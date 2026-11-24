@@ -26,7 +26,7 @@ peers {{ "%s_peers"|format(loadbalancer.id.replace("-", ""))|trim() }}
 {% endmacro %}
 
 
-{% macro bind_macro(constants, lib_consts, listener, lb_vip_address) %}
+{% macro bind_macro(constants, lib_consts, listener, lb_vip_address, local_socket=None) %}
     {% if listener.crt_list_filename is defined %}
         {% set def_crt_opt = ("ssl crt-list %s"|format(
             listener.crt_list_filename)|trim()) %}
@@ -80,7 +80,7 @@ peers {{ "%s_peers"|format(loadbalancer.id.replace("-", ""))|trim() }}
         {% set alpn_opt = "" %}
     {% endif %}
 
-bind {{ lb_vip_address }}:{{ listener.protocol_port }} {{
+bind {% if local_socket %}{{ local_socket }} accept-proxy{% else %}{{ lb_vip_address }}:{{ listener.protocol_port }}{% endif %} {{
 "%s%s%s%s%s%s%s"|format(def_crt_opt, client_ca_opt, ca_crl_opt, ciphers_opt, ciphersuites_opt, tls_versions_opt, alpn_opt)|trim() }}
 {% endmacro %}
 
@@ -107,9 +107,9 @@ bind {{ lb_vip_address }}:{{ listener.protocol_port }} {{
 {% endmacro %}
 
 
-{% macro l7rule_macro(constants, l7rule, listener) %}
+{% macro l7rule_macro(constants, l7rule, listener, raw_tls=False) %}
     {% if l7rule.type == constants.L7RULE_TYPE_TLS_SNI %}
-        {% set sni_fetch = 'ssl_fc_sni' if listener.tcp_tls_termination else 'req.ssl_sni' %}
+        {% set sni_fetch = 'ssl_fc_sni' if listener.tcp_tls_termination and not raw_tls else 'req.ssl_sni' %}
         {% if l7rule.compare_type == constants.L7RULE_COMPARE_TYPE_ENDS_WITH %}
         acl {{ l7rule.id }} {{ sni_fetch }} -i -m end {{ l7rule.value[1:] }}
         {% else %}
@@ -331,9 +331,9 @@ backend {{ pool.id }}:{{ listener.id }}
 {% endmacro %}
 
 
-{% macro l7policy_rules_macro(constants, l7policy, listener) %}
+{% macro l7policy_rules_macro(constants, l7policy, listener, raw_tls=False) %}
     {% for l7rule in l7policy.l7rules %}
-        {{- l7rule_macro(constants, l7rule, listener) -}}
+        {{- l7rule_macro(constants, l7rule, listener, raw_tls) -}}
     {% endfor %}
     {% if l7policy.request_redirect is defined and l7policy.request_redirect.match is defined %}
     acl redirect-prefix-{{ l7policy.id }} path -m str -- {{ l7policy.request_redirect.match|safe }}
@@ -518,6 +518,81 @@ frontend {{ listener.id }}
     {% endif %}
     {% if listener.user_log_format is defined %}
     log-format {{ listener.user_log_format }}
+    {% endif %}
+{% endmacro %}
+
+
+{% macro mixed_tls_frontend_macro(constants, lib_consts, listener, lb_vip_address, additional_vips) %}
+    {% set local_proxy = constants.HAPROXY_TCP_TLS_MIXED_PREFIX ~ listener.id %}
+    {% set local_frontend = local_proxy ~ '-terminate' %}
+    {% set dispatch = local_proxy ~ '-dispatch' %}
+    {% set reject = local_proxy ~ '-reject' %}
+    {% set local_socket = 'abns@' ~ local_frontend %}
+    {% set dns_label = '[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?' %}
+    {% set dns_name = '^(' ~ dns_label ~ '[.])*' ~ dns_label ~ '$' %}
+frontend {{ listener.id }}
+    mode tcp
+    maxconn {{ listener.connection_limit }}
+    bind {{ lb_vip_address }}:{{ listener.protocol_port }}
+    {% for add_vip in additional_vips %}
+    bind {{ add_vip }}:{{ listener.protocol_port }}
+    {% endfor %}
+    timeout client {{ listener.timeout_client_data }}
+    {% if listener.user_log_format is defined %}
+    log-format {{ listener.user_log_format }}
+    {% endif %}
+    {% if listener.l7policies %}
+    tcp-request inspect-delay {{ listener.timeout_tcp_inspect }}
+    acl octavia_mixed_hello req.ssl_hello_type 1
+    acl octavia_mixed_sni_dns req.ssl_sni -m reg -i {{ dns_name }}
+    acl octavia_mixed_sni_length req.ssl_sni,length -m int 1:253
+    tcp-request content reject if octavia_mixed_hello !octavia_mixed_sni_length
+    tcp-request content reject if octavia_mixed_hello !octavia_mixed_sni_dns
+        {% if listener.mixed_tls_termination %}
+    tcp-request content set-var(sess.octavia_mixed_sni) req.ssl_sni,lower if octavia_mixed_hello
+        {% endif %}
+    tcp-request content accept if octavia_mixed_hello
+        {% for policy in listener.l7policies %}
+            {{- l7policy_rules_macro(constants, policy, listener, raw_tls=True) -}}
+            {% if not policy.tcp_tls_passthrough %}
+                {% set target = dispatch %}
+            {% elif policy.redirect_pool.tls_enabled or policy.redirect_pool.backend_tls_hostname is defined %}
+                {% set target = reject %}
+            {% else %}
+                {% set target = policy.redirect_pool.id ~ ':' ~ listener.id %}
+            {% endif %}
+    use_backend {{ target }} if{{ l7rule_list_macro(constants, policy) }}
+        {% endfor %}
+    {% else %}
+    tcp-request content reject
+    {% endif %}
+
+    {% if listener.mixed_tls_termination %}
+frontend {{ local_frontend }}
+    mode tcp
+    no log
+    {{ bind_macro(constants, lib_consts, listener, lb_vip_address, local_socket)|trim() }}
+    timeout client {{ listener.timeout_client_data }}
+    {# Require the TLS stack to see the same name as the public dispatcher. #}
+    tcp-request content set-var(sess.octavia_mixed_sni) fc_pp_tlv(0xe0)
+    tcp-request content reject unless { ssl_fc_sni,lower,strcmp(sess.octavia_mixed_sni) -m int eq 0 }
+        {% for policy in listener.l7policies if not policy.tcp_tls_passthrough %}
+            {{- l7policy_rules_macro(constants, policy, listener) -}}
+            {{- l7policy_macro(constants, policy, listener) -}}
+        {% endfor %}
+
+backend {{ dispatch }}
+    mode tcp
+    timeout connect {{ listener.timeout_member_connect }}
+    timeout server {{ listener.timeout_member_data }}
+    server local {{ local_socket }} send-proxy-v2 set-proxy-v2-tlv-fmt(0xe0) %[var(sess.octavia_mixed_sni)]
+    {% endif %}
+    {% if listener.mixed_tls_reject %}
+
+backend {{ reject }}
+    mode tcp
+    timeout connect {{ listener.timeout_member_connect }}
+    timeout server {{ listener.timeout_member_data }}
     {% endif %}
 {% endmacro %}
 

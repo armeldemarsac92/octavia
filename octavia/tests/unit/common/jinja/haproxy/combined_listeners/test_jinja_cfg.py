@@ -1624,6 +1624,49 @@ class TestHaproxyCfg(base.TestCase):
             [line.split(' if ')[1] for line in config.splitlines()
              if line.strip().startswith('use_backend ')])
 
+    def test_render_tcp_tls_mixed_mode(self):
+        samples = sample_configs_combined
+        plain = samples.sample_pool_tuple(
+            proto='TCP', sample_pool=1, persistence=False)
+        raw = samples.sample_pool_tuple(
+            proto='TCP', sample_pool=2, persistence=False)
+        exact = samples.sample_l7rule_tuple(
+            'exact-name', type='TLS_SNI', compare_type='EQUAL_TO',
+            value='abc.example.com')
+        suffix = exact._replace(id='suffix', compare_type='ENDS_WITH',
+                                value='*.example.com')
+        passthrough = SimpleNamespace(**dict(
+            samples.sample_l7policy_tuple('passthrough')._asdict(),
+            redirect_pool=raw, l7rules=[exact], tcp_tls_passthrough=True))
+        terminate = samples.sample_l7policy_tuple('terminate')._replace(
+            redirect_pool=plain, l7rules=[suffix])
+        listener = SimpleNamespace(**dict(
+            samples.sample_listener_tuple(
+                proto='TCP', persistence=False, tls=True)._asdict(),
+            protocol_port=8883, default_pool=None, pools=[plain, raw],
+            l7policies=[terminate, passthrough],
+            tcp_tls_termination=True, tcp_tls_mixed_mode=True))
+        second = SimpleNamespace(**dict(
+            vars(listener), id='second-listener', protocol_port=8884))
+        amphora = samples.sample_amphora_tuple()
+        config = self.jinja_cfg.render_loadbalancer_obj(
+            amphora, [listener, second], haproxy_version='3.0.19')
+        self.assertIn('bind 10.0.0.2:8883\n', config)
+        self.assertIn('bind 10.0.0.2:8884\n', config)
+        for item in (listener, second):
+            socket = f'abns@octavia-tls-mixed-{item.id}-terminate'
+            self.assertIn(f'bind {socket} accept-proxy ssl', config)
+            self.assertIn(f'server local {socket} send-proxy-v2', config)
+        self.assertNotIn('default_backend', config)
+        self.assertIn('req.ssl_sni -i -m str abc.example.com', config)
+        self.assertIn('ssl_fc_sni -i -m end .example.com', config)
+        self.assertLess(config.index('if exact-name'),
+                        config.index('if suffix'))
+        self.assertRaises(
+            driver_except.AmpVersionUnsupported,
+            self.jinja_cfg.render_loadbalancer_obj,
+            amphora, [listener], haproxy_version='2.8.0')
+
     def test_render_template_l7policies(self):
         fe = ("frontend sample_listener_id_1\n"
               "    maxconn {maxconn}\n"

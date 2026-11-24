@@ -71,6 +71,7 @@ Response Parameters
    - protocol: protocol
    - protocol_port: protocol_port
    - tcp_tls_termination: tcp_tls_termination
+   - tcp_tls_mixed_mode: tcp_tls_mixed_mode
    - provisioning_status: provisioning_status
    - sni_container_refs: sni_container_refs
    - tags: tags
@@ -171,6 +172,7 @@ Request
    - protocol: protocol
    - protocol_port: protocol_port
    - tcp_tls_termination: tcp_tls_termination
+   - tcp_tls_mixed_mode: tcp_tls_mixed_mode
    - sni_container_refs: sni_container_refs-optional
    - tags: tags-optional
    - timeout_client_data: timeout_client_data-optional
@@ -302,6 +304,7 @@ Response Parameters
    - protocol: protocol
    - protocol_port: protocol_port
    - tcp_tls_termination: tcp_tls_termination
+   - tcp_tls_mixed_mode: tcp_tls_mixed_mode
    - provisioning_status: provisioning_status
    - sni_container_refs: sni_container_refs
    - tags: tags
@@ -388,6 +391,7 @@ Response Parameters
    - protocol: protocol
    - protocol_port: protocol_port
    - tcp_tls_termination: tcp_tls_termination
+   - tcp_tls_mixed_mode: tcp_tls_mixed_mode
    - provisioning_status: provisioning_status
    - sni_container_refs: sni_container_refs
    - tags: tags
@@ -507,6 +511,7 @@ Response Parameters
    - protocol: protocol
    - protocol_port: protocol_port
    - tcp_tls_termination: tcp_tls_termination
+   - tcp_tls_mixed_mode: tcp_tls_mixed_mode
    - provisioning_status: provisioning_status
    - sni_container_refs: sni_container_refs
    - tags: tags

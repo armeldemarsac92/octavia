@@ -2041,13 +2041,15 @@ class L7RuleRepository(BaseRepository):
     model_class = models.L7Rule
     activation_parent = ('l7policy', 'listener', 'load_balancer')
 
-    def has_other_enabled_rules(self, session, rule):
+    def has_other_enabled_rules(self, session, rule, *, compare_type=None):
         model = self.model_class
-        return (session.query(model.id).filter(
+        query = session.query(model.id).filter(
             model.l7policy_id == rule.l7policy_id, model.id != rule.id,
             model.enabled.is_(True), model.provisioning_status.notin_(
                 (consts.PENDING_DELETE, consts.DELETED)))
-            .with_for_update().limit(1).scalar() is not None)
+        if compare_type is not None:
+            query = query.filter(model.compare_type == compare_type)
+        return query.with_for_update().limit(1).scalar() is not None
 
     def get_all_API_list(self, session, pagination_helper=None, **filters):
         """Get a list of L7 Rules for the API list call.
@@ -2195,6 +2197,7 @@ class L7PolicyRepository(BaseRepository):
                     policy.listener_id == listener_id,
                     policy.enabled.is_(True),
                     policy.action == consts.L7POLICY_ACTION_REDIRECT_TO_POOL,
+                    policy.tcp_tls_passthrough.is_(False),
                     policy.provisioning_status.notin_(inactive),
                     rule.enabled.is_(True),
                     rule.provisioning_status.notin_(inactive),
@@ -2272,8 +2275,8 @@ class L7PolicyRepository(BaseRepository):
         if tcp_tls_termination is not None or load_balancer_id is not None:
             query = query.join(policy.listener)
         if tcp_tls_termination is not None:
-            query = query.filter(models.Listener.tcp_tls_termination.is_(
-                tcp_tls_termination))
+            query = query.filter(
+                self._uses_terminated_tls().is_(tcp_tls_termination))
         if load_balancer_id is not None:
             listener = models.Listener
             query = query.filter(
@@ -2287,13 +2290,16 @@ class L7PolicyRepository(BaseRepository):
             session, consts.L7RULE_TYPE_TLS_SNI,
             compare_type=consts.L7RULE_COMPARE_TYPE_ENDS_WITH, **filters)
 
+    def _uses_terminated_tls(self):
+        return (models.Listener.tcp_tls_termination.is_(True) &
+                self.model_class.tcp_tls_passthrough.is_(False))
+
     def get_policy_using_pool(self, session, pool_id, *,
-                              tcp_tls_termination=False, tcp_only=True):
+                              tcp_tls_termination=False, tcp_only=True,
+                              tcp_tls_mixed_mode=False):
         model = self.model_class
         query = (session.query(model.id)
                  .join(model.listener)
-                 .filter(models.Listener.tcp_tls_termination.is_(
-                     tcp_tls_termination))
                  .filter(model.redirect_pool_id == pool_id)
                  .filter(model.action ==
                          consts.L7POLICY_ACTION_REDIRECT_TO_POOL)
@@ -2302,6 +2308,11 @@ class L7PolicyRepository(BaseRepository):
         if tcp_only:
             query = query.filter(
                 models.Listener.protocol == consts.PROTOCOL_TCP)
+        if tcp_tls_termination is not None:
+            query = query.filter(
+                self._uses_terminated_tls().is_(tcp_tls_termination))
+        if tcp_tls_mixed_mode:
+            query = query.filter(models.Listener.tcp_tls_mixed_mode.is_(True))
         return query.with_for_update().limit(1).scalar()
 
     def _validate_l7policy_pool_data(self, session, l7policy, old_policy=None):

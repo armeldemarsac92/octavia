@@ -269,6 +269,9 @@ def parse_haproxy_file(lb_id):
                 last_id = section
             elif last_token == 'frontend_id':
                 # We're in a frontend section and already have the id
+                if last_id.startswith(consts.HAPROXY_TCP_TLS_MIXED_PREFIX):
+                    last_token = last_id = None
+                    continue
                 # Look for the mode
                 mode_matcher = LISTENER_MODE_PATTERN.search(section)
                 if not mode_matcher:

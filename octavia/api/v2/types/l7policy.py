@@ -58,6 +58,7 @@ class L7PolicyResponse(BaseL7PolicyType):
     response_header_operations = wtypes.wsattr(
         types.ResponseHeaderOperations())
     https_listener_hostname = wtypes.wsattr(wtypes.StringType(max_length=253))
+    tcp_tls_passthrough = wtypes.wsattr(bool)
     redirect_prefix = wtypes.wsattr(wtypes.StringType())
     position = wtypes.wsattr(wtypes.IntegerType())
     rules = wtypes.wsattr([types.IdOnlyType])
@@ -76,6 +77,11 @@ class L7PolicyResponse(BaseL7PolicyType):
             result.fixed_response = wtypes.Unset
         if db_obj.https_listener_hostname is None:
             result.https_listener_hostname = wtypes.Unset
+        listener = getattr(db_obj, 'listener', None)
+        passthrough = getattr(db_obj, 'tcp_tls_passthrough', None)
+        if (getattr(listener, 'tcp_tls_mixed_mode', None) is not True or
+                not isinstance(passthrough, bool)):
+            result.tcp_tls_passthrough = wtypes.Unset
         for field in ('request_header_operations',
                       'response_header_operations', 'redirect_request',
                       'request_url_rewrite', 'request_cors'):
@@ -136,6 +142,7 @@ class L7PolicyPOST(BaseL7PolicyType):
     response_header_operations = wtypes.wsattr(
         types.ResponseHeaderOperations())
     https_listener_hostname = wtypes.wsattr(wtypes.StringType(max_length=253))
+    tcp_tls_passthrough = wtypes.wsattr(bool, default=False)
     redirect_prefix = wtypes.wsattr(types.URLType())
     position = wtypes.wsattr(wtypes.IntegerType(
         minimum=constants.MIN_POLICY_POSITION,
@@ -194,6 +201,7 @@ class L7PolicyPUT(BaseL7PolicyType):
     response_header_operations = wtypes.wsattr(
         types.ResponseHeaderOperations())
     https_listener_hostname = wtypes.wsattr(wtypes.StringType(max_length=253))
+    tcp_tls_passthrough = wtypes.wsattr(bool)
     redirect_prefix = wtypes.wsattr(types.URLType())
     position = wtypes.wsattr(wtypes.IntegerType(
         minimum=constants.MIN_POLICY_POSITION,
@@ -226,6 +234,7 @@ class L7PolicySingleCreate(BaseL7PolicyType):
     response_header_operations = wtypes.wsattr(
         types.ResponseHeaderOperations())
     https_listener_hostname = wtypes.wsattr(wtypes.StringType(max_length=253))
+    tcp_tls_passthrough = wtypes.wsattr(bool, default=False)
     redirect_prefix = wtypes.wsattr(types.URLType())
     position = wtypes.wsattr(wtypes.IntegerType(
         minimum=constants.MIN_POLICY_POSITION,

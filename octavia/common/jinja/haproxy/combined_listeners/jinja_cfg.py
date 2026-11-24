@@ -283,6 +283,12 @@ class JinjaTemplater:
                     raise driver_except.AmpVersionUnsupported(
                         version=f'HAProxy {haproxy_version}; HTTPS listener '
                                 'isolation requires 3.0')
+                if (listener.get('tcp_tls_mixed_mode') and haproxy_version and
+                        not versionutils.is_compatible(
+                            '3.0.0', haproxy_version, same_major=False)):
+                    raise driver_except.AmpVersionUnsupported(
+                        version=f'HAProxy {haproxy_version}; mixed TLS '
+                                'routing requires 3.0')
                 for pool in listener['pools']:
                     hostname = pool.get('backend_tls_hostname')
                     require_h2 = pool.get('backend_tls_require_h2')
@@ -446,16 +452,15 @@ class JinjaTemplater:
         # NOTE(sbalukoff): Global connection limit should be a sum of all
         # listeners' connection limits.
         connection_limit_sum = 0
-        for listener in listeners:
-            if not listener.enabled:
+        for listener in listener_transforms:
+            if not listener['enabled']:
                 continue
-            if listener.protocol in constants.LVS_PROTOCOLS:
-                continue
-            if listener.connection_limit and listener.connection_limit > -1:
-                connection_limit_sum += listener.connection_limit
-            else:
-                connection_limit_sum += (
-                    CONF.haproxy_amphora.default_connection_limit)
+            limit = listener['connection_limit']
+            connection_limit_sum += limit
+            if listener.get('mixed_tls_termination'):
+                # A terminated connection also occupies a private frontend
+                # connection. Keep the public per-listener limit unchanged.
+                connection_limit_sum += limit
         # If there's a limit between 0 and MAX, set it, otherwise just set MAX
         if 0 < connection_limit_sum < constants.HAPROXY_MAX_MAXCONN:
             ret_value['global_connection_limit'] = connection_limit_sum
@@ -491,6 +496,7 @@ class JinjaTemplater:
         """
         tcp_tls_termination = getattr(listener, 'tcp_tls_termination',
                                       False) is True
+        mixed_mode = getattr(listener, 'tcp_tls_mixed_mode', False) is True
         active = listener.enabled and loadbalancer.enabled
         client_auth_fallback = active and getattr(
             listener, 'client_authentication_insecure_fallback', None) is True
@@ -505,8 +511,9 @@ class JinjaTemplater:
             raise exceptions.ValidationException(detail=(
                 'Insecure client certificate validation fallback requires '
                 'HTTPS with a server certificate and a trusted client CA.'))
-        if tcp_tls_termination and active:
+        if (tcp_tls_termination or mixed_mode) and active:
             if (listener.protocol != constants.PROTOCOL_TCP or
+                    not tcp_tls_termination or
                     not listener.tls_certificate_id):
                 raise exceptions.ValidationException(detail=(
                     'TLS termination requires a TCP listener and a server '
@@ -534,6 +541,8 @@ class JinjaTemplater:
         }
         if tcp_tls_termination:
             ret_value['tcp_tls_termination'] = True
+        if mixed_mode:
+            ret_value['tcp_tls_mixed_mode'] = True
         if self.connection_logging:
             ret_value['user_log_format'] = (
                 self._format_log_string(loadbalancer, listener.protocol))
@@ -647,7 +656,7 @@ class JinjaTemplater:
                     listener.default_http_response))
         policy_gen = (policy for policy in listener.l7policies if
                       policy.provisioning_status != constants.PENDING_DELETE)
-        if https_sections is None and listener.default_pool:
+        if https_sections is None and not mixed_mode and listener.default_pool:
             for pool in pools:
                 if pool['id'] == listener.default_pool.id:
                     ret_value['default_pool'] = pool
@@ -661,7 +670,9 @@ class JinjaTemplater:
             policy_gen = (policy for policy in policy_gen
                           if self._is_routable_sni_policy(
                               policy, available_pool_ids,
-                              tcp_tls_termination))
+                              tcp_tls_termination) and
+                          (mixed_mode or not getattr(
+                              policy, 'tcp_tls_passthrough', False)))
         else:
             policy_gen = (policy for policy in policy_gen if not any(
                 rule.enabled and rule.type == constants.L7RULE_TYPE_TLS_SNI
@@ -681,6 +692,9 @@ class JinjaTemplater:
                 available_pool_ids)
             if https_sections is not None:
                 transformed['https_section'] = https_sections[hostname]
+            if mixed_mode:
+                transformed['tcp_tls_passthrough'] = (
+                    getattr(policy, 'tcp_tls_passthrough', False) is True)
             l7policies.append(transformed)
         if any('request_redirect' in policy for policy in l7policies):
             # For requests matching a structured redirect, give legacy
@@ -701,18 +715,26 @@ class JinjaTemplater:
                         'mode': mode,
                         'argument': _quote_config_arg(
                             destination.replace('%', '%%'))}
-        if listener.protocol == constants.PROTOCOL_TCP and l7policies:
+        if listener.protocol == constants.PROTOCOL_TCP:
             l7policies.sort(key=self._sni_policy_priority)
             if tcp_tls_termination:
                 pools_by_id = {pool['id']: pool for pool in pools}
                 for policy in l7policies:
                     pool_id = policy['redirect_pool']['id']
                     policy['redirect_pool'] = pools_by_id[pool_id]
-            else:
+            if mixed_mode or (l7policies and not tcp_tls_termination):
                 ret_value['inspect_tls_sni'] = True
                 if not ret_value['timeout_tcp_inspect']:
                     ret_value['timeout_tcp_inspect'] = (
                         constants.DEFAULT_TLS_SNI_INSPECT_TIMEOUT)
+        if mixed_mode:
+            ret_value['mixed_tls_termination'] = any(
+                not policy['tcp_tls_passthrough'] for policy in l7policies)
+            ret_value['mixed_tls_reject'] = any(
+                policy['tcp_tls_passthrough'] and
+                (policy['redirect_pool']['tls_enabled'] or
+                 policy['redirect_pool'].get('backend_tls_hostname'))
+                for policy in l7policies)
         ret_value['l7policies'] = l7policies
         requests_by_pool = {}
         responses_by_backend = {}

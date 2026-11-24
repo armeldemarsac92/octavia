@@ -589,6 +589,8 @@ class Listener(base_models.BASE, base_models.IdMixin,
     tls_certificate_id = sa.Column(sa.String(255), nullable=True)
     tcp_tls_termination = sa.Column(sa.Boolean(), nullable=False,
                                     server_default=sa.false())
+    tcp_tls_mixed_mode = sa.Column(sa.Boolean(), nullable=False,
+                                   server_default=sa.false())
     default_http_response = sa.Column(sa.JSON(none_as_null=True))
     https_virtual_hosts = sa.Column(sa.JSON(none_as_null=True))
     default_pool_id = sa.Column(
@@ -859,6 +861,8 @@ class L7Policy(base_models.BASE, base_models.IdMixin, base_models.ProjectMixin,
     request_header_operations = sa.Column(sa.JSON(none_as_null=True))
     response_header_operations = sa.Column(sa.JSON(none_as_null=True))
     https_listener_hostname = sa.Column(sa.String(253), nullable=True)
+    tcp_tls_passthrough = sa.Column(sa.Boolean(), nullable=False,
+                                    server_default=sa.false())
     position = sa.Column(sa.Integer, nullable=False)
     enabled = sa.Column(sa.Boolean(), nullable=False)
     listener = orm.relationship("Listener", uselist=False,

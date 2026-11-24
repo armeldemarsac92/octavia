@@ -213,12 +213,17 @@ class L7RuleController(base.BaseController):
                 self._require_no_transform_exposed_by_ordered_redirect(
                     context.session, driver, db_l7policy)
             if tcp_policy:
+                passthrough = db_l7policy.tcp_tls_passthrough
+                driver_utils.validate_tcp_tls_policy_mode(
+                    driver, db_l7policy.listener.tcp_tls_mixed_mode,
+                    passthrough)
                 driver_utils.require_tls_sni_rule_comparison(
-                    driver, l7rule.compare_type, tcp_tls_termination)
+                    driver, l7rule.compare_type,
+                    tcp_tls_termination and not passthrough)
                 driver_utils.validate_existing_tcp_pool_attachment(
                     driver, self.repositories.l7policy, context.session,
                     db_l7policy.listener, db_l7policy.redirect_pool_id,
-                    tls_sni_policy=True)
+                    tls_sni_policy=True, passthrough=passthrough)
 
             db_l7rule = self._validate_create_l7rule(context.session,
                                                      l7rule_dict)
@@ -278,7 +283,7 @@ class L7RuleController(base.BaseController):
                 policy.listener_id, policy.https_listener_hostname,
                 policy.position)
 
-    def _require_transform_capability_for_rule_removal(
+    def _validate_rule_removal(
             self, session, driver, policy, rule):
         redirect = policy.action == constants.L7POLICY_ACTION_REDIRECT_REQUEST
         if (not policy.enabled or not rule.enabled or
@@ -288,9 +293,19 @@ class L7RuleController(base.BaseController):
         # Policies with no enabled rules are inactive. Removing a predicate
         # when another remains widens the scope of an enabled policy.
         policy_repo = self.repositories.l7policy
-        if self.repositories.l7rule.has_other_enabled_rules(session, rule):
+        rules = self.repositories.l7rule
+        if rules.has_other_enabled_rules(session, rule):
             listener = self.repositories.listener.get_for_update(
                 session, policy.listener_id, show_deleted=False)
+            if listener.enabled and listener.tcp_tls_mixed_mode:
+                driver_utils.require_tcp_tls_mixed_mode(driver)
+                # SNI predicates on one policy are conjunctive. Without a
+                # remaining exact match, the live policy selects a suffix.
+                exact = constants.L7RULE_COMPARE_TYPE_EQUAL_TO
+                if (policy.tcp_tls_passthrough and
+                        not rules.has_other_enabled_rules(
+                            session, rule, compare_type=exact)):
+                    driver_utils.require_tls_sni_suffix(driver)
             if redirect and listener.enabled:
                 driver_utils.require_http_request_redirect(driver)
                 self._require_no_transform_exposed_by_ordered_redirect(
@@ -345,7 +360,7 @@ class L7RuleController(base.BaseController):
             match_fields = {'type', 'compare_type', 'key', 'value', 'invert'}
             enabled = l7rule_dict.get('enabled', db_l7rule.enabled)
             if not enabled:
-                self._require_transform_capability_for_rule_removal(
+                self._validate_rule_removal(
                     context.session, driver, db_l7policy, db_l7rule)
             match_changed = any(
                 field in l7rule_dict and
@@ -383,14 +398,19 @@ class L7RuleController(base.BaseController):
                     self._require_no_transform_exposed_by_ordered_redirect(
                         context.session, driver, db_l7policy)
                 if tcp_policy:
+                    passthrough = db_l7policy.tcp_tls_passthrough
+                    driver_utils.validate_tcp_tls_policy_mode(
+                        driver, db_l7policy.listener.tcp_tls_mixed_mode,
+                        passthrough)
                     compare_type = l7rule_dict.get(
                         'compare_type', db_l7rule.compare_type)
                     driver_utils.require_tls_sni_rule_comparison(
-                        driver, compare_type, tcp_tls_termination)
+                        driver, compare_type,
+                        tcp_tls_termination and not passthrough)
                     driver_utils.validate_existing_tcp_pool_attachment(
                         driver, self.repositories.l7policy, context.session,
                         db_l7policy.listener, db_l7policy.redirect_pool_id,
-                        tls_sni_policy=True)
+                        tls_sni_policy=True, passthrough=passthrough)
             l7rule_dict['id'] = id
             provider_l7rule_dict = (
                 driver_utils.l7rule_dict_to_provider_dict(l7rule_dict))
@@ -453,7 +473,7 @@ class L7RuleController(base.BaseController):
             db_l7policy = self._test_lb_listener_policy_statuses(
                 context.session)
             context.session.refresh(db_l7rule, with_for_update=True)
-            self._require_transform_capability_for_rule_removal(
+            self._validate_rule_removal(
                 context.session, driver, db_l7policy, db_l7rule)
 
             self.repositories.l7rule.update(

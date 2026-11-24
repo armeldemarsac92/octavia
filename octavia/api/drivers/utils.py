@@ -46,6 +46,9 @@ BACKEND_TLS_SUBJECT_ALT_NAMES_PAYLOAD_AVAILABLE = hasattr(
     driver_dm.Pool(), 'backend_tls_subject_alt_names')
 FRONTEND_CLIENT_AUTH_INSECURE_FALLBACK_PAYLOAD_AVAILABLE = hasattr(
     driver_dm.Listener(), 'client_authentication_insecure_fallback')
+TCP_TLS_MIXED_MODE_PAYLOAD_AVAILABLE = (
+    hasattr(driver_dm.Listener(), 'tcp_tls_mixed_mode') and
+    hasattr(driver_dm.L7Policy(), 'tcp_tls_passthrough'))
 
 HTTP_L7RULE_CAPABILITIES = {
     constants.L7RULE_TYPE_HTTP_HEADER_EXACT:
@@ -172,6 +175,16 @@ def gateway_capabilities(driver):
         if (driver.name in api_settings.enabled_tls_sni_suffix_providers and
                 getattr(driver, 'supports_tls_sni_suffix', False) is True):
             capabilities.append(constants.GATEWAY_CAPABILITY_TLS_SNI_SUFFIX)
+        mixed_mode_providers = (
+            api_settings.enabled_tcp_tls_mixed_mode_providers)
+        if (TCP_TLS_MIXED_MODE_PAYLOAD_AVAILABLE and
+                constants.GATEWAY_CAPABILITY_TCP_TLS_TERMINATION
+                in capabilities and
+                driver.name in mixed_mode_providers and
+                getattr(driver, 'supports_tcp_tls_mixed_mode', False)
+                is True):
+            capabilities.append(
+                constants.GATEWAY_CAPABILITY_TCP_TLS_MIXED_MODE)
     https_isolation_providers = (
         api_settings.enabled_https_listener_isolation_providers)
     if (driver.name in https_isolation_providers and
@@ -357,6 +370,27 @@ def require_tcp_tls_backend_auth(driver):
                 'unavailable for this provider.'))
 
 
+def require_tcp_tls_mixed_mode(driver):
+    if (constants.GATEWAY_CAPABILITY_TCP_TLS_MIXED_MODE not in
+            gateway_capabilities(driver)):
+        raise exceptions.ProviderUnsupportedOptionError(
+            prov=driver.name, user_msg=_(
+                'Mixed TCP listener TLS routing is unavailable for this '
+                'provider.'))
+
+
+def validate_tcp_tls_policy_mode(driver, mixed_mode, passthrough):
+    if passthrough is not True and passthrough is not False:
+        raise exceptions.ValidationException(detail=_(
+            'tcp_tls_passthrough must be true or false.'))
+    if passthrough and not mixed_mode:
+        raise exceptions.ValidationException(detail=_(
+            'tcp_tls_passthrough requires a TCP listener with '
+            'tcp_tls_mixed_mode enabled.'))
+    if mixed_mode:
+        require_tcp_tls_mixed_mode(driver)
+
+
 def validate_tcp_pool_attachment(driver, protocol, tls_enabled, *,
                                  tcp_tls_termination=False, hostname=None,
                                  ca_ref=None, tls_sni_policy=False):
@@ -372,13 +406,13 @@ def validate_tcp_pool_attachment(driver, protocol, tls_enabled, *,
 
 def validate_existing_tcp_pool_attachment(
         driver, policy_repo, session, listener, pool_id, *,
-        tls_sni_policy=False, skip_disabled_pool=False):
+        tls_sni_policy=False, skip_disabled_pool=False, passthrough=False):
     pool = policy_repo.get_redirect_pool_for_update(session, listener, pool_id)
     if skip_disabled_pool and not pool.enabled:
         return
     validate_tcp_pool_attachment(
         driver, pool.protocol, pool.tls_enabled,
-        tcp_tls_termination=listener.tcp_tls_termination,
+        tcp_tls_termination=listener.tcp_tls_termination and not passthrough,
         hostname=pool.backend_tls_hostname,
         ca_ref=pool.ca_tls_certificate_id, tls_sni_policy=tls_sni_policy)
 
@@ -711,6 +745,9 @@ def listener_dict_to_provider_dict(listener_dict, for_delete=False,
     new_listener_dict.pop('frontend_fallback_owns_error', None)
     if not new_listener_dict.get('tcp_tls_termination'):
         new_listener_dict.pop('tcp_tls_termination', None)
+    if (not TCP_TLS_MIXED_MODE_PAYLOAD_AVAILABLE or
+            not new_listener_dict.get('tcp_tls_mixed_mode')):
+        new_listener_dict.pop('tcp_tls_mixed_mode', None)
     if (not FRONTEND_CLIENT_AUTH_INSECURE_FALLBACK_PAYLOAD_AVAILABLE or
             (new_listener_dict.get('client_authentication_insecure_fallback')
              is not True and not clear_client_auth_fallback)):
@@ -1052,6 +1089,9 @@ def l7policy_dict_to_provider_dict(l7policy_dict):
         new_l7policy_dict.pop('request_url_rewrite', None)
     if not REQUEST_CORS_PAYLOAD_AVAILABLE:
         new_l7policy_dict.pop('request_cors', None)
+    if (not TCP_TLS_MIXED_MODE_PAYLOAD_AVAILABLE or
+            not new_l7policy_dict.get('tcp_tls_passthrough')):
+        new_l7policy_dict.pop('tcp_tls_passthrough', None)
     for attribute in ('request_header_operations',
                       'response_header_operations', 'https_listener_hostname'):
         if new_l7policy_dict.get(attribute) is None:

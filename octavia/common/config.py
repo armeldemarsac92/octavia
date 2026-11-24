@@ -162,6 +162,12 @@ api_opts = [
     cfg.ListOpt('enabled_tls_sni_providers', default=[],
                 help=_('Providers enabled in this region for TLS ClientHello '
                        'SNI routing on TCP listeners.')),
+    cfg.ListOpt('enabled_tcp_tls_mixed_mode_providers', default=[],
+                help=_('Providers in this region qualified for mixed TLS '
+                       'termination and passthrough on a TCP listener. '
+                       'Requires both TCP TLS termination and TLS SNI '
+                       'passthrough enrollment and upgrades to octavia-lib, '
+                       'the database, API, workers and Amphora fleet.')),
     cfg.ListOpt('enabled_https_listener_isolation_providers', default=[],
                 help=_('Providers with HAProxy 3.0 or newer enrolled for '
                        'shared HTTPS listener hostname isolation.')),

@@ -1728,6 +1728,25 @@ tags-optional:
   min_version: 2.5
   required: false
   type: array
+tcp_tls_mixed_mode:
+  description: |
+    Set to true on creation of a listener with ``tcp_tls_termination: true``
+    to allow terminating and passthrough TLS SNI policies on the same port.
+    Requires ``tcp_tls_mixed_mode_v1`` and a listener without a default pool.
+    This field is immutable and is returned when enabled.
+  in: body
+  required: false
+  type: boolean
+tcp_tls_passthrough:
+  description: |
+    Set to true on creation of a redirect-to-pool policy on a mixed TLS
+    listener to forward the original TLS stream to a TCP pool with
+    ``tls_enabled: false``. Omit this field to use listener TLS termination.
+    This field is immutable. Responses for a mixed TLS listener's policies
+    return true for passthrough and false for listener TLS termination.
+  in: body
+  required: false
+  type: boolean
 tcp_tls_termination:
   description: |
     On creation, set this to true with protocol ``TCP`` and an authorized

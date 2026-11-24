@@ -41,6 +41,7 @@ class ListenerResponse(BaseListenerType):
     admin_state_up = wtypes.wsattr(bool)
     protocol = wtypes.wsattr(wtypes.text)
     tcp_tls_termination = wtypes.wsattr(bool)
+    tcp_tls_mixed_mode = wtypes.wsattr(bool)
     protocol_port = wtypes.wsattr(wtypes.IntegerType())
     connection_limit = wtypes.wsattr(wtypes.IntegerType())
     default_tls_container_ref = wtypes.wsattr(wtypes.StringType())
@@ -79,6 +80,8 @@ class ListenerResponse(BaseListenerType):
             result.https_virtual_hosts = wtypes.Unset
         if result.tcp_tls_termination is not True:
             result.tcp_tls_termination = wtypes.Unset
+        if result.tcp_tls_mixed_mode is not True:
+            result.tcp_tls_mixed_mode = wtypes.Unset
         if result.client_authentication_insecure_fallback is None:
             result.client_authentication_insecure_fallback = wtypes.Unset
         if db_obj.default_http_response is not None:
@@ -156,6 +159,7 @@ class ListenerPOST(BaseListenerType):
     https_virtual_hosts = wtypes.wsattr(
         wtypes.ArrayType(wtypes.StringType(max_length=253)))
     tcp_tls_termination = wtypes.wsattr(bool, default=False)
+    tcp_tls_mixed_mode = wtypes.wsattr(bool, default=False)
     default_pool = wtypes.wsattr(pool_types.PoolSingleCreate)
     l7policies = wtypes.wsattr(
         [l7policy_types.L7PolicySingleCreate], default=[])
@@ -210,6 +214,7 @@ class ListenerPUT(BaseListenerType):
     https_virtual_hosts = wtypes.wsattr(
         wtypes.ArrayType(wtypes.StringType(max_length=253)))
     tcp_tls_termination = wtypes.wsattr(bool)
+    tcp_tls_mixed_mode = wtypes.wsattr(bool)
     insert_headers = wtypes.wsattr(
         wtypes.DictType(str, wtypes.StringType(max_length=255)))
     timeout_client_data = wtypes.wsattr(
@@ -266,6 +271,7 @@ class ListenerSingleCreate(BaseListenerType):
     https_virtual_hosts = wtypes.wsattr(
         wtypes.ArrayType(wtypes.StringType(max_length=253)))
     tcp_tls_termination = wtypes.wsattr(bool, default=False)
+    tcp_tls_mixed_mode = wtypes.wsattr(bool, default=False)
     default_pool = wtypes.wsattr(pool_types.PoolSingleCreate)
     l7policies = wtypes.wsattr(
         [l7policy_types.L7PolicySingleCreate], default=[])

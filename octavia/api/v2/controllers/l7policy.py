@@ -447,6 +447,9 @@ class L7PolicyController(base.BaseController):
                 listener_ids=[listener_id])
             listener = self.repositories.listener.get_for_update(
                 lock_session, listener_id, show_deleted=False)
+            passthrough = l7policy_dict.get('tcp_tls_passthrough', False)
+            driver_utils.validate_tcp_tls_policy_mode(
+                driver, listener.tcp_tls_mixed_mode, passthrough)
             hostname = validate.validate_https_policy_hostname(
                 listener.https_virtual_hosts,
                 l7policy_dict.get('https_listener_hostname'))
@@ -458,7 +461,8 @@ class L7PolicyController(base.BaseController):
                     driver, listener.protocol, listener.tcp_tls_termination):
                 driver_utils.validate_existing_tcp_pool_attachment(
                     driver, self.repositories.l7policy, lock_session,
-                    listener, pool_id, tls_sni_policy=True)
+                    listener, pool_id, tls_sni_policy=True,
+                    passthrough=passthrough)
             elif pool_id:
                 self._validate_redirect_pool_protocol(
                     lock_session, listener, pool_id)
@@ -546,6 +550,11 @@ class L7PolicyController(base.BaseController):
             # Load the driver early as it also provides validation
             driver = driver_factory.get_driver(provider)
             action = l7policy_dict.get('action', db_l7policy.action)
+            passthrough = db_l7policy.tcp_tls_passthrough
+            if (l7policy_dict.pop('tcp_tls_passthrough', passthrough)
+                    is not passthrough):
+                raise exceptions.ValidationException(detail=_(
+                    'tcp_tls_passthrough can only be set at policy creation.'))
             routing_changed = {'action', 'fixed_response', 'targets',
                                'redirect_request'}
             if action == constants.L7POLICY_ACTION_REDIRECT_REQUEST:
@@ -658,7 +667,9 @@ class L7PolicyController(base.BaseController):
                     tcp_tls_termination=listener.tcp_tls_termination,
                     **retained_headers)
                 if tcp_policy:
-                    if (not listener.tcp_tls_termination and
+                    driver_utils.validate_tcp_tls_policy_mode(
+                        driver, listener.tcp_tls_mixed_mode, passthrough)
+                    if ((passthrough or not listener.tcp_tls_termination) and
                             policy_repo.has_enabled_tls_sni_suffix_rule(
                                 lock_session, policy_id=id)):
                         driver_utils.require_tls_sni_suffix(driver)
@@ -666,7 +677,10 @@ class L7PolicyController(base.BaseController):
                         'redirect_pool_id', db_l7policy.redirect_pool_id)
                     driver_utils.validate_existing_tcp_pool_attachment(
                         driver, policy_repo, lock_session, listener, target,
-                        tls_sni_policy=True)
+                        tls_sni_policy=True, passthrough=passthrough)
+            elif (listener.tcp_tls_mixed_mode and enabled and
+                    position != db_l7policy.position):
+                driver_utils.require_tcp_tls_mixed_mode(driver)
             validate_policy_headers(
                 l7policy_dict, listener.protocol, driver,
                 old_policy=db_l7policy)
