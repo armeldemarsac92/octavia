@@ -789,10 +789,12 @@ class LoadBalancersController(base.BaseController):
                 redirect_pool = policy.get('redirect_pool')
                 if redirect_pool:
                     target = pools_by_name[redirect_pool['name']]
+                    passthrough = policy.get('tcp_tls_passthrough')
                     driver_utils.validate_tcp_pool_attachment(
                         driver, target.get('protocol'),
                         target.get('tls_enabled'),
-                        tcp_tls_termination=tcp_tls_termination,
+                        tcp_tls_termination=(tcp_tls_termination and
+                                             not passthrough),
                         hostname=target.get('backend_tls_hostname'),
                         ca_ref=target.get('ca_tls_certificate_id'),
                         tls_sni_policy=tcp_policy)
