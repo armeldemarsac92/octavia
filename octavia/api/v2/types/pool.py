@@ -19,6 +19,8 @@ from octavia.api.common import types
 from octavia.api.v2.types import health_monitor as health_monitor_types
 from octavia.api.v2.types import member as member_types
 from octavia.common import constants
+from octavia.common import exceptions
+from octavia.common import validate
 
 
 class SessionPersistenceResponse(types.BaseType):
@@ -54,6 +56,19 @@ class SessionPersistencePUT(types.BaseType):
     persistence_timeout = wtypes.wsattr(wtypes.IntegerType(), default=None)
     persistence_granularity = wtypes.wsattr(types.IPAddressType(),
                                             default=None)
+
+
+class BackendTLSSubjectAltNames(wtypes.UserType):
+    # Preserve JSON types so extra keys and coerced values are rejected.
+    basetype = object
+    name = 'backend_tls_subject_alt_names'
+
+    @staticmethod
+    def validate(value):
+        try:
+            return validate.backend_tls_subject_alt_names(value)
+        except exceptions.ValidationException as error:
+            raise ValueError(str(error)) from error
 
 
 class BasePoolType(types.BaseType):
@@ -93,6 +108,8 @@ class PoolResponse(BasePoolType):
     backend_h2c = wtypes.wsattr(bool)
     backend_tls_hostname = wtypes.wsattr(wtypes.StringType(max_length=253))
     backend_tls_require_h2 = wtypes.wsattr(bool)
+    backend_tls_subject_alt_names = wtypes.wsattr(
+        BackendTLSSubjectAltNames())
     tls_ciphers = wtypes.wsattr(wtypes.StringType())
     tls_versions = wtypes.wsattr(wtypes.ArrayType(wtypes.StringType()))
     alpn_protocols = wtypes.wsattr(wtypes.ArrayType(types.AlpnProtocolType()))
@@ -100,6 +117,8 @@ class PoolResponse(BasePoolType):
     @classmethod
     def from_db_obj(cls, db_obj):
         result = super().from_db_obj(db_obj)
+        if result.backend_tls_subject_alt_names is None:
+            result.backend_tls_subject_alt_names = wtypes.Unset
 
         result.listeners = [
             types.IdOnlyType.from_db_obj(listener)
@@ -189,6 +208,8 @@ class PoolPOST(BasePoolType):
     backend_h2c = wtypes.wsattr(bool, default=False)
     backend_tls_hostname = wtypes.wsattr(wtypes.StringType(max_length=253))
     backend_tls_require_h2 = wtypes.wsattr(bool, default=False)
+    backend_tls_subject_alt_names = wtypes.wsattr(
+        BackendTLSSubjectAltNames())
     tls_ciphers = wtypes.wsattr(wtypes.StringType(max_length=2048))
     tls_versions = wtypes.wsattr(wtypes.ArrayType(wtypes.StringType(
         max_length=32)))
@@ -215,6 +236,8 @@ class PoolPUT(BasePoolType):
     backend_h2c = wtypes.wsattr(bool)
     backend_tls_hostname = wtypes.wsattr(wtypes.StringType(max_length=253))
     backend_tls_require_h2 = wtypes.wsattr(bool)
+    backend_tls_subject_alt_names = wtypes.wsattr(
+        BackendTLSSubjectAltNames())
     tls_ciphers = wtypes.wsattr(wtypes.StringType(max_length=2048))
     tls_versions = wtypes.wsattr(wtypes.ArrayType(wtypes.StringType(
         max_length=32)))
@@ -246,6 +269,8 @@ class PoolSingleCreate(BasePoolType):
     backend_h2c = wtypes.wsattr(bool)
     backend_tls_hostname = wtypes.wsattr(wtypes.StringType(max_length=253))
     backend_tls_require_h2 = wtypes.wsattr(bool)
+    backend_tls_subject_alt_names = wtypes.wsattr(
+        BackendTLSSubjectAltNames())
     tls_ciphers = wtypes.wsattr(wtypes.StringType(max_length=2048))
     tls_versions = wtypes.wsattr(wtypes.ArrayType(wtypes.StringType(
         max_length=32)))

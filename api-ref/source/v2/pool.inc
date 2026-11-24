@@ -50,6 +50,7 @@ Response Parameters
    - backend_h2c: backend-h2c
    - backend_tls_hostname: backend-tls-hostname
    - backend_tls_require_h2: backend-tls-require-h2
+   - backend_tls_subject_alt_names: backend-tls-subject-alt-names
    - ca_tls_container_ref: ca_tls_container_ref
    - created_at: created_at
    - crl_container_ref: crl_container_ref
@@ -179,6 +180,7 @@ Request
    - backend_h2c: backend-h2c
    - backend_tls_hostname: backend-tls-hostname
    - backend_tls_require_h2: backend-tls-require-h2
+   - backend_tls_subject_alt_names: backend-tls-subject-alt-names
    - ca_tls_container_ref: ca_tls_container_ref-optional
    - crl_container_ref: crl_container_ref-optional
    - description: description-optional
@@ -260,6 +262,7 @@ Response Parameters
    - backend_h2c: backend-h2c
    - backend_tls_hostname: backend-tls-hostname
    - backend_tls_require_h2: backend-tls-require-h2
+   - backend_tls_subject_alt_names: backend-tls-subject-alt-names
    - ca_tls_container_ref: ca_tls_container_ref
    - created_at: created_at
    - crl_container_ref: crl_container_ref
@@ -337,6 +340,7 @@ Response Parameters
    - backend_h2c: backend-h2c
    - backend_tls_hostname: backend-tls-hostname
    - backend_tls_require_h2: backend-tls-require-h2
+   - backend_tls_subject_alt_names: backend-tls-subject-alt-names
    - ca_tls_container_ref: ca_tls_container_ref
    - created_at: created_at
    - crl_container_ref: crl_container_ref
@@ -405,6 +409,7 @@ Request
    - backend_h2c: backend-h2c
    - backend_tls_hostname: backend-tls-hostname
    - backend_tls_require_h2: backend-tls-require-h2
+   - backend_tls_subject_alt_names: backend-tls-subject-alt-names
    - ca_tls_container_ref: ca_tls_container_ref-optional
    - crl_container_ref: crl_container_ref-optional
    - description: description-optional
@@ -440,6 +445,7 @@ Response Parameters
    - backend_h2c: backend-h2c
    - backend_tls_hostname: backend-tls-hostname
    - backend_tls_require_h2: backend-tls-require-h2
+   - backend_tls_subject_alt_names: backend-tls-subject-alt-names
    - ca_tls_container_ref: ca_tls_container_ref
    - created_at: created_at
    - crl_container_ref: crl_container_ref

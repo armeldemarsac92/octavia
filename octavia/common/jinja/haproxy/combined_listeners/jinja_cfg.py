@@ -227,6 +227,8 @@ class JinjaTemplater:
         :return: Rendered configuration
         """
         feature_compatibility = feature_compatibility or {}
+        san_capability = (
+            constants.GATEWAY_CAPABILITY_BACKEND_TLS_SUBJECT_ALT_NAMES)
         loadbalancer = self._transform_loadbalancer(
             host_amphora,
             listeners[0].load_balancer,
@@ -276,8 +278,9 @@ class JinjaTemplater:
                 for pool in listener['pools']:
                     hostname = pool.get('backend_tls_hostname')
                     require_h2 = pool.get('backend_tls_require_h2')
-                    if not pool['enabled'] or (hostname is None and
-                                               not require_h2):
+                    sans = pool.get('backend_tls_subject_alt_names')
+                    if not pool['enabled'] or (
+                            hostname is None and not require_h2 and not sans):
                         continue
                     if (amp_details or {}).get(
                             constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME
@@ -291,6 +294,11 @@ class JinjaTemplater:
                         raise driver_except.AmpVersionUnsupported(
                             version='HAProxy requires backend TLS HTTP/2 '
                                     'ALPN support')
+                    if sans and (amp_details or {}).get(
+                            san_capability) is not True:
+                        raise driver_except.AmpVersionUnsupported(
+                            version='HAProxy requires explicit backend TLS '
+                                    'subject alternative name support')
                     if (not validate.is_exact_sni_name(hostname) or
                             pool['protocol'] !=
                             PROTOCOL_MAP[constants.PROTOCOL_HTTP] or
@@ -300,6 +308,13 @@ class JinjaTemplater:
                         raise exceptions.ValidationException(detail=(
                             'Missing or invalid backend TLS identity or '
                             'trust configuration.'))
+                    if sans:
+                        pool['backend_tls_san_options'] = [
+                            ('dns:' + entry['hostname']
+                             if entry['type'] == 'Hostname' else
+                             'uri-hex:' + entry['uri'].encode('ascii').hex())
+                            for entry in
+                            validate.backend_tls_subject_alt_names(sans)]
         if not socket_path:
             socket_path = (f'{self.base_amp_path}/'
                            f'{listeners[0].load_balancer.id}.sock')
@@ -762,6 +777,9 @@ class JinjaTemplater:
             ret_value['backend_tls_hostname'] = hostname
         if getattr(pool, 'backend_tls_require_h2', False) is True:
             ret_value['backend_tls_require_h2'] = True
+        sans = getattr(pool, 'backend_tls_subject_alt_names', None)
+        if sans:
+            ret_value['backend_tls_subject_alt_names'] = sans
         if (octavia_utils.is_disabled_backend_tls_pool(pool) or
                 (pool_tls_certs and pool_tls_certs.get('closed'))):
             ret_value['closed'] = True

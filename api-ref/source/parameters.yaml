@@ -238,8 +238,9 @@ backend-h2c:
   type: boolean
 backend-tls-hostname:
   description: |
-    Literal DNS hostname sent as backend SNI and matched against the backend
-    certificate's DNS subject alternative names. Requires an HTTP pool with
+    Literal DNS hostname sent as backend SNI. With no explicit
+    ``backend_tls_subject_alt_names``, it also authenticates the backend
+    certificate against its DNS subject alternative names. Requires an HTTP pool with
     ``tls_enabled`` set to true, a ``ca_tls_container_ref`` and the provider
     capability ``backend_tls_hostname_v1``. A partial update preserves the
     setting when omitted. To clear it, disable the pool first and then
@@ -258,6 +259,22 @@ backend-tls-require-h2:
   in: body
   required: false
   type: boolean
+backend-tls-subject-alt-names:
+  description: |
+    Up to five explicit backend TLS identities. Each entry is an object
+    containing exactly ``type: Hostname`` and a ``hostname`` DNS name, or exactly
+    ``type: URI`` and a ``uri`` absolute URI. A DNS name can start with a
+    full-label wildcard (``*.``). A URI must be ASCII and preserves case and
+    percent encoding. A non-empty list requires ``backend_tls_hostname``,
+    ``tls_enabled: true``, ``ca_tls_container_ref``, and the regional provider
+    capability ``backend_tls_subject_alt_names_v1``. The backend certificate
+    must chain to the configured CA and match at least one typed SAN. The
+    hostname continues to supply SNI independently of authentication.
+    A partial update preserves the list when omitted. An empty list restores
+    strict DNS authentication using ``backend_tls_hostname``.
+  in: body
+  required: false
+  type: array
 amphora-id:
   description: |
     The associated amphora ID.

@@ -32,6 +32,12 @@ def get_backend_tls_capabilities():
     except (OSError, subprocess.SubprocessError):
         return {}
     strict_dns = 'HAProxy version 3.0.19-ade9c1262-octavia-strict-dns-v1'
+    if output.startswith(f'{strict_dns}-h2-alpn-v1-backend-sans-v1 '):
+        return {
+            constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME: True,
+            constants.GATEWAY_CAPABILITY_BACKEND_TLS_H2_ALPN: True,
+            constants.GATEWAY_CAPABILITY_BACKEND_TLS_SUBJECT_ALT_NAMES: True,
+        }
     if output.startswith(f'{strict_dns}-h2-alpn-v1 '):
         return {constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME: True,
                 constants.GATEWAY_CAPABILITY_BACKEND_TLS_H2_ALPN: True}

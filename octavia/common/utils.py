@@ -47,7 +47,8 @@ def get_hostname():
 
 def is_protected_backend_tls_pool(pool):
     return (getattr(pool, 'backend_tls_hostname', None) is not None or
-            getattr(pool, 'backend_tls_require_h2', False) is True)
+            getattr(pool, 'backend_tls_require_h2', False) is True or
+            bool(getattr(pool, 'backend_tls_subject_alt_names', None)))
 
 
 def is_disabled_backend_tls_pool(pool):

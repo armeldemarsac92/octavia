@@ -1,0 +1,417 @@
+--- a/include/haproxy/server-t.h
++++ b/include/haproxy/server-t.h
+@@ -194,6 +194,18 @@
+ #define SRV_SSL_O_STRICT_DNS     0x800  /* Verify the static DNS ID using SAN only */
+ #define SRV_SSL_O_REQUIRE_H2     0x1000 /* Require h2 over a fresh TLS handshake */
+ 
++#define SRV_VERIFY_SAN_MAX 5
++#define SRV_VERIFY_SAN_LEN 253
++
++struct srv_verify_sans {
++	unsigned int count;
++	struct srv_verify_san {
++		int type;
++		size_t len;
++		char value[SRV_VERIFY_SAN_LEN + 1];
++	} entries[SRV_VERIFY_SAN_MAX];
++};
++
+ /* log servers ring's protocols options */
+ enum srv_log_proto {
+         SRV_LOG_PROTO_LEGACY,         // messages on TCP separated by LF
+@@ -440,6 +452,7 @@
+ 		int verify;			/* verify method (set of SSL_VERIFY_* flags) */
+ 		struct tls_version_filter methods;	/* ssl methods */
+ 		char *verify_host;              /* hostname of certificate must match this host */
++		struct srv_verify_sans *verify_sans; /* allowed leaf certificate identities */
+ 		char *ca_file;			/* CAfile to use on verify */
+ 		char *crl_file;			/* CRLfile to use on verify */
+ 		char *client_crt;		/* client certificate to send */
+--- a/src/backend.c
++++ b/src/backend.c
+@@ -1888,6 +1888,7 @@
+ 	if (!reuse && cli_conn && srv && srv_conn->mux &&
+ 	    (srv->ssl_ctx.options & SRV_SSL_O_EARLY_DATA) &&
+ 	    !(srv->ssl_ctx.options & SRV_SSL_O_REQUIRE_H2) &&
++	    !srv->ssl_ctx.verify_sans &&
+ 	    /* Only attempt to use early data if either the client sent
+ 	     * early data, so that we know it can handle a 425, or if
+ 	     * we are allowed to retry requests on early data failure, and
+--- a/src/cfgparse-ssl.c
++++ b/src/cfgparse-ssl.c
+@@ -2051,6 +2051,208 @@
+ 	if (!ret)
+ 		newsrv->ssl_ctx.options |= SRV_SSL_O_STRICT_DNS;
+ 	return ret;
++}
++
++static int verify_san_alpha(unsigned char c)
++{
++	return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
++}
++
++/* Return whether <name> contains only complete DNS labels. */
++static int verify_san_dns(const char *name, size_t len)
++{
++	unsigned int label_len = 0;
++	size_t i;
++
++	for (i = 0; i < len; i++) {
++		unsigned char c = name[i];
++
++		if (c == '.') {
++			if (!label_len || name[i - 1] == '-')
++				return 0;
++			label_len = 0;
++			continue;
++		}
++		if (!(verify_san_alpha(c) || (c >= '0' && c <= '9') || (c == '-' && label_len)))
++			return 0;
++		if (++label_len > 63)
++			return 0;
++	}
++	return label_len && name[len - 1] != '-';
++}
++
++/* Validate RFC 3986 component characters and percent encoding. */
++static int verify_san_uri_chars(const char *p, const char *end, const char *extra)
++{
++	for (; p < end; p++) {
++		unsigned char c = *p;
++
++		if (c == '%') {
++			if (end - p < 3 || hex2i(p[1]) < 0 || hex2i(p[2]) < 0)
++				return 0;
++			p += 2;
++		}
++		else if (!(verify_san_alpha(c) || (c >= '0' && c <= '9') ||
++		           strchr("-._~!$&'()*+,;=", c) || strchr(extra, c)))
++			return 0;
++	}
++	return 1;
++}
++
++static int verify_san_uri_authority(const char *host, const char *end)
++{
++	const char *userinfo = memchr(host, '@', end - host);
++	const char *port, *host_end;
++
++	if (userinfo) {
++		if (!verify_san_uri_chars(host, userinfo, ":"))
++			return 0;
++		host = userinfo + 1;
++	}
++	if (host == end)
++		return 0;
++
++	if (*host == '[') {
++		char address[INET6_ADDRSTRLEN];
++		struct in6_addr ipv6;
++		size_t len;
++
++		host++;
++		host_end = memchr(host, ']', end - host);
++		if (!host_end || (len = host_end - host) >= sizeof(address))
++			return 0;
++		memcpy(address, host, len);
++		address[len] = '\0';
++		if (inet_pton(AF_INET6, address, &ipv6) != 1)
++			return 0;
++		port = host_end + 1;
++	}
++	else {
++		port = memchr(host, ':', end - host);
++		if (!port)
++			port = end;
++		host_end = port;
++		if (host_end > host && host_end[-1] == '.')
++			host_end--;
++		if (!verify_san_dns(host, host_end - host))
++			return 0;
++	}
++
++	if (port == end)
++		return 1;
++	if (*port++ != ':')
++		return 0;
++	for (; port < end; port++) {
++		if (*port < '0' || *port > '9')
++			return 0;
++	}
++	return 1;
++}
++
++static int verify_san_uri(const char *uri)
++{
++	const char *p = uri;
++	const char *end;
++
++	if (!verify_san_alpha(*p++))
++		return 0;
++	p += strspn(p, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+.-");
++	if (*p != ':' || !p[1])
++		return 0;
++	p++;
++
++	if (p[0] == '/' && p[1] == '/') {
++		p += 2;
++		end = p + strcspn(p, "/?#");
++		if (!verify_san_uri_authority(p, end))
++			return 0;
++		p = end;
++	}
++
++	end = p + strcspn(p, "?#");
++	if (!verify_san_uri_chars(p, end, ":@/"))
++		return 0;
++	if (*end == '?') {
++		p = end + 1;
++		end = p + strcspn(p, "#");
++		if (!verify_san_uri_chars(p, end, ":@/?"))
++			return 0;
++	}
++	if (*end == '#') {
++		p = end + 1;
++		return verify_san_uri_chars(p, p + strlen(p), ":@/?");
++	}
++	return 1;
++}
++
++/* Parse a typed identity from a single token. Hex preserves URI characters
++ * that would otherwise be interpreted by the HAProxy configuration lexer.
++ */
++static int srv_parse_verify_san(char **args, int *cur_arg, struct proxy *px, struct server *srv, char **err)
++{
++	const char *arg = args[*cur_arg + 1];
++	struct srv_verify_sans *sans = srv->ssl_ctx.verify_sans;
++	struct srv_verify_san san = { 0 };
++	size_t i;
++
++	if (strcmp(args[0], "server") != 0) {
++		memprintf(err, "'verify-san' is only supported on static server lines");
++		return ERR_ALERT | ERR_FATAL;
++	}
++	if (sans && sans->count == SRV_VERIFY_SAN_MAX) {
++		memprintf(err, "'verify-san' accepts at most %d entries", SRV_VERIFY_SAN_MAX);
++		return ERR_ALERT | ERR_FATAL;
++	}
++
++	if (strncmp(arg, "dns:", 4) == 0) {
++		const char *name = arg + 4;
++		size_t wildcard_len = strncmp(name, "*.", 2) == 0 ? 2 : 0;
++		struct in_addr ipv4;
++
++		san.type = GEN_DNS;
++		san.len = strlen(name);
++		if (san.len <= wildcard_len || san.len > SRV_VERIFY_SAN_LEN ||
++		    !verify_san_dns(name + wildcard_len, san.len - wildcard_len) ||
++		    inet_pton(AF_INET, name + wildcard_len, &ipv4) == 1)
++			goto invalid;
++		memcpy(san.value, name, san.len);
++	}
++	else if (strncmp(arg, "uri-hex:", 8) == 0) {
++		const char *hex = arg + 8;
++		size_t len = strlen(hex);
++
++		san.type = GEN_URI;
++		if (!len || len % 2 || len / 2 > SRV_VERIFY_SAN_LEN)
++			goto invalid;
++		san.len = len / 2;
++		for (i = 0; i < san.len; i++) {
++			int hi = hex2i(hex[i * 2]);
++			int lo = hex2i(hex[i * 2 + 1]);
++
++			if (hi < 0 || lo < 0 || (hi == 0 && lo == 0))
++				goto invalid;
++			san.value[i] = hi * 16 + lo;
++		}
++		if (!verify_san_uri(san.value))
++			goto invalid;
++	}
++	else
++		goto invalid;
++
++	if (!sans) {
++		sans = calloc(1, sizeof(*sans));
++		if (!sans) {
++			memprintf(err, "'verify-san' : not enough memory");
++			return ERR_ALERT | ERR_FATAL;
++		}
++		srv->ssl_ctx.verify_sans = sans;
++	}
++	sans->entries[sans->count++] = san;
++	return 0;
++
++ invalid:
++	memprintf(err, "'verify-san' expects a DNS name in dns:<name> or an absolute URI in uri-hex:<hex>");
++	return ERR_ALERT | ERR_FATAL;
+ }
+ 
+ /* parse the "ssl-default-bind-options" keyword in global section */
+@@ -2331,6 +2533,7 @@
+ 	{ "ssl-reuse",               srv_parse_ssl_reuse,          0, 1, 0 }, /* enable session reuse */
+ 	{ "tls-tickets",             srv_parse_tls_tickets,        0, 1, 1 }, /* enable session resumption tickets */
+ 	{ "verify",                  srv_parse_verify,             1, 1, 1 }, /* set SSL verify method */
++	{ "verify-san",              srv_parse_verify_san,         1, 1, 0 }, /* require one matching leaf DNS or URI SAN */
+ 	{ "verifyhost",              srv_parse_verifyhost,         1, 1, 1 }, /* require that SSL cert verifies for hostname */
+ 	{ "verifyhost-strict",       srv_parse_verifyhost_strict,  1, 1, 1 }, /* require a matching DNS SAN */
+ 	{ NULL, NULL, 0, 0 },
+--- a/src/server.c
++++ b/src/server.c
+@@ -2644,6 +2644,9 @@
+  */
+ int srv_set_ssl(struct server *s, int use_ssl)
+ {
++	if (!use_ssl && s->ssl_ctx.verify_sans)
++		return -1;
++
+ 	if (s->use_ssl == use_ssl)
+ 		return 0;
+ 
+@@ -3633,6 +3636,13 @@
+ 	int ret;
+ 	char *errmsg = NULL;
+ 	struct srv_pp_tlv_list *srv_tlv = NULL;
++
++#ifdef USE_OPENSSL
++	if (srv->ssl_ctx.verify_sans && srv->use_ssl != 1) {
++		ha_alert("'verify-san' requires 'ssl' on server %s.\n", srv->id);
++		return ERR_ALERT | ERR_FATAL;
++	}
++#endif
+ 
+ 	if (srv->do_check && srv->trackit) {
+ 		ha_alert("unable to enable checks and tracking at the same time!\n");
+--- a/src/ssl_sock.c
++++ b/src/ssl_sock.c
+@@ -4255,7 +4255,8 @@
+ 	 */
+ 
+ 	if (!(conn->flags & CO_FL_SSL_NO_CACHED_INFO) &&
+-	    !(s->ssl_ctx.options & (SRV_SSL_O_NO_REUSE | SRV_SSL_O_REQUIRE_H2))) {
++	    !(s->ssl_ctx.options & (SRV_SSL_O_NO_REUSE | SRV_SSL_O_REQUIRE_H2)) &&
++	    !s->ssl_ctx.verify_sans) {
+ 		int len;
+ 		unsigned char *ptr;
+ 
+@@ -4896,6 +4897,59 @@
+ 	return 1;
+ }
+ 
++/* Apply the explicit SAN policy only after OpenSSL has verified the chain. */
++static int ssl_sock_srv_verify_san(int ok, X509_STORE_CTX *ctx)
++{
++	STACK_OF(GENERAL_NAME) *names;
++	const struct srv_verify_sans *sans;
++	struct connection *conn;
++	X509 *cert;
++	SSL *ssl;
++	int j;
++
++	if (!ok || X509_STORE_CTX_get_error_depth(ctx) != 0)
++		return ok;
++
++	ssl = X509_STORE_CTX_get_ex_data(ctx, SSL_get_ex_data_X509_STORE_CTX_idx());
++	conn = SSL_get_ex_data(ssl, ssl_app_data_index);
++	sans = __objt_server(conn->target)->ssl_ctx.verify_sans;
++	cert = X509_STORE_CTX_get_current_cert(ctx);
++
++	for (unsigned int i = 0; i < sans->count; i++) {
++		const struct srv_verify_san *san = &sans->entries[i];
++		unsigned int flags = X509_CHECK_FLAG_NEVER_CHECK_SUBJECT | X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS;
++
++		if (san->type != GEN_DNS)
++			continue;
++		if (san->value[0] == '*')
++			flags |= X509_CHECK_FLAG_NO_WILDCARDS;
++		if (X509_check_host(cert, san->value, san->len, flags, NULL) == 1)
++			return 1;
++	}
++
++	names = X509_get_ext_d2i(cert, NID_subject_alt_name, NULL, NULL);
++	for (j = 0; j < sk_GENERAL_NAME_num(names); j++) {
++		const GENERAL_NAME *name = sk_GENERAL_NAME_value(names, j);
++		const ASN1_IA5STRING *uri;
++
++		if (name->type != GEN_URI)
++			continue;
++		uri = name->d.uniformResourceIdentifier;
++		for (unsigned int i = 0; i < sans->count; i++) {
++			const struct srv_verify_san *san = &sans->entries[i];
++
++			if (san->type == GEN_URI && ASN1_STRING_length(uri) == san->len &&
++			    memcmp(ASN1_STRING_get0_data(uri), san->value, san->len) == 0) {
++				GENERAL_NAMES_free(names);
++				return 1;
++			}
++		}
++	}
++	GENERAL_NAMES_free(names);
++	X509_STORE_CTX_set_error(ctx, X509_V_ERR_APPLICATION_VERIFICATION);
++	return 0;
++}
++
+ static int ssl_sock_srv_verifycbk(int ok, X509_STORE_CTX *ctx)
+ {
+ 	SSL *ssl;
+@@ -5158,7 +5212,15 @@
+ 			verify = SSL_VERIFY_PEER;
+ 			break;
+ 	}
+-	if (srv->ssl_ctx.options & SRV_SSL_O_STRICT_DNS) {
++	if (srv->ssl_ctx.verify_sans) {
++		if (!(verify & SSL_VERIFY_PEER) || srv->ssl_ctx.verify_host ||
++		    (srv->ssl_ctx.options & SRV_SSL_O_STRICT_DNS)) {
++			ha_alert("'verify-san' requires peer verification and cannot be combined with 'verifyhost' or 'verifyhost-strict'.\n");
++			cfgerr++;
++		}
++		SSL_CTX_set_verify(ctx, verify, ssl_sock_srv_verify_san);
++	}
++	else if (srv->ssl_ctx.options & SRV_SSL_O_STRICT_DNS) {
+ 		X509_VERIFY_PARAM *param = SSL_CTX_get0_param(ctx);
+ 
+ 		if (!(verify & SSL_VERIFY_PEER) || !srv->ssl_ctx.verify_host ||
+@@ -5504,6 +5566,7 @@
+ 	ha_free(&srv->ssl_ctx.crl_file);
+ 	ha_free(&srv->ssl_ctx.client_crt);
+ 	ha_free(&srv->ssl_ctx.verify_host);
++	ha_free(&srv->ssl_ctx.verify_sans);
+ #ifdef SSL_CTRL_SET_TLSEXT_HOSTNAME
+ 	ha_free(&srv->sni_expr);
+ 	release_sample_expr(srv->ssl_ctx.sni);
+@@ -5743,10 +5806,8 @@
+ 
+ 		SSL_set_connect_state(ctx->ssl);
+ 
+-		/* A strict h2 connection must authenticate and negotiate
+-		 * its application protocol afresh.
+-		 */
+-		if (srv->ssl_ctx.options & SRV_SSL_O_REQUIRE_H2)
++		/* Verify the SAN or h2 ALPN on every new TLS connection. */
++		if ((srv->ssl_ctx.options & SRV_SSL_O_REQUIRE_H2) || srv->ssl_ctx.verify_sans)
+ 			goto skip_resume;
+ 
+ 		/*
+--- a/doc/configuration.txt
++++ b/doc/configuration.txt
+@@ -18450,6 +18450,20 @@
+   of the hostnames in the certificate match the specified hostname, the
+   handshake is aborted. The hostnames in the server-provided certificate may
+   include wildcards. See also "verify", "sni" and "no-verifyhost" options.
++
++verify-san { dns:<name> | uri-hex:<hex> }
++  Adds a permitted TLS identity on a static "server" line. This option can be
++  repeated up to five times. Each value is at most 253 bytes. Use "ssl",
++  peer verification, and a "ca-file". Do not combine with "verifyhost" or
++  "verifyhost-strict".
++
++  At least one configured identity must match a subject alternative name of
++  the leaf certificate. A precise DNS name uses OpenSSL hostname matching
++  with full-label certificate wildcards only. A configured wildcard DNS
++  identity matches the same wildcard SAN only. URI values are the hexadecimal
++  encoding of the URI bytes and compare byte-for-byte. The configured "sni"
++  selects the certificate independently of its identity. Common names are
++  excluded. TLS session resumption and 0-RTT are disabled for this server.
+ 
+ weight <weight>
+   May be used in the following contexts: tcp, http
