@@ -491,6 +491,7 @@ class AmphoraFlows:
 
         # Revert LB to provisioning_status ERROR if this flow goes wrong
         failover_amp_flow.add(lifecycle_tasks.LoadBalancerToErrorOnRevertTask(
+            for_failover=True,
             requires=constants.LOADBALANCER))
 
         # Revert amphora to status ERROR if this flow goes wrong

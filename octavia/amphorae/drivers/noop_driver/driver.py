@@ -151,7 +151,8 @@ class NoopAmphoraLoadBalancerDriver(
         self.driver.update_amphora_listeners(loadbalancer, amphora,
                                              timeout_dict)
 
-    def update(self, loadbalancer, *, l7policy_activation=False):
+    def update(self, loadbalancer, *, l7policy_activation=False,
+               l7policy_restoration=False):
         self.driver.update(loadbalancer)
 
     def start(self, loadbalancer, amphora=None, timeout_dict=None):

@@ -41,7 +41,8 @@ class AmphoraLoadBalancerDriver(metaclass=abc.ABCMeta):
         """
 
     @abc.abstractmethod
-    def update(self, loadbalancer, *, l7policy_activation=False):
+    def update(self, loadbalancer, *, l7policy_activation=False,
+               l7policy_restoration=False):
         """Update the amphora with a new configuration.
 
         :param loadbalancer: loadbalancer object, need to use its
@@ -50,7 +51,10 @@ class AmphoraLoadBalancerDriver(metaclass=abc.ABCMeta):
         :param l7policy_activation: Update the combined HAProxy configuration
                                     for a group activation, failing if any
                                     of its listeners cannot be rendered.
-        :returns: None
+        :param l7policy_restoration: During compensation, remove frontend
+                                     listeners whose trust cannot be staged.
+        :returns: Protected pool IDs recovered by a group activation, if any.
+                  The caller publishes their status after graph validation.
 
         At this moment, we just build the basic structure for testing, will
         add more function along with the development.

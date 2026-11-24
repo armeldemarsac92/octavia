@@ -189,6 +189,21 @@ class TestAmphoraDriverTasks(base.TestCase):
             _db_load_balancer_mock, 0, amphorae_status, self.timeout_dict)
         mock_driver.update_amphora_listeners.assert_not_called()
 
+        # The coordinated call handles both peers in a single task. A failure
+        # on the survivor must neither fail this task nor mark the replacement.
+        mock_amphora_repo_update.reset_mock()
+        mock_driver.update_failover_listeners.side_effect = (
+            driver_except.CoordinatedListenerUpdateError({
+                'surviving-amp': RuntimeError('upload failed')}))
+        amp_list_update_obj.execute(_LB_mock, 0, [_amphora_mock], {}, AMP_ID)
+        mock_amphora_repo_update.assert_not_called()
+        mock_driver.update_failover_listeners.side_effect = (
+            driver_except.CoordinatedListenerUpdateError({
+                AMP_ID: RuntimeError('reload failed')}))
+        amp_list_update_obj.execute(_LB_mock, 0, [_amphora_mock], {}, AMP_ID)
+        mock_amphora_repo_update.assert_called_once_with(
+            _session_mock, AMP_ID, status=constants.ERROR)
+
     @mock.patch('octavia.db.repositories.LoadBalancerRepository.get')
     @mock.patch('octavia.db.api.session')
     def test_listeners_update(self,
@@ -231,6 +246,27 @@ class TestAmphoraDriverTasks(base.TestCase):
         repo.ListenerRepository.update.assert_has_calls(expected_db_calls)
         self.assertEqual(2, repo.ListenerRepository.update.call_count)
         self.assertIsNone(amp)
+
+        conf = self.useFixture(oslo_fixture.Config(cfg.CONF))
+        conf.config(group='api_settings',
+                    enabled_l7policy_batch_activation_providers=['amphora'])
+        conf.config(group='haproxy_amphora', connection_max_retries=2,
+                    connection_retry_interval=0)
+        mock_lb_get.side_effect = None
+        mock_lb_get.return_value = lb
+        with (mock.patch('octavia.db.api.listener_render_lock') as lock,
+              mock.patch.object(repo.LoadBalancerRepository,
+                                'batch_owns_graph', return_value=False)):
+            lock.return_value.__enter__.side_effect = [False, True]
+            listeners_update_obj.execute(lb.id)
+            self.assertEqual(2, lock.call_count)
+            mock_driver.update.assert_called_once_with(lb)
+
+            mock_driver.update.reset_mock()
+            lock.return_value.__enter__.side_effect = [False, False]
+            self.assertRaises(driver_except.ListenerRenderLockBusy,
+                              listeners_update_obj.execute, lb.id)
+            mock_driver.update.assert_not_called()
 
     @mock.patch('octavia.db.repositories.LoadBalancerRepository.get')
     @mock.patch('octavia.controller.worker.task_utils.TaskUtils.'

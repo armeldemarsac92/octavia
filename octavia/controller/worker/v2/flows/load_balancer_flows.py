@@ -437,6 +437,7 @@ class LoadBalancerFlows:
 
         # Revert LB to provisioning_status ERROR if this flow goes wrong
         failover_LB_flow.add(lifecycle_tasks.LoadBalancerToErrorOnRevertTask(
+            for_failover=True,
             requires=constants.LOADBALANCER))
 
         # Setup timeouts for our requests to the amphorae

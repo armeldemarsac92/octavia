@@ -173,12 +173,20 @@ class LoadBalancerIDToErrorOnRevertTask(BaseLifecycleTask):
 class LoadBalancerToErrorOnRevertTask(LoadBalancerIDToErrorOnRevertTask):
     """Task to set the load balancer to ERROR on revert."""
 
+    def __init__(self, *, for_failover=False, **kwargs):
+        super().__init__(**kwargs)
+        self.for_failover = for_failover
+
     def execute(self, loadbalancer):
         pass
 
     def revert(self, loadbalancer, *args, **kwargs):
-        super().revert(
-            loadbalancer[constants.LOADBALANCER_ID])
+        lb_id = loadbalancer[constants.LOADBALANCER_ID]
+        if self.for_failover:
+            self.task_utils.mark_loadbalancer_prov_status_error(
+                lb_id, for_failover=True)
+        else:
+            super().revert(lb_id)
 
 
 class MemberToErrorOnRevertTask(BaseLifecycleTask):
