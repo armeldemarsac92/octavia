@@ -248,12 +248,21 @@ class TestHaproxyAmphoraLoadBalancerDriverTest(base.TestCase):
             backend_tls_hostname='sni.example.test',
             backend_tls_subject_alt_names=[
                 {'type': 'Hostname', 'hostname': 'id.example.test'}])
+        tcp_pool = data_models.Pool(
+            id='tcp', protocol=constants.PROTOCOL_TCP, enabled=True,
+            backend_tls_hostname='abc.example.com')
         listener = mock.Mock(enabled=True, protocol=constants.PROTOCOL_HTTP,
                              pools=[tls_pool, grpc_pool, san_pool])
-        lb = mock.Mock(enabled=True, listeners=[listener], amphorae=amphorae)
+        tcp_listener = mock.Mock(
+            enabled=True, protocol=constants.PROTOCOL_TCP,
+            tcp_tls_termination=True, pools=[tcp_pool])
+        lb = mock.Mock(enabled=True, listeners=[listener, tcp_listener],
+                       amphorae=amphorae)
         sans = constants.GATEWAY_CAPABILITY_BACKEND_TLS_SUBJECT_ALT_NAMES
+        tcp_auth = constants.GATEWAY_CAPABILITY_TCP_TLS_BACKEND_AUTH
         self.driver.clients[API_VERSION].get_details.side_effect = [
-            {hostname: True, h2_alpn: True, sans: True}, {hostname: True}]
+            {hostname: True, h2_alpn: True, sans: True, tcp_auth: True},
+            {hostname: True}]
         trust = {'ca_cert': '/ca.pem'}
         with (
             mock.patch.object(self.driver, '_process_pool_certs',
@@ -271,9 +280,9 @@ class TestHaproxyAmphoraLoadBalancerDriverTest(base.TestCase):
         for call in arm.call_args_list:
             self.assertEqual(
                 {tls_pool.id: trust, grpc_pool.id: {'closed': True},
-                 san_pool.id: {'closed': True}},
+                 san_pool.id: {'closed': True}, tcp_pool.id: {'closed': True}},
                 call.kwargs['backend_tls_certs'])
-        self.assertEqual({grpc_pool.id, san_pool.id},
+        self.assertEqual({grpc_pool.id, san_pool.id, tcp_pool.id},
                          status.call_args.kwargs['closed'])
 
     @mock.patch('octavia.db.api.session')

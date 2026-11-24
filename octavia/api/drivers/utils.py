@@ -157,6 +157,15 @@ def gateway_capabilities(driver):
             api_settings.enabled_tcp_tls_termination_providers and
             getattr(driver, 'supports_tcp_tls_termination', False) is True):
         capabilities.append(constants.GATEWAY_CAPABILITY_TCP_TLS_TERMINATION)
+        tcp_auth_providers = (
+            api_settings.enabled_tcp_tls_backend_auth_providers)
+        if (driver.name in tcp_auth_providers and
+                getattr(driver, 'supports_tcp_tls_backend_auth', False)
+                is True and
+                constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME in
+                capabilities):
+            capabilities.append(
+                constants.GATEWAY_CAPABILITY_TCP_TLS_BACKEND_AUTH)
     if (driver.name in api_settings.enabled_tls_sni_providers and
             getattr(driver, 'supports_tls_sni_passthrough', False) is True):
         capabilities.append(constants.GATEWAY_CAPABILITY_TLS_SNI)
@@ -337,6 +346,41 @@ def require_tcp_tls_termination(driver):
             prov=driver.name, user_msg=_(
                 'TCP listener TLS termination is unavailable for this '
                 'provider.'))
+
+
+def require_tcp_tls_backend_auth(driver):
+    if (constants.GATEWAY_CAPABILITY_TCP_TLS_BACKEND_AUTH not in
+            gateway_capabilities(driver)):
+        raise exceptions.ProviderUnsupportedOptionError(
+            prov=driver.name, user_msg=_(
+                'Backend TLS authentication on terminating TCP listeners is '
+                'unavailable for this provider.'))
+
+
+def validate_tcp_pool_attachment(driver, protocol, tls_enabled, *,
+                                 tcp_tls_termination=False, hostname=None,
+                                 ca_ref=None, tls_sni_policy=False):
+    validate.validate_tcp_tls_backend_listener(
+        tcp_tls_termination, protocol, hostname)
+    if tcp_tls_termination or tls_sni_policy:
+        validate.validate_tcp_redirect_pool_protocol(
+            protocol, tls_enabled, tcp_tls_termination=tcp_tls_termination,
+            hostname=hostname, ca_ref=ca_ref)
+    if protocol == constants.PROTOCOL_TCP and hostname is not None:
+        require_tcp_tls_backend_auth(driver)
+
+
+def validate_existing_tcp_pool_attachment(
+        driver, policy_repo, session, listener, pool_id, *,
+        tls_sni_policy=False, skip_disabled_pool=False):
+    pool = policy_repo.get_redirect_pool_for_update(session, listener, pool_id)
+    if skip_disabled_pool and not pool.enabled:
+        return
+    validate_tcp_pool_attachment(
+        driver, pool.protocol, pool.tls_enabled,
+        tcp_tls_termination=listener.tcp_tls_termination,
+        hostname=pool.backend_tls_hostname,
+        ca_ref=pool.ca_tls_certificate_id, tls_sni_policy=tls_sni_policy)
 
 
 def require_tls_sni_passthrough(driver):

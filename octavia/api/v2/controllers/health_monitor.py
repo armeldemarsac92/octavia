@@ -30,6 +30,7 @@ from octavia.api.v2.types import health_monitor as hm_types
 from octavia.common import constants as consts
 from octavia.common import data_models
 from octavia.common import exceptions
+from octavia.common import validate
 from octavia.db import prepare as db_prepare
 from octavia.i18n import _
 
@@ -162,6 +163,10 @@ class HealthMonitorController(base.BaseController):
                     value=f"http_version {hm_dict['http_version']}",
                     option='health monitors HTTP 1.1 domain name health check')
 
+        if hm_dict.get('enabled', True):
+            self._validate_tcp_tls_backend_monitor(
+                lock_session, hm_dict['pool_id'], hm_dict['type'])
+
         try:
             ret = self.repositories.health_monitor.create(
                 lock_session, **hm_dict)
@@ -291,6 +296,14 @@ class HealthMonitorController(base.BaseController):
 
         return db_hm
 
+    def _validate_tcp_tls_backend_monitor(self, session, pool_id,
+                                          monitor_type):
+        pool = self.repositories.pool.get_transport_for_update(
+            session, pool_id)
+        if (pool.protocol == consts.PROTOCOL_TCP and
+                pool.backend_tls_hostname is not None):
+            validate.validate_tcp_tls_backend_monitor(monitor_type)
+
     def _validate_update_hm(self, db_hm, health_monitor):
         if db_hm.type not in (consts.HEALTH_MONITOR_HTTP,
                               consts.HEALTH_MONITOR_HTTPS):
@@ -383,6 +396,9 @@ class HealthMonitorController(base.BaseController):
 
             self._test_lb_and_listener_and_pool_statuses(context.session,
                                                          db_hm)
+            if health_monitor.admin_state_up is True:
+                self._validate_tcp_tls_backend_monitor(
+                    context.session, pool.id, db_hm.type)
 
             # Prepare the data for the driver data model
             healthmon_dict = health_monitor.to_dict(render_unsets=False)

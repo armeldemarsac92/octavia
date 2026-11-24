@@ -296,7 +296,7 @@ class ListenersController(base.BaseController):
                 raise exceptions.ValidationException(
                     detail=msg % {'cidr': cidr, 'vips': vips})
 
-    def _validate_create_listener(self, lock_session, listener_dict):
+    def _validate_create_listener(self, lock_session, listener_dict, driver):
         """Validate listener for wrong protocol or duplicate listeners
 
         Update the load balancer db when provisioning status changes.
@@ -457,12 +457,14 @@ class ListenersController(base.BaseController):
 
         validate.check_hsts_options(listener_dict)
 
-        if (listener_dict.get('tcp_tls_termination') and
-                listener_dict.get('default_pool_id')):
+        if listener_dict.get('default_pool_id'):
             pool = self.repositories.pool.get_transport_for_update(
                 lock_session, listener_dict['default_pool_id'])
-            validate.validate_tcp_redirect_pool_protocol(
-                pool.protocol, pool.tls_enabled)
+            driver_utils.validate_tcp_pool_attachment(
+                driver, pool.protocol, pool.tls_enabled,
+                tcp_tls_termination=listener_dict.get('tcp_tls_termination'),
+                hostname=pool.backend_tls_hostname,
+                ca_ref=pool.ca_tls_certificate_id)
 
         try:
             db_listener = self.repositories.listener.create(
@@ -532,7 +534,7 @@ class ListenersController(base.BaseController):
                 context.session, lb_id=load_balancer_id)
 
             db_listener = self._validate_create_listener(
-                context.session, listener_dict)
+                context.session, listener_dict, driver)
 
             # Prepare the data for the driver data model
             provider_listener = (
@@ -561,7 +563,7 @@ class ListenersController(base.BaseController):
 
         return listener_types.ListenerRootResponse(listener=result)
 
-    def _graph_create(self, lock_session, listener_dict,
+    def _graph_create(self, lock_session, listener_dict, driver,
                       l7policies=None, pool_name_ids=None):
         load_balancer_id = listener_dict['load_balancer_id']
         listener_dict = db_prepare.create_listener(
@@ -575,7 +577,7 @@ class ListenersController(base.BaseController):
                                 listener_dict['default_pool_id'],
                                 listener_dict['protocol'])
         db_listener = self._validate_create_listener(
-            lock_session, listener_dict)
+            lock_session, listener_dict, driver)
 
         if (listener_dict.get('protocol') == lib_consts.PROTOCOL_PROMETHEUS and
                 l7policies):
@@ -714,7 +716,13 @@ class ListenersController(base.BaseController):
                 listener.tcp_tls_termination):
             raise exceptions.ValidationException(detail=_(
                 'tcp_tls_termination can only be set at listener creation.'))
+        pool_id = updates.get('default_pool_id', listener.default_pool_id)
+        new_pool = pool_id and pool_id != listener.default_pool_id
         if not listener.tcp_tls_termination:
+            if new_pool:
+                driver_utils.validate_existing_tcp_pool_attachment(
+                    driver, self.repositories.l7policy, session, listener,
+                    pool_id)
             return
 
         tls_fields = {
@@ -723,9 +731,7 @@ class ListenersController(base.BaseController):
             'client_crl_container_id', 'tls_ciphers', 'tls_versions',
             'alpn_protocols',
         }
-        pool_id = updates.get('default_pool_id', listener.default_pool_id)
-        admits_pool = pool_id and (reopening or
-                                   pool_id != listener.default_pool_id)
+        admits_pool = pool_id and (reopening or new_pool)
         checks_tls = reopening or tls_fields.intersection(updates)
         if checks_tls or admits_pool:
             driver_utils.require_tcp_tls_termination(driver)
@@ -755,9 +761,19 @@ class ListenersController(base.BaseController):
             if ca_ref:
                 self._validate_client_ca_and_crl_refs(ca_ref, crl_ref)
 
+        policy_repo = self.repositories.l7policy
         if admits_pool:
-            self.repositories.l7policy.validate_tcp_redirect_pool(
-                session, listener, pool_id)
+            driver_utils.validate_existing_tcp_pool_attachment(
+                driver, policy_repo, session, listener, pool_id,
+                skip_disabled_pool=not new_pool)
+        if reopening:
+            for pool in policy_repo.get_active_protected_tcp_policy_pools(
+                    session, listener.id):
+                driver_utils.validate_tcp_pool_attachment(
+                    driver, pool.protocol, pool.tls_enabled,
+                    tcp_tls_termination=True,
+                    hostname=pool.backend_tls_hostname,
+                    ca_ref=pool.ca_tls_certificate_id)
 
     def _validate_https_listener_update(
             self, session, driver, db_listener, updates):

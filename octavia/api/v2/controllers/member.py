@@ -128,6 +128,42 @@ class MemberController(base.BaseController):
             raise exceptions.ImmutableObject(resource='Load Balancer',
                                              id=load_balancer_id)
 
+    def _validate_tcp_tls_member_changes(self, session, driver, pool, changes):
+        if pool.protocol != constants.PROTOCOL_TCP:
+            return
+        # Member writes and pool trust changes hold the same LB lock. Read
+        # the current transport after its acquisition, including concurrent
+        # enrollment of a previously unprotected TCP pool.
+        transport = self.repositories.pool.get_transport_for_update(
+            session, pool.id)
+        if (not transport.enabled or transport.backend_tls_hostname is None or
+                constants.GATEWAY_CAPABILITY_TCP_TLS_BACKEND_AUTH in
+                driver_utils.gateway_capabilities(driver)):
+            return
+        member_ids = [member_id for member_id, _ in changes if member_id]
+        current = self.repositories.member.get_routing_for_update(
+            session, pool.id, member_ids)
+        for member_id, desired in changes:
+            previous = current.get(member_id)
+            enabled = desired.get('enabled',
+                                  previous.enabled if previous else True)
+            previous_weight = previous.weight if previous else None
+            if previous_weight is None:
+                previous_weight = constants.DEFAULT_WEIGHT
+            weight = desired.get('weight', previous_weight)
+            if weight is None:
+                weight = constants.DEFAULT_WEIGHT
+            if enabled is False or weight == 0:
+                continue
+            if (previous is None or not previous.enabled or
+                    weight > previous_weight or
+                    (previous.backup and desired.get('backup') is False) or
+                    any(field in desired and
+                        desired[field] != getattr(previous, field)
+                        for field in ('monitor_address', 'monitor_port',
+                                      'subnet_id'))):
+                driver_utils.require_tcp_tls_backend_auth(driver)
+
     def _validate_create_member(self, lock_session, member_dict):
         """Validate creating member on pool."""
         try:
@@ -221,6 +257,8 @@ class MemberController(base.BaseController):
 
             self._test_lb_and_listener_and_pool_statuses(context.session)
 
+            self._validate_tcp_tls_member_changes(
+                context.session, driver, pool, [(None, member_dict)])
             db_member = self._validate_create_member(context.session,
                                                      member_dict)
 
@@ -320,6 +358,8 @@ class MemberController(base.BaseController):
 
             # Prepare the data for the driver data model
             member_dict = member.to_dict(render_unsets=False)
+            self._validate_tcp_tls_member_changes(
+                context.session, driver, pool, [(id, member_dict)])
             member_dict['id'] = id
             provider_member_dict = (
                 driver_utils.member_dict_to_provider_dict(member_dict))
@@ -465,6 +505,14 @@ class MembersController(MemberController):
                     if (m.subnet_id and
                             m.subnet_id != old_member_subnets[key]):
                         subnets_to_validate.append(m.subnet_id)
+
+            if db_pool.protocol == constants.PROTOCOL_TCP:
+                changes = [(None, item.to_dict(render_unsets=False))
+                           for item in new_members]
+                changes.extend((item.id, item.to_dict(render_unsets=False))
+                               for item in updated_members)
+                self._validate_tcp_tls_member_changes(
+                    context.session, driver, db_pool, changes)
 
             # Find members that are deleted
             deleted_members = []
