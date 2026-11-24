@@ -24,31 +24,40 @@ LOG = logging.getLogger(__name__)
 CONF = cfg.CONF
 
 
-def get_backend_tls_capabilities():
+def get_haproxy_capabilities():
     try:
         output = subprocess.check_output(
-            [CONF.haproxy_amphora.haproxy_cmd, '-v'],
+            [CONF.haproxy_amphora.haproxy_cmd, '-vv'],
             stderr=subprocess.STDOUT, encoding='utf-8', timeout=5)
     except (OSError, subprocess.SubprocessError):
         return {}
+    capabilities = {}
+    version = re.match(r'HAProxy version (\d+)\.(\d+)\.', output)
+    if (version and int(version.group(1)) >= 3 and
+            '+OPENSSL' in output.split()):
+        capabilities[
+            constants.GATEWAY_CAPABILITY_FRONTEND_CLIENT_AUTH_INSECURE_FALLBACK
+        ] = True
     strict_dns = 'HAProxy version 3.0.19-ade9c1262-octavia-strict-dns-v1'
     if output.startswith(f'{strict_dns}-h2-alpn-v1-backend-sans-v1 '):
-        return {
+        capabilities.update({
             constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME: True,
             constants.GATEWAY_CAPABILITY_BACKEND_TLS_H2_ALPN: True,
             constants.GATEWAY_CAPABILITY_BACKEND_TLS_SUBJECT_ALT_NAMES: True,
-        }
-    if output.startswith(f'{strict_dns}-h2-alpn-v1 '):
-        return {constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME: True,
-                constants.GATEWAY_CAPABILITY_BACKEND_TLS_H2_ALPN: True}
-    if output.startswith(f'{strict_dns} '):
-        return {constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME: True}
-    return {}
+        })
+    elif output.startswith(f'{strict_dns}-h2-alpn-v1 '):
+        capabilities.update({
+            constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME: True,
+            constants.GATEWAY_CAPABILITY_BACKEND_TLS_H2_ALPN: True,
+        })
+    elif output.startswith(f'{strict_dns} '):
+        capabilities[constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME] = True
+    return capabilities
 
 
 def supports_backend_tls_hostname():
     return (constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME in
-            get_backend_tls_capabilities())
+            get_haproxy_capabilities())
 
 
 def get_haproxy_versions():

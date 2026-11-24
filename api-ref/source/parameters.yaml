@@ -478,6 +478,20 @@ client_authentication-optional:
   min_version: 2.8
   required: false
   type: string
+client_authentication_insecure_fallback:
+  description: |
+    Enables insecure fallback with a project-authorized client CA and
+    ``client_authentication: MANDATORY`` on a ``TERMINATED_HTTPS`` listener.
+    The TLS handshake requests and verifies a client certificate. A missing
+    certificate or certificate verification error does not block the
+    connection. The provider must advertise
+    ``frontend_client_auth_insecure_fallback_v1``. Set this field to false to
+    restore the configured ``client_authentication`` mode. Omission on update
+    preserves the stored value. A listener that has never set this field omits
+    it from response bodies.
+  in: body
+  required: false
+  type: boolean
 client_ca_tls_container_ref:
   description: |
     The ref of the `key manager service

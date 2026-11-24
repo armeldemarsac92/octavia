@@ -62,6 +62,7 @@ class ListenerResponse(BaseListenerType):
     tags = wtypes.wsattr(wtypes.ArrayType(wtypes.StringType()))
     client_ca_tls_container_ref = wtypes.StringType()
     client_authentication = wtypes.wsattr(wtypes.StringType())
+    client_authentication_insecure_fallback = wtypes.wsattr(bool)
     client_crl_container_ref = wtypes.wsattr(wtypes.StringType())
     allowed_cidrs = wtypes.wsattr([types.CidrType()])
     tls_ciphers = wtypes.StringType()
@@ -78,6 +79,8 @@ class ListenerResponse(BaseListenerType):
             result.https_virtual_hosts = wtypes.Unset
         if result.tcp_tls_termination is not True:
             result.tcp_tls_termination = wtypes.Unset
+        if result.client_authentication_insecure_fallback is None:
+            result.client_authentication_insecure_fallback = wtypes.Unset
         if db_obj.default_http_response is not None:
             result.default_http_response = types.FixedHTTPResponse(
                 **db_obj.default_http_response)
@@ -176,6 +179,7 @@ class ListenerPOST(BaseListenerType):
     client_authentication = wtypes.wsattr(
         wtypes.Enum(str, *constants.SUPPORTED_CLIENT_AUTH_MODES),
         default=constants.CLIENT_AUTH_NONE)
+    client_authentication_insecure_fallback = types.StrictBooleanAttribute()
     client_crl_container_ref = wtypes.StringType(max_length=255)
     allowed_cidrs = wtypes.wsattr([types.CidrType()])
     tls_ciphers = wtypes.StringType(max_length=2048)
@@ -224,6 +228,7 @@ class ListenerPUT(BaseListenerType):
     client_ca_tls_container_ref = wtypes.StringType(max_length=255)
     client_authentication = wtypes.wsattr(
         wtypes.Enum(str, *constants.SUPPORTED_CLIENT_AUTH_MODES))
+    client_authentication_insecure_fallback = types.StrictBooleanAttribute()
     client_crl_container_ref = wtypes.StringType(max_length=255)
     allowed_cidrs = wtypes.wsattr([types.CidrType()])
     tls_ciphers = wtypes.StringType(max_length=2048)
@@ -283,6 +288,7 @@ class ListenerSingleCreate(BaseListenerType):
     client_authentication = wtypes.wsattr(
         wtypes.Enum(str, *constants.SUPPORTED_CLIENT_AUTH_MODES),
         default=constants.CLIENT_AUTH_NONE)
+    client_authentication_insecure_fallback = types.StrictBooleanAttribute()
     client_crl_container_ref = wtypes.StringType(max_length=255)
     allowed_cidrs = wtypes.wsattr([types.CidrType()])
     tls_ciphers = wtypes.StringType(max_length=2048)

@@ -44,6 +44,8 @@ BACKEND_TLS_H2_ALPN_PAYLOAD_AVAILABLE = hasattr(
     driver_dm.Pool(), 'backend_tls_require_h2')
 BACKEND_TLS_SUBJECT_ALT_NAMES_PAYLOAD_AVAILABLE = hasattr(
     driver_dm.Pool(), 'backend_tls_subject_alt_names')
+FRONTEND_CLIENT_AUTH_INSECURE_FALLBACK_PAYLOAD_AVAILABLE = hasattr(
+    driver_dm.Listener(), 'client_authentication_insecure_fallback')
 
 HTTP_L7RULE_CAPABILITIES = {
     constants.L7RULE_TYPE_HTTP_HEADER_EXACT:
@@ -168,7 +170,24 @@ def gateway_capabilities(driver):
             is True):
         capabilities.append(
             constants.GATEWAY_CAPABILITY_HTTPS_LISTENER_ISOLATION)
+    fallback_providers = (
+        api_settings.enabled_frontend_client_auth_insecure_fallback_providers)
+    if (FRONTEND_CLIENT_AUTH_INSECURE_FALLBACK_PAYLOAD_AVAILABLE and
+            driver.name in fallback_providers and
+            getattr(driver, 'supports_frontend_client_auth_insecure_fallback',
+                    False) is True):
+        capabilities.append(
+            constants.GATEWAY_CAPABILITY_FRONTEND_CLIENT_AUTH_INSECURE_FALLBACK)
     return capabilities
+
+
+def require_frontend_client_auth_fallback(driver):
+    if (constants.GATEWAY_CAPABILITY_FRONTEND_CLIENT_AUTH_INSECURE_FALLBACK
+            not in gateway_capabilities(driver)):
+        raise exceptions.ProviderUnsupportedOptionError(
+            prov=driver.name, user_msg=_(
+                'Insecure fallback for frontend client certificate '
+                'validation is unavailable for this provider.'))
 
 
 def require_https_listener_isolation(driver):
@@ -635,7 +654,8 @@ def _get_secret_data(cert_manager, project_id, secret_ref, for_delete=False):
     return secret_data
 
 
-def listener_dict_to_provider_dict(listener_dict, for_delete=False):
+def listener_dict_to_provider_dict(listener_dict, for_delete=False,
+                                   clear_client_auth_fallback=False):
     new_listener_dict = _base_to_provider_dict(listener_dict,
                                                include_project_id=True)
     new_listener_dict['listener_id'] = new_listener_dict.pop('id')
@@ -644,8 +664,13 @@ def listener_dict_to_provider_dict(listener_dict, for_delete=False):
             'load_balancer_id')
 
     # Preserve the existing driver payload for ordinary listeners.
+    new_listener_dict.pop('frontend_fallback_owns_error', None)
     if not new_listener_dict.get('tcp_tls_termination'):
         new_listener_dict.pop('tcp_tls_termination', None)
+    if (not FRONTEND_CLIENT_AUTH_INSECURE_FALLBACK_PAYLOAD_AVAILABLE or
+            (new_listener_dict.get('client_authentication_insecure_fallback')
+             is not True and not clear_client_auth_fallback)):
+        new_listener_dict.pop('client_authentication_insecure_fallback', None)
 
     # Pull the certs out of the certificate manager to pass to the provider
     if 'tls_certificate_id' in new_listener_dict:

@@ -85,6 +85,7 @@ class AmphoraProviderDriver(driver_base.ProviderDriver):
     supports_tls_sni_passthrough = True
     supports_tls_sni_suffix = True
     supports_https_listener_isolation = True
+    supports_frontend_client_auth_insecure_fallback = True
 
     def __init__(self):
         super().__init__()

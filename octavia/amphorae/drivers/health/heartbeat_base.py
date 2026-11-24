@@ -284,6 +284,10 @@ class UpdateHealthDb:
             db_lb = self.amphora_repo.get_lb_for_health_update(session,
                                                                health['id'])
         ignore_listener_count = False
+        db_listeners = (db_lb or {}).get('listeners', {})
+        withdrawn = {listener_id for listener_id, listener
+                     in db_listeners.items()
+                     if listener.get('frontend_fallback_closed')}
 
         if db_lb:
             expected_listener_count = 0
@@ -291,9 +295,9 @@ class UpdateHealthDb:
                not db_lb['enabled']):
                 ignore_listener_count = True
             else:
-                for key, listener in db_lb.get('listeners', {}).items():
+                for listener_id, listener in db_listeners.items():
                     # disabled listeners don't report from the amphora
-                    if listener['enabled']:
+                    if listener['enabled'] and listener_id not in withdrawn:
                         expected_listener_count += 1
 
                 # If this is a heartbeat older than versioning, handle
@@ -339,6 +343,12 @@ class UpdateHealthDb:
             expected_listener_count = 0
 
         listeners = health['listeners']
+        if withdrawn:
+            # A peer that has not reloaded may still report the closed
+            # listener. It cannot take the place of a missing sibling.
+            listeners = {listener_id: listener
+                         for listener_id, listener in listeners.items()
+                         if listener_id not in withdrawn}
 
         # Do not update amphora health if the reporting listener count
         # does not match the expected listener count
@@ -395,8 +405,9 @@ class UpdateHealthDb:
 
         health_msg_version = health.get('ver', 0)
 
-        for listener_id in db_lb.get(constants.LISTENERS, {}):
-            db_listener = db_lb[constants.LISTENERS][listener_id]
+        for listener_id, db_listener in db_listeners.items():
+            if listener_id in withdrawn:
+                continue
             db_op_status = db_listener[constants.OPERATING_STATUS]
             listener_status = None
             listener = None

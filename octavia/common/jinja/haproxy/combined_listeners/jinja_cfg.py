@@ -229,6 +229,8 @@ class JinjaTemplater:
         feature_compatibility = feature_compatibility or {}
         san_capability = (
             constants.GATEWAY_CAPABILITY_BACKEND_TLS_SUBJECT_ALT_NAMES)
+        fallback_capability = (
+            constants.GATEWAY_CAPABILITY_FRONTEND_CLIENT_AUTH_INSECURE_FALLBACK)
         loadbalancer = self._transform_loadbalancer(
             host_amphora,
             listeners[0].load_balancer,
@@ -269,6 +271,12 @@ class JinjaTemplater:
             for listener in loadbalancer['listeners']:
                 if not listener['enabled']:
                     continue
+                if (listener.get('client_auth_insecure_fallback') and
+                        (amp_details or {}).get(fallback_capability)
+                        is not True):
+                    raise driver_except.AmpVersionUnsupported(
+                        version='HAProxy requires insecure frontend client '
+                                'certificate validation fallback support')
                 if ('https_sections' in listener and haproxy_version and
                         not versionutils.is_compatible(
                             '3.0.0', haproxy_version, same_major=False)):
@@ -470,6 +478,19 @@ class JinjaTemplater:
         tcp_tls_termination = getattr(listener, 'tcp_tls_termination',
                                       False) is True
         active = listener.enabled and loadbalancer.enabled
+        client_auth_fallback = active and getattr(
+            listener, 'client_authentication_insecure_fallback', None) is True
+        if client_auth_fallback and (
+                listener.protocol != constants.PROTOCOL_TERMINATED_HTTPS or
+                listener.client_authentication !=
+                constants.CLIENT_AUTH_MANDATORY or
+                not (listener.tls_certificate_id or listener.sni_containers) or
+                not listener.client_ca_tls_certificate_id or
+                not (tls_certs or {}).get(
+                    listener.client_ca_tls_certificate_id)):
+            raise exceptions.ValidationException(detail=(
+                'Insecure client certificate validation fallback requires '
+                'HTTPS with a server certificate and a trusted client CA.'))
         if tcp_tls_termination and active:
             if (listener.protocol != constants.PROTOCOL_TCP or
                     not listener.tls_certificate_id):
@@ -508,7 +529,7 @@ class JinjaTemplater:
             ret_value['connection_limit'] = (
                 CONF.haproxy_amphora.default_connection_limit)
 
-        if listener.tls_certificate_id:
+        if listener.tls_certificate_id or listener.sni_containers:
             ret_value['crt_list_filename'] = os.path.join(
                 CONF.haproxy_amphora.base_cert_dir,
                 loadbalancer.id, f'{listener.id}.pem')
@@ -522,6 +543,9 @@ class JinjaTemplater:
                         tls_certs[listener.client_ca_tls_certificate_id]))
                 ret_value['client_auth'] = CLIENT_AUTH_MAP.get(
                     listener.client_authentication)
+                if client_auth_fallback:
+                    ret_value['client_auth'] = 'optional'
+                    ret_value['client_auth_insecure_fallback'] = True
 
             if listener.client_crl_container_id:
                 ret_value['client_crl_path'] = '%s' % (

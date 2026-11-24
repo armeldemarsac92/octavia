@@ -108,6 +108,8 @@ GATEWAY_CAPABILITY_TCP_TLS_TERMINATION = 'tcp_tls_termination_v1'
 GATEWAY_CAPABILITY_TLS_SNI = 'tls_sni_passthrough_v1'
 GATEWAY_CAPABILITY_TLS_SNI_SUFFIX = 'tls_sni_suffix_v1'
 GATEWAY_CAPABILITY_HTTPS_LISTENER_ISOLATION = 'https_listener_isolation_v1'
+GATEWAY_CAPABILITY_FRONTEND_CLIENT_AUTH_INSECURE_FALLBACK = (
+    'frontend_client_auth_insecure_fallback_v1')
 GATEWAY_CAPABILITY_HTTP_HEADER_EXACT = 'http_header_exact_v1'
 GATEWAY_CAPABILITY_HTTP_METHOD_MATCH = 'http_method_match_v1'
 GATEWAY_CAPABILITY_HTTP_QUERY_PARAM_EXACT = 'http_query_param_exact_v1'

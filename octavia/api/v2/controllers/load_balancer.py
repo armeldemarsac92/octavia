@@ -905,10 +905,13 @@ class LoadBalancersController(base.BaseController):
             reopening = (load_balancer.admin_state_up is True and
                          not db_lb.enabled)
             if reopening:
-                if self.repositories.listener.has_enabled_https_isolation(
+                listener_repo = self.repositories.listener
+                if listener_repo.has_enabled_frontend_client_auth_fallback(
+                        context.session, id):
+                    driver_utils.require_frontend_client_auth_fallback(driver)
+                if listener_repo.has_enabled_https_isolation(
                         context.session, id):
                     driver_utils.require_https_listener_isolation(driver)
-                listener_repo = self.repositories.listener
                 tls_listeners = listener_repo.get_active_tcp_tls_listeners(
                     context.session, id)
                 listener_controller = listener.ListenersController()

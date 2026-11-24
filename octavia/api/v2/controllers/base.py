@@ -23,6 +23,7 @@ from wsme import types as wtypes
 
 from octavia.common import constants
 from octavia.common import exceptions
+from octavia.common.tls_utils import cert_parser
 from octavia.common import validate
 from octavia.common import policy
 from octavia.db import models
@@ -263,7 +264,8 @@ class BaseController(pecan_rest.RestController):
         if bad_refs:
             raise exceptions.CertificateRetrievalException(ref=bad_refs)
 
-    def _validate_client_ca_and_crl_refs(self, client_ca_ref, crl_ref):
+    def _validate_client_ca_and_crl_refs(self, client_ca_ref, crl_ref, *,
+                                        require_ca_bundle=False):
         context = pecan_request.context.get('octavia_context')
         bad_refs = []
         try:
@@ -289,7 +291,12 @@ class BaseController(pecan_rest.RestController):
                 ca_pem = ca_pem.encode('utf-8')
             except AttributeError:
                 pass
-            ca_cert = x509.load_pem_x509_certificate(ca_pem, default_backend())
+            if require_ca_bundle:
+                ca_cert = cert_parser.load_frontend_client_ca_certificates(
+                    ca_pem)[0]
+            else:
+                ca_cert = x509.load_pem_x509_certificate(
+                    ca_pem, default_backend())
         except Exception as e:
             raise exceptions.ValidationException(detail=_(
                 "The client authentication CA certificate is invalid. "
