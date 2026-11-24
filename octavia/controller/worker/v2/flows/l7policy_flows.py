@@ -50,6 +50,11 @@ class L7PolicyFlows:
             requires=constants.L7POLICY))
         return flow
 
+    def get_activate_l7policies_flow(self):
+        return linear_flow.Flow('octavia-activate-l7policies-flow').add(
+            amphora_driver_tasks.ApplyL7PolicyActivation(
+                requires=constants.L7POLICY_ACTIVATION))
+
     def get_delete_l7policy_flow(self):
         """Create a flow to delete an L7 policy
 

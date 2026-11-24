@@ -104,6 +104,13 @@ def gateway_capabilities(driver):
     if (driver.name in initial_rules_providers and
             getattr(driver, 'supports_l7policy_initial_rules', False) is True):
         capabilities.append(constants.GATEWAY_CAPABILITY_L7POLICY_INITIAL_RULES)
+    batch_activation_providers = (
+        api_settings.enabled_l7policy_batch_activation_providers)
+    if (driver.name in batch_activation_providers and
+            getattr(driver, 'supports_l7policy_batch_activation', False)
+            is True):
+        capabilities.append(
+            constants.GATEWAY_CAPABILITY_L7POLICY_BATCH_ACTIVATION)
     if (driver.name in api_settings.enabled_http_header_exact_providers and
             getattr(driver, 'supports_http_header_exact', False) is True):
         capabilities.append(constants.GATEWAY_CAPABILITY_HTTP_HEADER_EXACT)
@@ -514,6 +521,9 @@ def _base_to_provider_dict(current_dict, include_project_id=False):
 def lb_dict_to_provider_dict(lb_dict, vip=None, add_vips=None, db_pools=None,
                              db_listeners=None, for_delete=False):
     new_lb_dict = _base_to_provider_dict(lb_dict, include_project_id=True)
+    for field in ('l7policy_graph_generation', 'l7policy_activation'):
+        new_lb_dict.pop(field, None)
+        new_lb_dict.pop('_' + field, None)
     new_lb_dict['loadbalancer_id'] = new_lb_dict.pop('id')
     if vip:
         new_lb_dict['vip_address'] = vip.ip_address

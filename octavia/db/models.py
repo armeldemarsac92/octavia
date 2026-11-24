@@ -443,6 +443,12 @@ class LoadBalancer(base_models.BASE, base_models.IdMixin,
                                 back_populates="load_balancer")
     server_group_id = sa.Column(sa.String(36), nullable=True)
     provider = sa.Column(sa.String(64), nullable=True)
+    _l7policy_graph_generation = sa.Column('l7policy_graph_generation',
+                                           sa.String(36), nullable=True)
+    _l7policy_activation = sa.Column('l7policy_activation',
+                                     sa.JSON(none_as_null=True), nullable=True)
+    l7policy_graph_generation = orm.synonym('_l7policy_graph_generation')
+    l7policy_activation = orm.synonym('_l7policy_activation')
     vip = orm.relationship('Vip', cascade='delete', uselist=False,
                            backref=orm.backref('load_balancer', uselist=False))
     additional_vips = orm.relationship(

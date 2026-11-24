@@ -72,6 +72,7 @@ class AmphoraProviderDriver(driver_base.ProviderDriver):
     supports_request_url_rewrite = True
     supports_request_cors = True
     supports_l7policy_initial_rules = True
+    supports_l7policy_batch_activation = True
     supports_http_header_exact = True
     supports_http_query_param_exact = True
     supports_grpc_content_type = True
@@ -451,6 +452,10 @@ class AmphoraProviderDriver(driver_base.ProviderDriver):
         payload = {consts.ORIGINAL_L7POLICY: old_l7policy.to_dict(),
                    consts.L7POLICY_UPDATES: l7policy_dict}
         self.client.cast({}, 'update_l7policy', **payload)
+
+    def l7policy_batch_activate(self, activation):
+        self.client.cast({}, 'activate_l7policies',
+                         **{consts.L7POLICY_ACTIVATION: activation})
 
     # L7 Rule
     def l7rule_create(self, l7rule):

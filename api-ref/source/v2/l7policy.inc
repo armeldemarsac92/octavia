@@ -1,5 +1,81 @@
 .. -*- rst -*-
 
+Read the activation snapshot for a listener
+===========================================
+
+.. rest_method:: GET /v2/lbaas/listeners/{listener_id}/l7policy_activation
+
+This regional v2 extension is available for HTTP and TERMINATED_HTTPS
+listeners whose provider advertises ``l7policy_batch_activation_v1`` on
+``GET /v2/lbaas/providers/{provider}/gateway_capabilities``. It uses the
+Octavia provider capability discovery mechanism.
+
+The HTTP 200 response contains an ``l7policy_activation`` object. It includes
+the standard ``loadbalancer`` and ``listener`` representations, plus a
+``pools`` array of destinations referenced by the listener or its policies.
+Each destination has a ``pool`` object with ``healthmonitor`` when present
+and a separate ``members`` array with detailed members and their ``pool_id``.
+
+The ``policies`` array contains every non-deleted policy of the listener in
+position order, without pagination. Each element has an opaque ``revision``
+and a ``policy`` containing the ordinary policy fields and full non-deleted
+``rules``. An opaque ``graph_revision`` covers policy and rule identity,
+administrative state, routing fields and the supporting graph. Compare
+these resources with the intended routing and ownership before using the
+revisions.
+
+Activate prepared L7 policies for a listener
+=============================================
+
+.. rest_method:: POST /v2/lbaas/listeners/{listener_id}/l7policy_activation
+
+Send the observed graph revision, the complete observed UUID order and the
+revisions of two to 64 unique policies from the same listener and project.
+Each selected policy must have at least one enabled rule and be in
+provisioning status ``ACTIVE``.
+
+.. code-block:: json
+
+   {
+     "l7policy_activation": {
+       "expected_graph_revision":
+       "4faf00b3b4b1fae36ae4268f9708fb30e38c80572823231ef1ac05d3ea912e65",
+       "expected_order": [
+         "8af9a5fb-380e-45dd-9d5c-33bd0ca20187",
+         "b22b947a-91bc-4c9b-af04-76ae18c31ad8"
+       ],
+       "policies": [
+         {
+           "id": "8af9a5fb-380e-45dd-9d5c-33bd0ca20187",
+           "revision":
+           "e60d315debcd749b51f67832f662a77f30fee27f58884c80ff6254af37d11a539"
+         },
+         {
+           "id": "b22b947a-91bc-4c9b-af04-76ae18c31ad8",
+           "revision":
+           "f44276c4131d818380312975339c2594182dc5c966e8227bc0a1738512b804b4"
+         }
+       ]
+     }
+   }
+
+An HTTP 204 response accepts asynchronous activation of a disabled group.
+Wait for the load balancer and selected policies to finish provisioning.
+An identical POST redelivers a pending request under its original operation
+identity. It returns HTTP 204 without dispatch after success while the
+applied configuration is current. An ordinary mutation of the load balancer
+or its children invalidates the old request, including explicit withdrawal
+of policies. HTTP 409 means the observed order, revisions, membership or
+readiness changed. Refresh the snapshot and confirm the intended change
+before retrying. HTTP 501 indicates that the regional provider or listener
+protocol does not support the action.
+
+An Amphora worker applies the group through one combined HAProxy refresh per
+Amphora. If the refresh fails, all selected policies remain disabled with
+provisioning status ``ERROR``. The listener and load balancer also enter
+``ERROR`` if the worker could not restore their prior configuration. Their
+activation request remains available for a retry of the restoration.
+
 List L7 Policies
 ================
 

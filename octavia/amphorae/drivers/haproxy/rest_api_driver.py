@@ -151,7 +151,8 @@ class HaproxyAmphoraLoadBalancerDriver(
 
     def _update_amphora_listeners(
             self, loadbalancer, amphora, timeout_dict=None, *,
-            amp_details=None, backend_tls_certs=None):
+            amp_details=None, backend_tls_certs=None,
+            l7policy_activation=False):
         if not loadbalancer.listeners:
             LOG.debug('No listeners found to update.')
             return set()
@@ -169,6 +170,8 @@ class HaproxyAmphoraLoadBalancerDriver(
             LOG.debug("%s updating listener %s on amphora %s",
                       self.__class__.__name__, listener.id, amphora.id)
             if listener.protocol in consts.LVS_PROTOCOLS:
+                if l7policy_activation:
+                    continue
                 # Generate Keepalived LVS configuration from listener object
                 config = self.lvs_jinja.build_config(listener=listener)
                 self.clients[amphora.api_version].upload_udp_config(
@@ -208,6 +211,8 @@ class HaproxyAmphoraLoadBalancerDriver(
 
                     listeners_to_update.append(listener)
                 except Exception as e:
+                    if l7policy_activation:
+                        raise
                     LOG.exception('Unable to update listener %s due to '
                                   '"%s". Skipping this listener.',
                                   listener.id, str(e))
@@ -258,16 +263,21 @@ class HaproxyAmphoraLoadBalancerDriver(
                 self.clients[amp.api_version].reload_listener(
                     amp, listener.id)
 
-    def update(self, loadbalancer):
+    def update(self, loadbalancer, *, l7policy_activation=False):
         amphorae = [amphora for amphora in loadbalancer.amphorae
                     if amphora.status != consts.DELETED]
+        if l7policy_activation and not amphorae:
+            raise driver_except.ListenerProvisioningError()
         opted_in, protected = self._backend_tls_pools(loadbalancer)
         if opted_in and amphorae:
             self._update_backend_tls_listeners(
-                loadbalancer, amphorae, amphorae, protected)
+                loadbalancer, amphorae, amphorae, protected,
+                l7policy_activation=l7policy_activation)
         else:
             for amphora in amphorae:
-                self._update_amphora_listeners(loadbalancer, amphora)
+                self._update_amphora_listeners(
+                    loadbalancer, amphora,
+                    l7policy_activation=l7policy_activation)
 
     def update_failover_listeners(self, loadbalancer, amphora_index,
                                   amphorae_status, timeout_dict=None):
@@ -305,7 +315,8 @@ class HaproxyAmphoraLoadBalancerDriver(
 
     def _update_backend_tls_listeners(self, loadbalancer, amphorae, peers,
                                       protected, timeout_dict=None,
-                                      unreachable=()):
+                                      unreachable=(),
+                                      l7policy_activation=False):
         # Preflight the entire pair and stage the trust material before any
         # reload. Both amphorae use an empty backend if either lacks support.
         details = {}
@@ -363,7 +374,8 @@ class HaproxyAmphoraLoadBalancerDriver(
                 configured = self._update_amphora_listeners(
                     loadbalancer, amphora, timeout_dict=timeout_dict,
                     amp_details=details[amphora.id],
-                    backend_tls_certs=certs[amphora.id])
+                    backend_tls_certs=certs[amphora.id],
+                    l7policy_activation=l7policy_activation)
                 reloaded_listeners.append(configured)
             except Exception as error:
                 LOG.warning('Could not reload listeners on amphora %s (%s).',

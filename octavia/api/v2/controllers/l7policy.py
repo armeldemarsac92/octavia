@@ -18,6 +18,7 @@ from oslo_config import cfg
 from oslo_db import exception as odb_exceptions
 from oslo_log import log as logging
 from oslo_utils import excutils
+from oslo_utils import uuidutils
 from pecan import expose as pecan_expose
 from pecan import request as pecan_request
 from wsme import types as wtypes
@@ -28,9 +29,11 @@ from octavia.api.drivers import utils as driver_utils
 from octavia.api.v2.controllers import base
 from octavia.api.v2.controllers import l7rule
 from octavia.api.v2.types import l7policy as l7policy_types
+from octavia.api.v2.types import l7policy_activation as activation_types
 from octavia.common import constants
 from octavia.common import data_models
 from octavia.common import exceptions
+from octavia.common import l7policy_activation
 from octavia.common import validate
 from octavia.db import prepare as db_prepare
 from octavia.i18n import _
@@ -38,6 +41,9 @@ from octavia.i18n import _
 
 CONF = cfg.CONF
 LOG = logging.getLogger(__name__)
+
+ACTIVATION_PROTOCOLS = (constants.PROTOCOL_HTTP,
+                        constants.PROTOCOL_TERMINATED_HTTPS)
 
 
 def validate_policy_headers(policy, protocol, driver, old_policy=None):
@@ -85,6 +91,183 @@ def _requires_target_filter_capability(previous, targets, expands_scope):
                 return True
         previous_start, start = previous_end, end
     return False
+
+
+class L7PolicyActivationController(base.BaseController):
+    RBAC_TYPE = constants.RBAC_L7POLICY
+
+    def __init__(self, listener_id):
+        super().__init__()
+        self.listener_id = listener_id
+
+    def _parent_id(self, context):
+        # End the listener lookup transaction so the subsequent snapshot has
+        # no pre-lock consistent reads on MySQL REPEATABLE READ.
+        with context.session.begin():
+            return self._get_db_listener(
+                context.session, self.listener_id,
+                show_deleted=False).load_balancer_id
+
+    def _get_listener_and_provider(self, context, lb_id, action):
+        session = context.session
+        # Use the same lock as individual L7 policy/rule mutations. Current
+        # reads after it avoid reusing a pre-lock MySQL repeatable-read view.
+        lb = self.repositories.load_balancer.get_for_update(
+            session, lb_id)
+        listener = self.repositories.listener.get_for_update(
+            session, self.listener_id, show_deleted=False)
+        if not lb or lb.provisioning_status == constants.DELETED:
+            raise exceptions.NotFound(resource='Listener', id=self.listener_id)
+        self._auth_validate_action(context, lb.project_id, action)
+        if (listener.load_balancer_id != lb.id or
+                listener.project_id != lb.project_id):
+            raise exceptions.L7PolicyActivationConflict()
+        driver = driver_factory.get_driver(lb.provider)
+        if (constants.GATEWAY_CAPABILITY_L7POLICY_BATCH_ACTIVATION not in
+                driver_utils.gateway_capabilities(driver) or
+                listener.protocol not in ACTIVATION_PROTOCOLS):
+            raise exceptions.ProviderNotImplementedError(
+                prov=driver.name, user_msg=_(
+                    'Grouped L7 policy activation is unavailable for this '
+                    'listener.'))
+        return listener, lb, driver
+
+    @wsme_pecan.wsexpose(activation_types.L7PolicyActivationRootResponse)
+    def get(self):
+        """Read the ordered policies and the backend graph."""
+        context = pecan_request.context.get('octavia_context')
+        lb_id = self._parent_id(context)
+        with context.session.begin():
+            listener, lb, _driver = self._get_listener_and_provider(
+                context, lb_id, constants.RBAC_GET_ONE)
+            if (lb.provisioning_status.startswith('PENDING_') and
+                    not self.repositories.load_balancer._batch_pending(lb)):
+                raise exceptions.L7PolicyActivationConflict()
+            for resource in (constants.RBAC_LOADBALANCER,
+                             constants.RBAC_LISTENER,
+                             constants.RBAC_L7RULE, constants.RBAC_POOL,
+                             constants.RBAC_MEMBER,
+                             constants.RBAC_HEALTHMONITOR):
+                self._auth_validate_action(
+                    context, lb.project_id, constants.RBAC_GET_ONE,
+                    rbac_type=resource)
+            graph, _policies = l7policy_activation.snapshot(
+                context.session, self.repositories, lb, listener)
+        return activation_types.L7PolicyActivationRootResponse(
+            l7policy_activation=graph)
+
+    @wsme_pecan.wsexpose(
+        None, body=activation_types.L7PolicyActivationRootPOST,
+        status_code=204)
+    def post(self, activation_):
+        """Enable prepared policies while preserving the listener's order."""
+        activation = activation_.l7policy_activation if activation_ else None
+        if not activation:
+            raise exceptions.ValidationException(detail=_(
+                'Supply an l7policy_activation object.'))
+        revisions = {item.id: item.revision for item in activation.policies}
+        if len(revisions) != len(activation.policies):
+            raise exceptions.ValidationException(detail=_(
+                'L7 policy IDs must be unique.'))
+        request = {
+            'graph_revision': activation.expected_graph_revision,
+            'order': activation.expected_order,
+            'policies': revisions,
+        }
+
+        context = pecan_request.context.get('octavia_context')
+        session = context.session
+        lb_id = self._parent_id(context)
+        with session.begin():
+            listener, lb, driver = self._get_listener_and_provider(
+                context, lb_id, constants.RBAC_PUT)
+            operation = lb.l7policy_activation or {}
+            replay = (operation.get('listener_id') == listener.id and
+                      operation.get('request') == request)
+            if operation.get('phase') in l7policy_activation.PENDING:
+                if not replay:
+                    raise exceptions.L7PolicyActivationConflict()
+                self._dispatch(driver, lb.id, operation['id'])
+                return
+            if (lb.provisioning_status != constants.ACTIVE or
+                    listener.provisioning_status != constants.ACTIVE or
+                    not listener.enabled or not lb.enabled):
+                raise exceptions.L7PolicyActivationConflict()
+
+            graph, order = l7policy_activation.snapshot(
+                session, self.repositories, lb, listener)
+            policies = [policy for policy in order if policy.id in revisions]
+            if (replay and operation['phase'] == 'applied' and
+                    graph.graph_revision == operation['applied_revision'] and
+                    all(p.enabled and p.provisioning_status == constants.ACTIVE
+                        for p in policies)):
+                return
+            if (graph.graph_revision != request['graph_revision'] or
+                    [policy.id for policy in order] != request['order'] or
+                    len(policies) != len(revisions)):
+                raise exceptions.L7PolicyActivationConflict()
+            for policy in policies:
+                if (policy.enabled or
+                        policy.provisioning_status != constants.ACTIVE or
+                        not any(rule.enabled for rule in policy.l7rules) or
+                        any(rule.provisioning_status != constants.ACTIVE
+                            for rule in policy.l7rules) or
+                        l7policy_activation.policy_revision(policy) !=
+                        revisions[policy.id]):
+                    raise exceptions.L7PolicyActivationConflict()
+                self._validate_policy(session, policy, listener, driver)
+
+            operation_id = uuidutils.generate_uuid()
+            lb.l7policy_activation = {
+                'id': operation_id,
+                'listener_id': listener.id,
+                'request': request,
+                'phase': 'pending',
+            }
+            listener.provisioning_status = constants.PENDING_UPDATE
+            lb.provisioning_status = constants.PENDING_UPDATE
+            for policy in policies:
+                policy.provisioning_status = constants.PENDING_UPDATE
+            self._dispatch(driver, lb.id, operation_id)
+
+    @staticmethod
+    def _dispatch(driver, lb_id, operation_id):
+        driver_utils.call_provider(
+            driver.name, driver.l7policy_batch_activate, {
+                'id': operation_id, 'loadbalancer_id': lb_id,
+            })
+
+    def _validate_policy(self, session, policy, listener, driver):
+        repo = self.repositories.l7policy
+        protocol = listener.protocol
+        hostname = validate.validate_https_policy_hostname(
+            listener.https_virtual_hosts, policy.https_listener_hostname)
+        if hostname is not None:
+            driver_utils.require_https_listener_isolation(driver)
+        for rule in policy.l7rules:
+            if rule.enabled:
+                driver_utils.validate_l7rule_context(driver, rule.type,
+                                                     protocol)
+        driver_utils.require_gateway_policy_action(
+            driver, policy.action, protocol,
+            request_header_operations=policy.request_header_operations,
+            response_header_operations=policy.response_header_operations,
+            request_url_rewrite=policy.request_url_rewrite,
+            request_cors=policy.request_cors, targets=policy.targets)
+        if policy.redirect_pool_id:
+            pool = repo.get_redirect_pool_for_update(
+                session, listener, policy.redirect_pool_id)
+            self._validate_protocol(protocol, pool.protocol)
+        pool_ids = {target['pool_id'] for target in policy.targets
+                    if 'pool_id' in target}
+        for pool_id in sorted(pool_ids):
+            pool = repo.get_redirect_pool_for_update(
+                session, listener, pool_id)
+            self._validate_protocol(protocol, pool.protocol)
+        if policy.action == constants.L7POLICY_ACTION_REDIRECT_REQUEST:
+            driver_utils.require_no_transform_exposed_by_ordered_redirect(
+                driver, repo, session, listener.id, hostname, policy.position,
+                policy_id=policy.id)
 
 
 class L7PolicyController(base.BaseController):
