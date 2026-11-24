@@ -1298,12 +1298,41 @@ class ListenerRepository(BaseRepository):
         listener = self.get(session, id=id)
         return bool(listener.default_pool)
 
+    def set_frontend_fallback_statuses(self, session, *, closed, restored):
+        model = self.model_class
+        rows = (session.query(model).filter(
+            model.id.in_(closed | restored),
+            model.provisioning_status.notin_(
+                (consts.PENDING_DELETE, consts.DELETED)))
+            .options(lazyload('*')).populate_existing()
+            .order_by(model.id).with_for_update())
+        for listener in rows:
+            if listener.id in closed:
+                if (not listener.enabled or
+                        listener.client_authentication_insecure_fallback
+                        is not True):
+                    continue
+                listener.frontend_fallback_owns_error = (
+                    listener.provisioning_status != consts.ERROR or
+                    listener.frontend_fallback_owns_error is True)
+                listener.provisioning_status = consts.ERROR
+                listener.operating_status = consts.ERROR
+            elif listener.frontend_fallback_owns_error is not None:
+                if (listener.frontend_fallback_owns_error is True and
+                        listener.provisioning_status == consts.ERROR):
+                    listener.provisioning_status = consts.ACTIVE
+                # Fresh heartbeats determine the actual operating status.
+                listener.frontend_fallback_owns_error = None
+
     def update(self, session, id, **model_kwargs):
         if (set(model_kwargs) != {'operating_status'} and
                 self.batch_owns_graph(session, id)):
             return
-        listener_db = session.query(self.model_class).filter_by(
-            id=id).first()
+        query = session.query(self.model_class).filter_by(id=id)
+        marks_error = model_kwargs.get('provisioning_status') == consts.ERROR
+        if marks_error:
+            query = query.populate_existing().with_for_update()
+        listener_db = query.first()
         if not listener_db:
             raise exceptions.NotFound(
                 resource=data_models.Listener._name(), id=id)
@@ -1345,6 +1374,8 @@ class ListenerRepository(BaseRepository):
                 listener_db.allowed_cidrs = [
                     models.ListenerCidr(listener_id=id, cidr=cidr)
                     for cidr in allowed_cidrs]
+        if marks_error and listener_db.frontend_fallback_owns_error is True:
+            listener_db.frontend_fallback_owns_error = False
         listener_db.update(model_kwargs)
 
     def create(self, session, **model_kwargs):
@@ -1620,6 +1651,7 @@ class AmphoraRepository(BaseRepository):
             "listener.operating_status AS list_op_status, "
             "listener.enabled AS list_enabled, "
             "listener.protocol AS list_protocol, "
+            "listener.frontend_fallback_owns_error AS list_fallback_error, "
             "pool.id AS pool_id, "
             "pool.operating_status AS pool_op_status, "
             "member.id AS member_id, "
@@ -1646,6 +1678,8 @@ class AmphoraRepository(BaseRepository):
                 listener = {'operating_status': row['list_op_status'],
                             'protocol': row['list_protocol'],
                             'enabled': row['list_enabled']}
+                if row['list_fallback_error'] is not None:
+                    listener['frontend_fallback_closed'] = True
                 listeners[row['list_id']] = listener
             if row['pool_id']:
                 if row['pool_id'] in pools and row['member_id']:

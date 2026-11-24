@@ -633,6 +633,8 @@ class Listener(base_models.BASE, base_models.IdMixin,
                       name="fk_listener_client_authentication_mode_name"),
         nullable=False, default=constants.CLIENT_AUTH_NONE)
     client_authentication_insecure_fallback = sa.Column(sa.Boolean())
+    # NULL means it is not withdrawn. True means the withdrawal owns ERROR.
+    frontend_fallback_owns_error = sa.Column(sa.Boolean())
     client_crl_container_id = sa.Column(sa.String(255), nullable=True)
     tls_ciphers = sa.Column(sa.String(2048), nullable=True)
     tls_versions = sa.Column(db_types.ScalarListType(), nullable=True)

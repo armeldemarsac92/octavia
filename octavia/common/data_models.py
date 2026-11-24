@@ -434,7 +434,8 @@ class Listener(BaseDataModel):
                  hsts_include_subdomains=None, hsts_preload=None,
                  default_http_response=None, https_virtual_hosts=None,
                  tcp_tls_termination=False,
-                 client_authentication_insecure_fallback=None):
+                 client_authentication_insecure_fallback=None,
+                 frontend_fallback_owns_error=None):
         self.id = id
         self.project_id = project_id
         self.name = name
@@ -470,6 +471,7 @@ class Listener(BaseDataModel):
         self.client_authentication = client_authentication
         self.client_authentication_insecure_fallback = (
             client_authentication_insecure_fallback)
+        self.frontend_fallback_owns_error = frontend_fallback_owns_error
         self.client_crl_container_id = client_crl_container_id
         self.allowed_cidrs = allowed_cidrs or []
         self.tls_ciphers = tls_ciphers

@@ -138,14 +138,14 @@ class HaproxyAmphoraLoadBalancerDriver(
             return
 
         opted_in, protected = self._backend_tls_pools(loadbalancer)
-        fallback = self._frontend_client_auth_fallback_listeners(loadbalancer)
-        if opted_in or fallback:
+        fallback, withdrawn = self._frontend_fallback_listeners(loadbalancer)
+        if opted_in or fallback or withdrawn:
             peers = {amp.id: amp for amp in loadbalancer.amphorae
                      if amp.status != consts.DELETED}
             peers[amphora.id] = amphora
             self._update_protected_tls_listeners(
                 loadbalancer, [amphora], peers.values(), protected, fallback,
-                timeout_dict=timeout_dict)
+                withdrawn, timeout_dict=timeout_dict)
         else:
             self._update_amphora_listeners(
                 loadbalancer, amphora, timeout_dict=timeout_dict)
@@ -272,10 +272,10 @@ class HaproxyAmphoraLoadBalancerDriver(
         if l7policy_activation and not amphorae:
             raise driver_except.ListenerProvisioningError()
         opted_in, protected = self._backend_tls_pools(loadbalancer)
-        fallback = self._frontend_client_auth_fallback_listeners(loadbalancer)
-        if (opted_in or fallback) and amphorae:
+        fallback, withdrawn = self._frontend_fallback_listeners(loadbalancer)
+        if (opted_in or fallback or withdrawn) and amphorae:
             self._update_protected_tls_listeners(
-                loadbalancer, amphorae, amphorae, protected, fallback,
+                loadbalancer, amphorae, amphorae, protected, fallback, withdrawn,
                 l7policy_activation=l7policy_activation)
         else:
             for amphora in amphorae:
@@ -286,8 +286,8 @@ class HaproxyAmphoraLoadBalancerDriver(
     def update_failover_listeners(self, loadbalancer, amphora_index,
                                   amphorae_status, timeout_dict=None):
         opted_in, protected = self._backend_tls_pools(loadbalancer)
-        fallback = self._frontend_client_auth_fallback_listeners(loadbalancer)
-        coordinated = opted_in or bool(fallback)
+        fallback, withdrawn = self._frontend_fallback_listeners(loadbalancer)
+        coordinated = opted_in or bool(fallback or withdrawn)
         if coordinated and amphora_index == 0:
             peers = [amp for amp in loadbalancer.amphorae
                      if amp.status != consts.DELETED]
@@ -297,7 +297,8 @@ class HaproxyAmphoraLoadBalancerDriver(
             self._update_protected_tls_listeners(
                 loadbalancer, [amp for amp in peers
                                if amp.id not in unreachable],
-                peers, protected, fallback, timeout_dict=timeout_dict,
+                peers, protected, fallback, withdrawn,
+                timeout_dict=timeout_dict,
                 unreachable=unreachable)
         return coordinated
 
@@ -320,18 +321,24 @@ class HaproxyAmphoraLoadBalancerDriver(
         return opted_in, pools
 
     @staticmethod
-    def _frontend_client_auth_fallback_listeners(loadbalancer):
-        return [
-            listener for listener in loadbalancer.listeners
-            if loadbalancer.enabled and listener.enabled and
-            listener.provisioning_status not in
-            (consts.PENDING_DELETE, consts.DELETED) and
-            getattr(listener, 'client_authentication_insecure_fallback',
-                    None) is True
-        ]
+    def _frontend_fallback_listeners(loadbalancer):
+        fallback = []
+        withdrawn = set()
+        for listener in loadbalancer.listeners:
+            if listener.provisioning_status in (
+                    consts.PENDING_DELETE, consts.DELETED):
+                continue
+            ownership = getattr(listener, 'frontend_fallback_owns_error', None)
+            if ownership is True or ownership is False:
+                withdrawn.add(listener.id)
+            if (loadbalancer.enabled and listener.enabled and
+                    getattr(listener, 'client_authentication_insecure_fallback',
+                            None) is True):
+                fallback.append(listener)
+        return fallback, withdrawn
 
     def _update_protected_tls_listeners(
-            self, loadbalancer, amphorae, peers, protected, fallback,
+            self, loadbalancer, amphorae, peers, protected, fallback, withdrawn,
             timeout_dict=None, unreachable=(), l7policy_activation=False):
         # Preflight the pair and stage the TLS material before any reload.
         details = {}
@@ -409,6 +416,7 @@ class HaproxyAmphoraLoadBalancerDriver(
                     reload_error = error
 
         recovered = set()
+        restored_frontend = set()
         if (reload_error is None and amphorae and
                 len(amphorae) == len(peers)):
             recovered = {pool_id
@@ -417,18 +425,25 @@ class HaproxyAmphoraLoadBalancerDriver(
                          pool.provisioning_status == consts.ERROR and
                          all(listener.id in configured
                              for configured in reloaded_listeners)}
+            if withdrawn:
+                restored_frontend = withdrawn.intersection(
+                    *reloaded_listeners)
+                restored_frontend.update(
+                    listener.id for listener in loadbalancer.listeners
+                    if (listener.id in withdrawn and
+                        not (listener.enabled and loadbalancer.enabled)))
         if closed or recovered:
             pool_repo = repo.PoolRepository()
             with db_api.session().begin() as session:
                 pool_repo.set_backend_tls_pool_statuses(
                     session, closed=closed, recovered=recovered)
-        if closed_frontend:
+        if not reloaded_listeners:
+            closed_frontend = set()
+        if closed_frontend or restored_frontend:
             listener_repo = repo.ListenerRepository()
             with db_api.session().begin() as session:
-                for listener_id in closed_frontend:
-                    listener_repo.update(session, listener_id,
-                                         provisioning_status=consts.ERROR,
-                                         operating_status=consts.ERROR)
+                listener_repo.set_frontend_fallback_statuses(
+                    session, closed=closed_frontend, restored=restored_frontend)
         if reload_error is not None:
             raise reload_error
 

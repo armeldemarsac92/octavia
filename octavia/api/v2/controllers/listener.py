@@ -798,8 +798,6 @@ class ListenersController(base.BaseController):
             listener, updates, driver, reopening):
         field = 'client_authentication_insecure_fallback'
         previous = listener.client_authentication_insecure_fallback
-        if updates.get(field) is None and field in updates:
-            updates[field] = False
         if updates.get(field, previous) is not True:
             return
 

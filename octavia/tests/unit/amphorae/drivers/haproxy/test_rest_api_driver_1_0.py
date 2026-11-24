@@ -277,7 +277,8 @@ class TestHaproxyAmphoraLoadBalancerDriverTest(base.TestCase):
                          status.call_args.kwargs['closed'])
 
     @mock.patch('octavia.db.api.session')
-    @mock.patch('octavia.db.repositories.ListenerRepository.update')
+    @mock.patch('octavia.db.repositories.ListenerRepository.'
+                'set_frontend_fallback_statuses')
     def test_old_peer_closes_only_frontend_fallback_listener(
             self, listener_update, session):
         capability = (
@@ -308,9 +309,39 @@ class TestHaproxyAmphoraLoadBalancerDriverTest(base.TestCase):
         for call in render.call_args_list:
             self.assertEqual([strict], call.kwargs['listeners'])
         listener_update.assert_called_once_with(
-            session().begin().__enter__(), fallback.id,
+            session().begin().__enter__(), closed={fallback.id},
+            restored=set())
+
+    @mock.patch('octavia.db.api.session')
+    @mock.patch('octavia.db.repositories.ListenerRepository.'
+                'set_frontend_fallback_statuses')
+    def test_fallback_recovers_after_both_peers_apply(self, status, session):
+        peers = [data_models.Amphora(id=name, status=constants.ACTIVE)
+                 for name in ('current-one', 'current-two')]
+        for peer in peers:
+            peer.api_version = API_VERSION
+        listener = data_models.Listener(
+            id='fallback', protocol=constants.PROTOCOL_TERMINATED_HTTPS,
+            enabled=True, client_authentication_insecure_fallback=True,
             provisioning_status=constants.ERROR,
-            operating_status=constants.ERROR)
+            frontend_fallback_owns_error=True)
+        lb = data_models.LoadBalancer(id='lb', enabled=True,
+                                      listeners=[listener], amphorae=peers)
+        capability = (
+            constants.GATEWAY_CAPABILITY_FRONTEND_CLIENT_AUTH_INSECURE_FALLBACK)
+        client = self.driver.clients[API_VERSION]
+        client.get_details.return_value = {capability: True}
+        with mock.patch.object(self.driver, '_process_listener_tls_certs',
+                               return_value={}):
+            client.reload_listener.side_effect = [None, RuntimeError()]
+            self.assertRaises(RuntimeError, self.driver.update, lb)
+            status.assert_not_called()
+            client.reload_listener.reset_mock(side_effect=True)
+            self.driver.update(lb)
+
+        self.assertEqual(2, client.reload_listener.call_count)
+        status.assert_called_once_with(
+            session().begin().__enter__(), closed=set(), restored={listener.id})
 
     @mock.patch('octavia.db.api.session')
     @mock.patch('octavia.db.repositories.PoolRepository.'

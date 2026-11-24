@@ -1273,11 +1273,34 @@ class TestListener(base.BaseAPITest):
         self.cert_manager_mock().get_secret.side_effect = None
         self.cert_manager_mock().get_secret.return_value = (
             sample_certs.X509_CA_CERT)
+        for value in (0, 1, 'false', 'true', None):
+            with self.subTest(non_boolean=value):
+                bad_options = {**options, field: value}
+                response = self.create_listener(*args, status=400,
+                                                **bad_options)
+                self.assertIn('Expected a JSON boolean.',
+                              response['faultstring'])
+                embedded = {
+                    'provider': 'amphora',
+                    'vip_subnet_id': uuidutils.generate_uuid(),
+                    'listeners': [{**bad_options, 'protocol': args[0],
+                                   'protocol_port': args[1]}],
+                }
+                response = self.post(self.LBS_PATH,
+                                     {'loadbalancer': embedded}, status=400)
+                self.assertIn('Expected a JSON boolean.',
+                              response.json['faultstring'])
         created = self.create_listener(*args, **options)['listener']
         self.assertIs(True, created[field])
         path = self.LISTENER_PATH.format(listener_id=created['id'])
         self.assertIs(True, self.get(path).json['listener'][field])
         self.set_lb_status(lb['id'])
+        for value in (0, 1, 'false', 'true', None):
+            with self.subTest(non_boolean=value):
+                response = self.put(path, {'listener': {field: value}},
+                                    status=400)
+                self.assertIn('Expected a JSON boolean.',
+                              response.json['faultstring'])
         self.put(path, {'listener': {'client_ca_tls_container_ref': None}},
                  status=400)
         self.put(path, {'listener': {'default_tls_container_ref': None}},

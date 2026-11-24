@@ -179,7 +179,7 @@ class ListenerPOST(BaseListenerType):
     client_authentication = wtypes.wsattr(
         wtypes.Enum(str, *constants.SUPPORTED_CLIENT_AUTH_MODES),
         default=constants.CLIENT_AUTH_NONE)
-    client_authentication_insecure_fallback = wtypes.wsattr(bool)
+    client_authentication_insecure_fallback = types.StrictBooleanAttribute()
     client_crl_container_ref = wtypes.StringType(max_length=255)
     allowed_cidrs = wtypes.wsattr([types.CidrType()])
     tls_ciphers = wtypes.StringType(max_length=2048)
@@ -228,7 +228,7 @@ class ListenerPUT(BaseListenerType):
     client_ca_tls_container_ref = wtypes.StringType(max_length=255)
     client_authentication = wtypes.wsattr(
         wtypes.Enum(str, *constants.SUPPORTED_CLIENT_AUTH_MODES))
-    client_authentication_insecure_fallback = wtypes.wsattr(bool)
+    client_authentication_insecure_fallback = types.StrictBooleanAttribute()
     client_crl_container_ref = wtypes.StringType(max_length=255)
     allowed_cidrs = wtypes.wsattr([types.CidrType()])
     tls_ciphers = wtypes.StringType(max_length=2048)
@@ -288,7 +288,7 @@ class ListenerSingleCreate(BaseListenerType):
     client_authentication = wtypes.wsattr(
         wtypes.Enum(str, *constants.SUPPORTED_CLIENT_AUTH_MODES),
         default=constants.CLIENT_AUTH_NONE)
-    client_authentication_insecure_fallback = wtypes.wsattr(bool)
+    client_authentication_insecure_fallback = types.StrictBooleanAttribute()
     client_crl_container_ref = wtypes.StringType(max_length=255)
     allowed_cidrs = wtypes.wsattr([types.CidrType()])
     tls_ciphers = wtypes.StringType(max_length=2048)

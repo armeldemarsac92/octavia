@@ -712,6 +712,35 @@ class TestUpdateHealthDb(base.TestCase):
         self.assertTrue(self.loadbalancer_repo.update.called)
         self.assertFalse(self.amphora_health_repo.replace.called)
 
+    def test_withdrawn_fallback_keeps_other_listener_health(self):
+        lb = self._make_fake_lb_health_dict(listener=True, pool=False)
+        lb['listeners']['withdrawn-fallback'] = {
+            'operating_status': constants.ERROR,
+            'enabled': True,
+            'protocol': constants.PROTOCOL_TERMINATED_HTTPS,
+            'frontend_fallback_closed': True,
+        }
+        self.amphora_repo.get_lb_for_health_update.return_value = lb
+        health = {
+            'id': self.FAKE_UUID_1,
+            'ver': 2,
+            'listeners': {'listener-id-1': {'status': constants.OPEN}},
+            'pools': {},
+            'recv_time': time.time(),
+        }
+        self.hm.update_health(health, '192.0.2.1')
+        self.amphora_health_repo.replace.assert_called_once()
+
+        # A stale report for the fallback listener must not hide a missing
+        # sibling or reset the deliberately withdrawn listener's status.
+        self.amphora_health_repo.replace.reset_mock()
+        self.listener_repo.update.reset_mock()
+        health['listeners'] = {'withdrawn-fallback': {'status': constants.OPEN}}
+        self.hm.update_health(health, '192.0.2.1')
+        self.amphora_health_repo.replace.assert_not_called()
+        self.assertEqual(['listener-id-1'], [
+            call.args[1] for call in self.listener_repo.update.call_args_list])
+
     def test_update_health_recv_time_stale(self):
         hb_interval = cfg.CONF.health_manager.heartbeat_interval
         health = {
