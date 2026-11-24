@@ -1,0 +1,17 @@
+---
+features:
+  - |
+    Octavia can activate multiple prepared HTTP L7 policies of one Amphora
+    listener with one combined HAProxy refresh per Amphora. The listener
+    activation API verifies the observed policy order, each selected policy
+    with its rules, and the parent listener and backend graph. While a batch
+    is pending, the same request can redeliver the operation it authorized.
+upgrade:
+  - |
+    The Amphora provider advertises ``l7policy_batch_activation_v1`` only
+    when it is allowed by
+    ``[api_settings] enabled_l7policy_batch_activation_providers``. The list
+    is empty by default. Add ``amphora`` after applying the database
+    migration and updating the regional Octavia API and all workers. Drain
+    pending activations before disabling the regional capability.
+    Workers must share the same database writer for the advisory render lock.

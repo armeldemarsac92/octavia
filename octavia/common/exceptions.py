@@ -268,6 +268,12 @@ class InvalidTopology(OctaviaException):
 
 
 # L7 policy and rule exceptions
+class L7PolicyActivationConflict(APIException):
+    msg = _('L7 policy activation snapshot does not match the current '
+            'listener or the group is not ready.')
+    code = 409
+
+
 class InvalidL7PolicyAction(APIException):
     msg = _('Invalid L7 Policy action specified: %(action)s')
     code = 400

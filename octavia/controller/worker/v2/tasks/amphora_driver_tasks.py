@@ -28,6 +28,7 @@ from octavia.amphorae.backends.agent import agent_jinja_cfg
 from octavia.amphorae.driver_exceptions import exceptions as driver_except
 from octavia.common import constants
 from octavia.common import exceptions
+from octavia.common import l7policy_activation
 from octavia.common import utils
 from octavia.controller.worker import task_utils as task_utilities
 from octavia.db import api as db_apis
@@ -160,8 +161,19 @@ class ListenersUpdate(BaseAmphoraTask):
 
     def execute(self, loadbalancer_id):
         """Execute updates per listener for an amphora."""
+        if CONF.api_settings.enabled_l7policy_batch_activation_providers:
+            with db_apis.listener_render_lock(loadbalancer_id) as lock:
+                if lock:
+                    self._update(loadbalancer_id, guard_batch=True)
+            return
+        self._update(loadbalancer_id, guard_batch=False)
+
+    def _update(self, loadbalancer_id, *, guard_batch):
         session = db_apis.get_session()
         with session.begin():
+            if (guard_batch and self.loadbalancer_repo.batch_owns_graph(
+                    session, loadbalancer_id)):
+                return
             loadbalancer = self.loadbalancer_repo.get(session,
                                                       id=loadbalancer_id)
         if loadbalancer:
@@ -244,6 +256,148 @@ class ApplyL7PolicyWithInitialRules(BaseAmphoraTask):
 
         if update_error is not None:
             raise update_error
+
+
+class ApplyL7PolicyActivation(BaseAmphoraTask):
+    """Recover and finish a durable group activation."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.repositories = repo.Repositories()
+
+    def _owned(self, session, delivery):
+        lb = self.loadbalancer_repo.get_for_update(
+            session, delivery['loadbalancer_id'])
+        operation = lb.l7policy_activation if lb else None
+        if (not operation or operation['id'] != delivery['id'] or
+                operation['phase'] not in l7policy_activation.PENDING):
+            return None
+        listener = self.listener_repo.get_for_update(
+            session, operation['listener_id'], show_deleted=False)
+        return lb, listener, operation
+
+    def _matches(self, session, lb, listener, request):
+        if (lb.provisioning_status != constants.PENDING_UPDATE or
+                listener.provisioning_status != constants.PENDING_UPDATE or
+                listener.load_balancer_id != lb.id or
+                listener.project_id != lb.project_id):
+            return False
+        try:
+            graph, policies = l7policy_activation.snapshot(
+                session, self.repositories, lb, listener, pending=True)
+        except exceptions.L7PolicyActivationConflict:
+            return False
+        expected = request['policies']
+        selected = [p for p in policies if p.id in expected]
+        return (
+            graph.graph_revision == request['graph_revision'] and
+            [p.id for p in policies] == request['order'] and
+            len(selected) == len(expected) and
+            all(p.provisioning_status == constants.PENDING_UPDATE and
+                not p.enabled and
+                all(rule.provisioning_status == constants.ACTIVE
+                    for rule in p.l7rules) and
+                l7policy_activation.policy_revision(p) == expected[p.id]
+                for p in selected))
+
+    @staticmethod
+    def _selected(lb, listener, operation):
+        return [policy for policy in listener.l7policies
+                if policy.id in operation['request']['policies'] and
+                policy.project_id == lb.project_id]
+
+    def _prepare(self, delivery, *, revert=False):
+        with db_apis.session().begin() as session:
+            owned = self._owned(session, delivery)
+            if not owned:
+                return None, False
+            lb, listener, operation = owned
+            restoring = (revert or operation['phase'] == 'reverting' or
+                         not self._matches(session, lb, listener,
+                                           operation['request']))
+            lb.l7policy_activation = {
+                **operation, 'phase': 'reverting' if restoring else
+                'rendering'}
+            policies = self._selected(lb, listener, operation)
+            if restoring:
+                for policy in policies:
+                    policy.enabled = False
+                return lb.to_data_model(), True
+            # Render a candidate graph while keeping the persisted flags
+            # disabled. A crash leaves the original operation replayable.
+            with session.no_autoflush:
+                for policy in policies:
+                    policy.enabled = True
+                try:
+                    candidate = lb.to_data_model()
+                finally:
+                    for policy in policies:
+                        policy.enabled = False
+            return candidate, False
+
+    def _finish(self, delivery, *, applied, healthy):
+        with db_apis.session().begin() as session:
+            owned = self._owned(session, delivery)
+            if not owned:
+                return True
+            lb, listener, operation = owned
+            if applied and not self._matches(session, lb, listener,
+                                             operation['request']):
+                return False
+            for policy in self._selected(lb, listener, operation):
+                policy.enabled = applied
+                policy.provisioning_status = (constants.ACTIVE if applied
+                                              else constants.ERROR)
+                policy.operating_status = (constants.ONLINE if applied
+                                           else constants.OFFLINE)
+            status = constants.ACTIVE if healthy else constants.ERROR
+            lb.provisioning_status = status
+            listener.provisioning_status = status
+            if applied:
+                phase = 'applied'
+            else:
+                # Keep the recovery authority when Amphora did not confirm
+                # the disabled graph. A redelivery can finish compensation.
+                phase = 'failed' if healthy else 'reverting'
+            result = {**operation, 'phase': phase}
+            if applied:
+                session.flush()
+                graph, _policies = l7policy_activation.snapshot(
+                    session, self.repositories, lb, listener)
+                result['applied_revision'] = graph.graph_revision
+            lb.l7policy_activation = result
+            return True
+
+    def _restore(self, delivery, graph):
+        try:
+            self.amphora_driver.update(graph, l7policy_activation=True)
+        except Exception:
+            self._finish(delivery, applied=False, healthy=False)
+            raise
+        self._finish(delivery, applied=False, healthy=True)
+
+    def execute(self, l7policy_activation):
+        delivery = l7policy_activation
+        with db_apis.listener_render_lock(delivery['loadbalancer_id']) as lock:
+            if not lock:
+                return
+            graph, restoring = self._prepare(delivery)
+            if graph is None:
+                return
+            if restoring:
+                self._restore(delivery, graph)
+                return
+            try:
+                self.amphora_driver.update(graph, l7policy_activation=True)
+            except Exception:
+                graph, _restoring = self._prepare(delivery, revert=True)
+                if graph is not None:
+                    self._restore(delivery, graph)
+                raise
+            if not self._finish(delivery, applied=True, healthy=True):
+                graph, _restoring = self._prepare(delivery, revert=True)
+                if graph is not None:
+                    self._restore(delivery, graph)
 
 
 class ListenersStart(BaseAmphoraTask):
