@@ -851,6 +851,9 @@ class ControllerWorker:
         :returns: None
         :raises L7PolicyNotFound: The referenced l7policy was not found
         """
+        if self._batch_owns_resource(
+                self._l7policy_repo, original_l7policy[constants.L7POLICY_ID]):
+            return
         try:
             db_l7policy = self._get_db_obj_until_pending_update(
                 self._l7policy_repo, original_l7policy[constants.L7POLICY_ID])
@@ -875,6 +878,17 @@ class ControllerWorker:
         self.run_flow(
             flow_utils.get_update_l7policy_flow,
             store=store)
+
+    def activate_l7policies(self, l7policy_activation):
+        self.run_flow(flow_utils.get_activate_l7policies_flow, store={
+            constants.L7POLICY_ACTIVATION: l7policy_activation})
+
+    @staticmethod
+    def _batch_owns_resource(resource_repo, resource_id):
+        if CONF.api_settings.enabled_l7policy_batch_activation_providers:
+            with db_apis.session().begin() as session:
+                return resource_repo.batch_owns_graph(session, resource_id)
+        return False
 
     @tenacity.retry(
         retry=tenacity.retry_if_exception_type(db_exceptions.NoResultFound),
@@ -957,6 +971,9 @@ class ControllerWorker:
         :returns: None
         :raises L7RuleNotFound: The referenced l7rule was not found
         """
+        if self._batch_owns_resource(
+                self._l7rule_repo, original_l7rule[constants.L7RULE_ID]):
+            return
         try:
             db_l7rule = self._get_db_obj_until_pending_update(
                 self._l7rule_repo, original_l7rule[constants.L7RULE_ID])

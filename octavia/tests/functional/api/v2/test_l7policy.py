@@ -22,6 +22,7 @@ from oslo_config import fixture as oslo_fixture
 from oslo_policy import policy as oslo_policy
 from oslo_utils import uuidutils
 
+from octavia.amphorae.drivers.haproxy import rest_api_driver
 from octavia.amphorae.drivers.noop_driver import driver as amphora_noop
 from octavia.api.drivers.noop_driver import driver as noop_driver
 from octavia.api.drivers import utils as driver_utils
@@ -31,6 +32,9 @@ from octavia.common import data_models
 from octavia.common import exceptions
 from octavia.common import policy
 from octavia.controller.queue.v2 import endpoints
+from octavia.controller.worker.v2.tasks import amphora_driver_tasks
+from octavia.controller.worker.v2.tasks import database_tasks
+from octavia.db import models
 from octavia.db import repositories
 from octavia.tests.common import constants as c_const
 from octavia.tests.common import sample_certs
@@ -76,6 +80,393 @@ class TestInitialL7Rules(base.BaseAPITest):
         body.update(overrides)
         return self.post(self.L7POLICIES_PATH, {'l7policy': body},
                          status=status).json
+
+    def _prepare_activation_group(self, **destination):
+        self.conf.config(group='api_settings',
+                         enabled_l7policy_batch_activation_providers=[
+                             'amphora'])
+        for suffix in ('first', 'second', 'unselected'):
+            policy = dict(redirect_prefix=f'https://{suffix}.test',
+                          tags=[f'owned-{suffix}'])
+            policy.update(destination)
+            self._post_policy(**policy)
+            endpoints.Endpoints().create_l7policy({}, **self.rpc.cast.call_args
+                                                  .kwargs)
+        self.rpc.cast.reset_mock()
+        path = (self.LISTENER_PATH.format(listener_id=self.listener_id) +
+                '/l7policy_activation')
+        return path, self._activation_request(path)
+
+    def _activation_request(self, path):
+        graph = self.get(path).json['l7policy_activation']
+        entries = graph['policies']
+        order = [item['policy']['id'] for item in entries]
+        refs = [{'id': item['policy']['id'], 'revision': item['revision']}
+                for item in entries[:2]]
+        return {'l7policy_activation': {
+            'expected_graph_revision': graph['graph_revision'],
+            'expected_order': order, 'policies': refs}}
+
+    def _activation_policies(self, path):
+        return [item['policy'] for item in self.get(path).json[
+            'l7policy_activation']['policies']]
+
+    def test_batch_activation_disabled(self):
+        path = (self.LISTENER_PATH.format(listener_id=self.listener_id) +
+                '/l7policy_activation')
+        capability_path = self.PROVIDERS_PATH + '/amphora/gateway_capabilities'
+        capabilities = self.get(capability_path).json['gateway_capabilities']
+        self.assertNotIn(
+            constants.GATEWAY_CAPABILITY_L7POLICY_BATCH_ACTIVATION,
+            capabilities)
+        self.get(path, status=501)
+        missing = [uuidutils.generate_uuid(), uuidutils.generate_uuid()]
+        body = {'expected_graph_revision': '1' * 64,
+                'expected_order': missing,
+                'policies': [{'id': id, 'revision': '1' * 64}
+                             for id in missing]}
+        self.post(path, {'l7policy_activation': body}, status=501)
+        body['policies'].pop()
+        self.post(path, {'l7policy_activation': body}, status=400)
+        self.rpc.cast.assert_not_called()
+        self.conf.config(group='api_settings',
+                         enabled_l7policy_batch_activation_providers=[
+                             'noop_driver'])
+        capabilities = self.get(self.PROVIDERS_PATH +
+                                '/noop_driver/gateway_capabilities').json
+        self.assertNotIn(
+            constants.GATEWAY_CAPABILITY_L7POLICY_BATCH_ACTIVATION,
+            capabilities['gateway_capabilities'])
+
+    def test_batch_activation_render_and_replay(self):
+        with self.session.begin():
+            self.create_amphora(uuidutils.generate_uuid(), self.lb_id,
+                                role=constants.ROLE_STANDALONE,
+                                lb_network_ip='192.0.2.100')
+        path, payload = self._prepare_activation_group()
+        capability_path = self.PROVIDERS_PATH + '/amphora/gateway_capabilities'
+        self.assertIn(constants.GATEWAY_CAPABILITY_L7POLICY_BATCH_ACTIVATION,
+                      self.get(capability_path).json['gateway_capabilities'])
+        self.post(path, payload, status=204)
+        self.rpc.cast.assert_called_once()
+        call = self.rpc.cast.call_args
+        self.assertEqual('activate_l7policies', call.args[1])
+        self.assertEqual(['PENDING_UPDATE', 'PENDING_UPDATE', 'ACTIVE'],
+                         [p['provisioning_status'] for p in
+                          self._activation_policies(path)])
+        self.post(path, payload, status=204)
+        self.assertEqual(call, self.rpc.cast.call_args)
+        rule_id = self._activation_policies(path)[0]['rules'][0]['id']
+        policy_id = payload['l7policy_activation']['expected_order'][0]
+        self.put(self.L7RULE_PATH.format(l7policy_id=policy_id,
+                                         l7rule_id=rule_id),
+                 {'rule': {'admin_state_up': False}}, status=409)
+
+        self.conf.config(group='controller_worker',
+                         amphora_driver='amphora_haproxy_rest_driver')
+        client = rest_api_driver.AmphoraAPIClient1_0
+        with (mock.patch.object(rest_api_driver.AmphoraAPIClientBase,
+                                'get_api_version',
+                                return_value={'api_version': '1.0'}),
+              mock.patch.object(client, 'get_info', return_value={
+                  'haproxy_version': '3.0.19'}),
+              mock.patch.object(client, 'get_details', return_value={}),
+              mock.patch.object(client, 'upload_config') as upload,
+              mock.patch.object(client, '_action') as action):
+            endpoints.Endpoints().activate_l7policies({}, **call.kwargs)
+            endpoints.Endpoints().activate_l7policies({}, **call.kwargs)
+        upload.assert_called_once()
+        action.assert_called_once()
+        self.assertEqual(('reload', self.lb_id),
+                         (action.call_args.args[0], action.call_args.args[2]))
+        config = upload.call_args.args[2]
+        self.assertIn('https://first.test', config)
+        self.assertIn('https://second.test', config)
+        self.assertNotIn('https://unselected.test', config)
+        self.assertLess(config.index('https://first.test'),
+                        config.index('https://second.test'))
+        self.post(path, payload, status=204)
+        self.assertEqual(2, self.rpc.cast.call_count)
+        policies = self._activation_policies(path)
+        self.assertEqual([True, True, False],
+                         [policy['admin_state_up'] for policy in policies])
+        self.assertEqual([constants.ACTIVE] * 3,
+                         [p['provisioning_status'] for p in policies])
+        self.assertEqual(payload['l7policy_activation']['expected_order'],
+                         [policy['id'] for policy in policies])
+        with self.session.begin():
+            lb = self.lb_repo.get_for_update(self.session, self.lb_id)
+            self.assertEqual('applied', lb.l7policy_activation['phase'])
+            dto = driver_utils.db_loadbalancer_to_provider_loadbalancer(lb)
+            self.assertEqual(self.lb_id, dto.loadbalancer_id)
+            self.assertNotIn('l7policy_activation', lb.to_dict())
+        partial = driver_utils.lb_dict_to_provider_dict({
+            'id': self.lb_id, 'l7policy_activation': {},
+            'l7policy_graph_generation': 'private',
+        })
+        self.assertEqual({'loadbalancer_id': self.lb_id}, partial)
+
+    def test_batch_activation_rejects_stale_or_foreign_state(self):
+        path, payload = self._prepare_activation_group()
+        activation = payload['l7policy_activation']
+        order = activation['expected_order']
+        self.post(path, {'l7policy_activation': {
+            **activation, 'expected_order': order[::-1],
+        }}, status=409)
+        other_lb = self.create_load_balancer(
+            uuidutils.generate_uuid(), provider='amphora',
+            project_id=uuidutils.generate_uuid())['loadbalancer']
+        self.set_lb_status(other_lb['id'])
+        other_listener = self.create_listener('HTTP', 80, lb_id=other_lb['id'])
+        self.set_lb_status(other_lb['id'])
+        foreign = self._post_policy(
+            listener_id=other_listener['listener']['id'])
+        endpoints.Endpoints().create_l7policy({}, **self.rpc.cast.call_args
+                                              .kwargs)
+        self.rpc.cast.reset_mock()
+        self.post(path, {'l7policy_activation': {
+            **activation, 'policies': [
+                activation['policies'][0],
+                {'id': foreign['l7policy']['id'], 'revision': '1' * 64}],
+        }}, status=409)
+        rule_id = self._activation_policies(path)[0]['rules'][0]['id']
+        self.put(self.L7RULE_PATH.format(l7policy_id=order[0],
+                                         l7rule_id=rule_id),
+                 {'rule': {'value': 'changed.test'}})
+        self.set_lb_status(self.lb_id)
+        self.rpc.cast.reset_mock()
+        self.post(path, payload, status=409)
+        self.rpc.cast.assert_not_called()
+        fresh = self.get(path).json['l7policy_activation']
+        self.assertNotEqual(activation['policies'][0]['revision'],
+                            fresh['policies'][0]['revision'])
+        activation['expected_graph_revision'] = fresh['graph_revision']
+        revision = fresh['policies'][0]['revision']
+        activation['policies'][0]['revision'] = revision
+        self.put(self.L7POLICY_PATH.format(l7policy_id=order[0]),
+                 {'l7policy': {'redirect_prefix': 'https://changed.test'}})
+        self.set_lb_status(self.lb_id)
+        self.rpc.cast.reset_mock()
+        self.post(path, payload, status=409)
+        self.rpc.cast.assert_not_called()
+        self.assertEqual([False] * 3,
+                         [entry['admin_state_up'] for entry in
+                          self._activation_policies(path)])
+        self.assertEqual(constants.ACTIVE, self.get(self.LB_PATH.format(
+            lb_id=self.lb_id)).json['loadbalancer']['provisioning_status'])
+
+    def test_batch_activation_failure_restores_the_group(self):
+        path, payload = self._prepare_activation_group()
+        with mock.patch.object(self.rpc, 'cast',
+                               side_effect=RuntimeError('dispatch failed')):
+            self.post(path, payload, status=500)
+        self.assertEqual([constants.ACTIVE] * 3, [p['provisioning_status']
+                                                  for p in
+                                                  self._activation_policies(
+                                                      path)])
+        self.post(path, payload, status=204)
+        call = self.rpc.cast.call_args
+        with mock.patch.object(amphora_noop.NoopAmphoraLoadBalancerDriver,
+                               'update', side_effect=[
+                                   RuntimeError('reload failed'), None,
+                               ]) as update:
+            self.assertRaises(RuntimeError,
+                              endpoints.Endpoints().activate_l7policies,
+                              {}, **call.kwargs)
+        self.assertEqual(2, update.call_count)
+        restored = update.call_args.args[0].listeners[0].l7policies
+        self.assertEqual([False] * 3, [policy.enabled for policy in restored])
+        self.assertEqual([constants.ERROR, constants.ERROR, constants.ACTIVE],
+                         [policy['provisioning_status']
+                          for policy in self._activation_policies(path)])
+        self.assertEqual(constants.ACTIVE, self.get_listener(self.listener_id)[
+            'listener']['provisioning_status'])
+        self.post(path, payload, status=409)
+
+    def test_batch_activation_retries_unconfirmed_restoration(self):
+        path, payload = self._prepare_activation_group()
+        self.post(path, payload, status=204)
+        call = self.rpc.cast.call_args
+        worker = endpoints.Endpoints()
+        with mock.patch.object(amphora_noop.NoopAmphoraLoadBalancerDriver,
+                               'update', side_effect=[
+                                   RuntimeError('reload failed'),
+                                   RuntimeError('restore failed'), None,
+                               ]) as update:
+            self.assertRaises(RuntimeError, worker.activate_l7policies,
+                              {}, **call.kwargs)
+            listener = self.get_listener(self.listener_id)['listener']
+            self.assertEqual(constants.ERROR, listener['provisioning_status'])
+            self.post(path, payload, status=204)
+            self.assertEqual(call, self.rpc.cast.call_args)
+            worker.activate_l7policies({}, **call.kwargs)
+        self.assertEqual(3, update.call_count)
+        policies = update.call_args.args[0].listeners[0].l7policies
+        self.assertTrue(all(not policy.enabled for policy in policies))
+        listener = self.get_listener(self.listener_id)['listener']
+        self.assertEqual(constants.ACTIVE, listener['provisioning_status'])
+        self.post(path, payload, status=409)
+
+    def test_batch_activation_replays_after_interruption(self):
+        path, payload = self._prepare_activation_group()
+        self.post(path, payload, status=204)
+        delivery = self.rpc.cast.call_args
+        self.post(path, payload, status=204)
+        self.assertEqual(delivery, self.rpc.cast.call_args)
+
+        def reload_candidate(candidate, **kwargs):
+            rendered = candidate.listeners[0].l7policies
+            self.assertEqual([True, True, False],
+                             [p.enabled for p in rendered])
+            self.assertEqual([False] * 3,
+                             [p['admin_state_up'] for p in
+                              self._activation_policies(path)])
+
+        with (mock.patch.object(amphora_noop.NoopAmphoraLoadBalancerDriver,
+                                'update', side_effect=reload_candidate),
+              mock.patch.object(amphora_driver_tasks.ApplyL7PolicyActivation,
+                                '_finish', side_effect=RuntimeError(
+                                    'worker interrupted after reload'))):
+            self.assertRaises(RuntimeError,
+                              endpoints.Endpoints().activate_l7policies,
+                              {}, **delivery.kwargs)
+        self.assertEqual([False] * 3, [p['admin_state_up'] for p in
+                                       self._activation_policies(path)])
+        self.post(path, payload, status=204)
+        self.assertEqual(delivery, self.rpc.cast.call_args)
+        endpoints.Endpoints().activate_l7policies({}, **delivery.kwargs)
+        self.assertEqual([True, True, False],
+                         [p['admin_state_up'] for p in
+                          self._activation_policies(path)])
+        self.rpc.cast.reset_mock()
+        self.post(path, payload, status=204)
+        self.rpc.cast.assert_not_called()
+
+    def test_batch_activation_cannot_reopen_a_withdrawn_group(self):
+        path, payload = self._prepare_activation_group()
+        self.post(path, payload, status=204)
+        worker = endpoints.Endpoints()
+        worker.activate_l7policies({}, **self.rpc.cast.call_args.kwargs)
+        selected = payload['l7policy_activation']['policies']
+        for enabled in (False, True, False):
+            for item in selected:
+                self.put(self.L7POLICY_PATH.format(l7policy_id=item['id']),
+                         {'l7policy': {'admin_state_up': enabled}})
+                worker.update_l7policy({}, **self.rpc.cast.call_args.kwargs)
+        self.assertEqual([False] * 3, [p['admin_state_up'] for p in
+                                       self._activation_policies(path)])
+        self.rpc.cast.reset_mock()
+        self.post(path, payload, status=409)
+        self.rpc.cast.assert_not_called()
+        self.post(path, self._activation_request(path), status=204)
+
+    def test_batch_activation_detects_listener_and_destination_changes(self):
+        pool = self.create_pool(self.lb_id, 'HTTP', 'ROUND_ROBIN')['pool']
+        self.set_lb_status(self.lb_id)
+        member = self.create_member(pool['id'], '192.0.2.4', 8000)['member']
+        self.set_lb_status(self.lb_id)
+        monitor = self.create_health_monitor(
+            pool['id'], 'HTTP', 5, 2, 2, 2)['healthmonitor']
+        self.set_lb_status(self.lb_id)
+        path, payload = self._prepare_activation_group(
+            action='REDIRECT_TO_POOL', redirect_pool_id=pool['id'],
+            redirect_prefix=None)
+        graph = self.get(path).json['l7policy_activation']
+        self.assertEqual(self.lb_id, graph['loadbalancer']['id'])
+        self.assertEqual(self.listener_id, graph['listener']['id'])
+        destination, = graph['pools']
+        self.assertEqual(pool['id'], destination['pool']['id'])
+        self.assertEqual(monitor['id'],
+                         destination['pool']['healthmonitor']['id'])
+        self.assertEqual([{'id': pool['id']}],
+                         destination['pool']['healthmonitor']['pools'])
+        actual_member, = destination['members']
+        self.assertEqual(member['id'], actual_member['id'])
+        self.assertEqual(pool['id'], actual_member['pool_id'])
+        self.assertEqual(8000, actual_member['protocol_port'])
+        self.put(self.MEMBER_PATH.format(pool_id=pool['id'],
+                                         member_id=member['id']),
+                 {'member': {'weight': 2}})
+        self.set_lb_status(self.lb_id)
+        self.post(path, payload, status=409)
+        payload = self._activation_request(path)
+        self.put(self.LISTENER_PATH.format(listener_id=self.listener_id),
+                 {'listener': {'tags': ['new-owner']}})
+        self.set_lb_status(self.lb_id)
+        self.rpc.cast.reset_mock()
+        self.post(path, payload, status=409)
+        self.rpc.cast.assert_not_called()
+
+    def test_batch_activation_fences_an_old_update_flow(self):
+        path, _payload = self._prepare_activation_group()
+        policy_id = self._activation_policies(path)[0]['id']
+        self.put(self.L7POLICY_PATH.format(l7policy_id=policy_id),
+                 {'l7policy': {'redirect_prefix': 'https://withdrawn.test'}})
+        previous = self.rpc.cast.call_args.kwargs
+        self.set_lb_status(self.lb_id)
+        self.put(self.L7POLICY_PATH.format(l7policy_id=policy_id),
+                 {'l7policy': {'redirect_prefix': 'https://first.test'}})
+        self.set_lb_status(self.lb_id)
+        self.post(path, self._activation_request(path), status=204)
+        batch = self.rpc.cast.call_args.kwargs
+        worker = endpoints.Endpoints()
+        worker.update_l7policy({}, **previous)
+        # A flow already queued on a jobboard may enter its write step
+        # directly. Its persisted payload has no authority over the batch.
+        database_tasks.UpdateL7PolicyInDB().execute(
+            previous['original_l7policy'], previous['l7policy_updates'])
+        still_pending = self._activation_policies(path)[0]
+        self.assertEqual('https://first.test',
+                         still_pending['redirect_prefix'])
+        self.assertEqual(constants.PENDING_UPDATE,
+                         still_pending['provisioning_status'])
+        worker.activate_l7policies({}, **batch)
+        self.assertTrue(self._activation_policies(path)[0]['admin_state_up'])
+
+    def test_batch_activation_restores_an_invalidated_pending_snapshot(self):
+        path, payload = self._prepare_activation_group()
+        self.post(path, payload, status=204)
+        delivery = self.rpc.cast.call_args.kwargs
+        policy_id = payload['l7policy_activation']['policies'][0]['id']
+        # Emulate an obsolete writer that bypasses the repository guard.
+        with self.session.begin():
+            self.session.get(models.L7Policy, policy_id).enabled = True
+        with mock.patch.object(amphora_noop.NoopAmphoraLoadBalancerDriver,
+                               'update') as update:
+            endpoints.Endpoints().activate_l7policies({}, **delivery)
+        update.assert_called_once()
+        rendered = update.call_args.args[0].listeners[0].l7policies
+        self.assertTrue(all(not policy.enabled for policy in rendered))
+        self.assertEqual([constants.ERROR, constants.ERROR, constants.ACTIVE],
+                         [p['provisioning_status'] for p in
+                          self._activation_policies(path)])
+
+    @mock.patch('octavia.common.tls_utils.cert_parser.load_certificates_data')
+    def test_batch_activation_preserves_ordinary_https_put(self, cert_data):
+        self.conf.config(group='api_settings',
+                         enabled_l7policy_batch_activation_providers=[
+                             'amphora'])
+        cert_data.return_value = {
+            'tls_cert': data_models.TLSContainer(certificate='certificate')}
+        self.cert_manager_mock().get_secret.return_value = (
+            sample_certs.X509_CA_CERT)
+        tls = uuidutils.generate_uuid()
+        ca = uuidutils.generate_uuid()
+        listener = self.create_listener(
+            constants.PROTOCOL_TERMINATED_HTTPS, 443, self.lb_id,
+            default_tls_container_ref=tls,
+            client_ca_tls_container_ref=ca)['listener']
+        self.set_lb_status(self.lb_id)
+        self.rpc.cast.reset_mock()
+        path = self.LISTENER_PATH.format(listener_id=listener['id'])
+        payload = {'listener': {'tags': ['ordinary-put'],
+                                'connection_limit': 5}}
+        updated = self.put(path, payload).json['listener']
+        self.assertEqual(tls, updated['default_tls_container_ref'])
+        self.assertEqual(ca, updated['client_ca_tls_container_ref'])
+        self.assertEqual(5, updated['connection_limit'])
+        self.rpc.cast.assert_called_once()
+        self.assertEqual('update_listener', self.rpc.cast.call_args.args[1])
 
     def test_create_initial_rules_in_one_worker_operation(self):
         response = self._post_policy()['l7policy']

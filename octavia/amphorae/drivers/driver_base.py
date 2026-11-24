@@ -41,12 +41,15 @@ class AmphoraLoadBalancerDriver(metaclass=abc.ABCMeta):
         """
 
     @abc.abstractmethod
-    def update(self, loadbalancer):
+    def update(self, loadbalancer, *, l7policy_activation=False):
         """Update the amphora with a new configuration.
 
         :param loadbalancer: loadbalancer object, need to use its
                              vip.ip_address property
         :type loadbalancer: octavia.db.models.LoadBalancer
+        :param l7policy_activation: Update the combined HAProxy configuration
+                                    for a group activation, failing if any
+                                    of its listeners cannot be rendered.
         :returns: None
 
         At this moment, we just build the basic structure for testing, will

@@ -12,7 +12,12 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import contextlib
+import threading
 import time
+import weakref
+
+from sqlalchemy import text
 
 from sqlalchemy.sql.expression import select
 
@@ -20,8 +25,12 @@ from oslo_config import cfg
 from oslo_db.sqlalchemy import enginefacade
 from oslo_log import log as logging
 
+from octavia.i18n import _
+
 LOG = logging.getLogger(__name__)
 _FACADE = None
+_SQLITE_RENDER_LOCKS = weakref.WeakValueDictionary()
+_SQLITE_RENDER_LOCKS_GUARD = threading.Lock()
 
 
 def _create_facade_lazily():
@@ -58,6 +67,40 @@ def get_session():
 
 def session():
     return _get_sessionmaker()
+
+
+@contextlib.contextmanager
+def listener_render_lock(loadbalancer_id):
+    """Serialize worker renders without holding an open write transaction."""
+    name = 'octavia-l7:' + loadbalancer_id
+    engine = get_engine()
+    if engine.dialect.name == 'sqlite':
+        with _SQLITE_RENDER_LOCKS_GUARD:
+            lock = _SQLITE_RENDER_LOCKS.setdefault(name, threading.Lock())
+        acquired = lock.acquire(blocking=False)
+        try:
+            yield acquired
+        finally:
+            if acquired:
+                lock.release()
+        return
+    with engine.connect().execution_options(isolation_level='AUTOCOMMIT') as c:
+        if engine.dialect.name in ('mysql', 'mariadb'):
+            lock_sql = 'SELECT GET_LOCK(:name, 0)'
+            unlock_sql = 'SELECT RELEASE_LOCK(:name)'
+        elif engine.dialect.name == 'postgresql':
+            lock_sql = ('SELECT pg_try_advisory_lock('
+                        'hashtextextended(:name, 0))')
+            unlock_sql = ('SELECT pg_advisory_unlock('
+                          'hashtextextended(:name, 0))')
+        else:
+            raise RuntimeError(_('Unsupported activation database dialect'))
+        acquired = bool(c.execute(text(lock_sql), {'name': name}).scalar())
+        try:
+            yield acquired
+        finally:
+            if acquired:
+                c.execute(text(unlock_sql), {'name': name})
 
 
 def wait_for_connection(exit_event):

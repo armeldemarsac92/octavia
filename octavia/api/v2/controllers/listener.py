@@ -963,6 +963,8 @@ class ListenersController(base.BaseController):
         """
         if id and remainder and remainder[0] == 'stats':
             return StatisticsController(listener_id=id), remainder[1:]
+        if id and remainder and remainder[0] == 'l7policy_activation':
+            return l7policy.L7PolicyActivationController(id), remainder[1:]
         return None
 
 

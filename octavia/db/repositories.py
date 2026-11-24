@@ -68,6 +68,29 @@ def _pool_has_gateway_backend_tls_tag():
 
 
 class BaseRepository:
+    # Relationships from a mutable resource to its load balancer.
+    activation_parent = None
+
+    def batch_owns_graph(self, session, id):
+        api = CONF.api_settings
+        providers = api.enabled_l7policy_batch_activation_providers
+        if self.activation_parent is None or not providers:
+            return False
+        model = self.model_class
+        query = session.query(models.LoadBalancer.id).select_from(model)
+        query = query.filter(model.id == id)
+        for relationship in self.activation_parent:
+            relation = getattr(model, relationship)
+            query = query.join(relation)
+            model = relation.property.mapper.class_
+        lb_id = query.scalar()
+        if lb_id is None:
+            return False
+        lb = LoadBalancerRepository().get_for_update(session, lb_id)
+        # A terminal receipt also guards against old deliveries. New CRUD
+        # admissions invalidate it under the same load balancer row lock.
+        return lb is not None and lb.l7policy_activation is not None
+
     model_class = None
 
     def count(self, session, **filters):
@@ -109,6 +132,8 @@ class BaseRepository:
         :returns: None
         :raises: sqlalchemy.orm.exc.NoResultFound
         """
+        if 'id' in filters and self.batch_owns_graph(session, filters['id']):
+            raise exceptions.L7PolicyActivationConflict()
         model = session.query(self.model_class).filter_by(**filters).one()
         session.delete(model)
         session.flush()
@@ -126,6 +151,9 @@ class BaseRepository:
         :param model_kwargs: Entity attributes that should be updates.
         :returns: octavia.common.data_model
         """
+        if (set(model_kwargs) != {'operating_status'} and
+                self.batch_owns_graph(session, id)):
+            return
         tags = model_kwargs.pop('tags', None)
         if tags is not None:
             resource = session.get(self.model_class, id)
@@ -794,6 +822,7 @@ class Repositories:
 
 class LoadBalancerRepository(BaseRepository):
     model_class = models.LoadBalancer
+    activation_parent = ()
 
     def get_all_API_list(self, session, pagination_helper=None, **filters):
         """Get a list of load balancers for the API list call.
@@ -828,6 +857,11 @@ class LoadBalancerRepository(BaseRepository):
         return (session.query(self.model_class.id).filter_by(id=id)
                 .with_for_update().scalar())
 
+    def get_for_update(self, session, id):
+        return (session.query(self.model_class).filter_by(id=id)
+                .options(lazyload('*')).populate_existing()
+                .with_for_update().one_or_none())
+
     def test_and_set_provisioning_status(self, session, id, status,
                                          raise_exception=False):
         """Tests and sets a load balancer and provisioning status.
@@ -852,11 +886,13 @@ class LoadBalancerRepository(BaseRepository):
             consts.DELETABLE_STATUSES
             if is_delete else consts.MUTABLE_STATUSES
         )
-        if lb.provisioning_status not in acceptable_statuses:
+        if (lb.provisioning_status not in acceptable_statuses or
+                self._batch_pending(lb)):
             if raise_exception:
                 raise exceptions.ImmutableObject(
                     resource='Load Balancer', id=id)
             return False
+        self._invalidate_batch(lb)
         lb.provisioning_status = status
         session.add(lb)
         return True
@@ -880,14 +916,28 @@ class LoadBalancerRepository(BaseRepository):
               .populate_existing()
               .with_for_update()
               .filter_by(id=id).one())
-        if lb.provisioning_status not in consts.FAILOVERABLE_STATUSES:
+        if (lb.provisioning_status not in consts.FAILOVERABLE_STATUSES or
+                self._batch_pending(lb)):
             if raise_exception:
                 raise exceptions.ImmutableObject(
                     resource='Load Balancer', id=id)
             return False
+        self._invalidate_batch(lb)
         lb.provisioning_status = status
         session.add(lb)
         return True
+
+    @staticmethod
+    def _batch_pending(lb):
+        return (lb.l7policy_activation or {}).get('phase') in (
+            'pending', 'rendering', 'reverting')
+
+    @staticmethod
+    def _invalidate_batch(lb):
+        if (lb.l7policy_graph_generation or lb.l7policy_activation or
+                CONF.api_settings.enabled_l7policy_batch_activation_providers):
+            lb.l7policy_graph_generation = uuidutils.generate_uuid()
+            lb.l7policy_activation = None
 
 
 class VipRepository(BaseRepository):
@@ -931,6 +981,7 @@ class AdditionalVipRepository(BaseRepository):
 
 class HealthMonitorRepository(BaseRepository):
     model_class = models.HealthMonitor
+    activation_parent = ('pool', 'load_balancer')
 
     def get_all_API_list(self, session, pagination_helper=None, **filters):
         """Get a list of health monitors for the API list call.
@@ -988,6 +1039,7 @@ class ListenerCidrRepository(BaseRepository):
 
 class PoolRepository(BaseRepository):
     model_class = models.Pool
+    activation_parent = ('load_balancer',)
 
     def set_backend_tls_pool_statuses(self, session, *, closed, recovered):
         pool = self.model_class
@@ -1007,6 +1059,8 @@ class PoolRepository(BaseRepository):
                     {'provisioning_status': consts.ACTIVE})
 
     def mark_active(self, session, id):
+        if self.batch_owns_graph(session, id):
+            return
         pool = self.model_class
         # The Amphora driver records closed protected pools after applying
         # the safe configuration. A flow must not turn those errors ACTIVE.
@@ -1085,6 +1139,7 @@ class PoolRepository(BaseRepository):
 
 class MemberRepository(BaseRepository):
     model_class = models.Member
+    activation_parent = ('pool', 'load_balancer')
 
     def get_all_API_list(self, session, pagination_helper=None, **filters):
         """Get a list of members for the API list call.
@@ -1126,6 +1181,7 @@ class MemberRepository(BaseRepository):
 
 class ListenerRepository(BaseRepository):
     model_class = models.Listener
+    activation_parent = ('load_balancer',)
 
     def get_active_tcp_tls_listeners(self, session, load_balancer_id):
         listener = self.model_class
@@ -1233,6 +1289,9 @@ class ListenerRepository(BaseRepository):
         return bool(listener.default_pool)
 
     def update(self, session, id, **model_kwargs):
+        if (set(model_kwargs) != {'operating_status'} and
+                self.batch_owns_graph(session, id)):
+            return
         listener_db = session.query(self.model_class).filter_by(
             id=id).first()
         if not listener_db:
@@ -1298,6 +1357,8 @@ class ListenerRepository(BaseRepository):
 
     def prov_status_active_if_not_error(self, session, listener_id):
         """Update provisioning_status to ACTIVE if not already in ERROR."""
+        if self.batch_owns_graph(session, listener_id):
+            return
         (session.query(self.model_class).filter_by(id=listener_id).
          # Don't mark ERROR or already ACTIVE as ACTIVE
          filter(~self.model_class.provisioning_status.in_(
@@ -1878,6 +1939,7 @@ class VRRPGroupRepository(BaseRepository):
 
 class L7RuleRepository(BaseRepository):
     model_class = models.L7Rule
+    activation_parent = ('l7policy', 'listener', 'load_balancer')
 
     def has_other_enabled_rules(self, session, rule):
         model = self.model_class
@@ -1910,6 +1972,8 @@ class L7RuleRepository(BaseRepository):
             query_options=query_options, **filters)
 
     def update(self, session, id, **model_kwargs):
+        if self.batch_owns_graph(session, id):
+            return self.get(session, id=id)
         l7rule_db = session.query(self.model_class).filter_by(
             id=id).first()
         if not l7rule_db:
@@ -1954,6 +2018,48 @@ class L7RuleRepository(BaseRepository):
 
 class L7PolicyRepository(BaseRepository):
     model_class = models.L7Policy
+    activation_parent = ('listener', 'load_balancer')
+
+    def get_listener_policies_for_update(self, session, listener_id):
+        policy = self.model_class
+        return (session.query(policy).filter_by(listener_id=listener_id)
+                .filter(policy.provisioning_status != consts.DELETED)
+                .options(lazyload('*')).order_by(policy.position, policy.id)
+                .populate_existing().with_for_update().all())
+
+    def load_activation_references(self, session, policies):
+        """Refresh the child rows needed by the activation precondition."""
+        if not policies:
+            return
+        policies_by_id = {policy.id: policy for policy in policies}
+        rule_model = models.L7Rule
+        rules = (session.query(rule_model)
+                 .filter(rule_model.l7policy_id.in_(policies_by_id),
+                         rule_model.provisioning_status != consts.DELETED)
+                 .options(lazyload('*')).order_by(rule_model.id)
+                 .populate_existing().with_for_update().all())
+        target_model = models.L7PolicyTarget
+        targets = (session.query(target_model)
+                   .filter(target_model.l7policy_id.in_(policies_by_id))
+                   .order_by(target_model.position).populate_existing()
+                   .with_for_update().all())
+        tags_model = base_models.Tags
+        tagged_objects = {**policies_by_id,
+                          **{rule.id: rule for rule in rules}}
+        tags = (session.query(tags_model)
+                .filter(tags_model.resource_id.in_(tagged_objects))
+                .order_by(tags_model.tag).populate_existing()
+                .with_for_update().all())
+        for rows, parents, parent_key, relationship in (
+                (rules, policies_by_id, 'l7policy_id', 'l7rules'),
+                (targets, policies_by_id, 'l7policy_id', '_targets'),
+                (tags, tagged_objects, 'resource_id', '_tags')):
+            by_parent = {id: [] for id in parents}
+            for row in rows:
+                by_parent[getattr(row, parent_key)].append(row)
+            for id, parent in parents.items():
+                attributes.set_committed_value(parent, relationship,
+                                               by_parent[id])
 
     def _pool_check(self, session, pool_id, lb_id, project_id):
         """Sanity checks for the redirect_pool if specified."""
@@ -2440,6 +2546,8 @@ class L7PolicyRepository(BaseRepository):
         return policy
 
     def update(self, session, id, **model_kwargs):
+        if self.batch_owns_graph(session, id):
+            return self.get(session, id=id)
         l7policy_db = self.get_for_update(session, id)
 
         # Necessary to work around unexpected / idiotic behavior of
@@ -2547,6 +2655,8 @@ class L7PolicyRepository(BaseRepository):
         return self.get(session, id=l7policy.id)
 
     def delete(self, session, id, **filters):
+        if self.batch_owns_graph(session, id):
+            raise exceptions.L7PolicyActivationConflict()
         l7policy_db = session.query(self.model_class).filter_by(
             id=id).first()
         if not l7policy_db:
