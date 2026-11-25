@@ -1464,6 +1464,10 @@ class UpdateListenerInDB(BaseDatabaseTask):
         :returns: None
         """
 
+        # The API stores these along with their pool FKs before the
+        # render. A retried worker must not restore an older filter chain.
+        update_dict = {key: value for key, value in update_dict.items()
+                       if key != 'request_filter_sections'}
         LOG.debug("Update DB for listener id: %s ",
                   listener[constants.LISTENER_ID])
         with db_apis.session().begin() as session:

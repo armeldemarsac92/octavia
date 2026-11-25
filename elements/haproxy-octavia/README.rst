@@ -17,7 +17,8 @@ Build the binary on the target image distribution and architecture::
 
 The script checks the HAProxy 3.0.19 tarball and each patch by SHA-256. It
 applies the strict DNS, required HTTP/2 ALPN, explicit SAN, HTTP policy and
-HTTP mirror patches, in that order, with zero fuzz.
+HTTP mirror and listener authorization patches, in that order, with zero
+fuzz.
 
 Set ``DIB_OCTAVIA_HAPROXY_BINARY`` to the absolute path of the resulting binary
 when running Octavia's ``diskimage-create.sh``. The element checks the binary in
@@ -129,3 +130,37 @@ HAProxy stats socket.
 Run the loopback qualification with OpenSSL, Python and the ``h2`` package::
 
     python elements/haproxy-octavia/test-request-mirror.py /path/to/haproxy -v
+
+
+HTTP listener authorization
+===========================
+
+The ``listener_request_filters_v1`` capability supports ordered HTTP
+authorization checks before route selection. Install the updated database,
+octavia-lib, API, workers and Amphora agent and HAProxy image before enabling
+``[api_settings] enabled_listener_request_filter_providers`` for Amphora.
+The agent confirms the running image's configured HAProxy binary includes the
+authorization filter. Existing listeners without request filters still render
+on older images. Keep the updated runtime available while clearing filters on
+existing listeners before rolling back the image to a version without the action.
+
+An authorizer is a plain HTTP pool on the same load balancer and project with
+the ``gw-api-listener-auth-pool-v1`` tag. The DIB element creates
+``/run/octavia/listener-auth`` through systemd-tmpfiles. HAProxy opens a private
+mode-600 Unix listener per authorizer pool and uses the pool's members and
+health checks. It sends the request method and prefixed path with query
+parameters, the original Host and Authorization when present, selected extra
+request headers and Content-Length 0. HAProxy uses the response status and
+headers and stops reading at the end of the headers.
+
+Only status 200 advances the chain. An authorization failure responds with 401
+or 403. Unavailable authorizers and exhausted checks respond with 503. Each
+check has a three-second deadline and a worker process can run at most 256
+checks concurrently. Authorized header values can affect the single ensuing
+route selection. Host, authority and HTTP framing retain their original values.
+
+Run the loopback qualification from the Octavia source tree with its Python
+runtime dependencies, OpenSSL, a curl build with HTTP/2 and the patched
+HAProxy installed::
+
+    PYTHONPATH=. python elements/haproxy-octavia/test-listener-auth.py         /path/to/haproxy -v

@@ -107,13 +107,14 @@ class HAProxyQuery:
                     consts.HAPROXY_TCP_TLS_MIXED_PREFIX)) and
                 not (stat['svname'] == 'FRONTEND' and
                      stat['pxname'].startswith(
-                         consts.HAPROXY_MIRROR_PROXY_PREFIX))]
+                         (consts.HAPROXY_MIRROR_PROXY_PREFIX,
+                          consts.HAPROXY_LISTENER_AUTH_PROXY_PREFIX)))]
 
     def get_pool_status(self):
         """Get status for each server and the pool as a whole.
 
         :returns: pool status and members keyed by pool and listener IDs,
-                  or by pool ID for a mirror-only destination.
+                  or by pool ID for a private destination.
         """
 
         results = self.show_stat(object_type=6)  # servers + pool
@@ -121,11 +122,13 @@ class HAProxyQuery:
         public_pools = {line['pxname'].partition(':')[0] for line in results
                         if ':' in line['pxname']}
         final_results = {}
-        prefix = consts.HAPROXY_MIRROR_PROXY_PREFIX
+        prefixes = (consts.HAPROXY_MIRROR_PROXY_PREFIX,
+                    consts.HAPROXY_LISTENER_AUTH_PROXY_PREFIX)
         for line in results:
             proxy = line['pxname']
             pool_id, _, listener_id = proxy.partition(':')
-            if proxy.startswith(prefix):
+            prefix = next((p for p in prefixes if proxy.startswith(p)), None)
+            if prefix:
                 pool_id = proxy.removeprefix(prefix)
                 if pool_id in public_pools:
                     continue

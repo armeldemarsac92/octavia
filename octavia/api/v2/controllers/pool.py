@@ -780,6 +780,17 @@ class PoolsController(base.BaseController):
             current = self.repositories.pool.get_transport_for_update(
                 context.session, id)
             self._validate_backend_transport_update(pool, current, driver)
+            listener_repo = self.repositories.listener
+            if (pool.tls_enabled is True or pool.backend_h2c is True or
+                    (pool.tags is not wtypes.Unset and
+                     constants.GATEWAY_LISTENER_AUTH_POOL_TAG not in
+                     (pool.tags or []))):
+                filter_listener_id = (
+                    listener_repo.get_request_filter_listener_using_pool(
+                        context.session, id))
+                if filter_listener_id:
+                    raise exceptions.PoolInUseByListenerRequestFilter(
+                        id=id, listener_id=filter_listener_id)
             self._validate_pool_PUT(pool, current)
             self._validate_tcp_listener_pool_update(
                 context.session, id, current, pool, driver)
@@ -848,6 +859,13 @@ class PoolsController(base.BaseController):
             self._test_lb_and_listener_statuses(
                 context.session, lb_id=db_pool.load_balancer_id,
                 listener_ids=self._get_affected_listener_ids(db_pool))
+            listener_repo = self.repositories.listener
+            filter_listener_id = (
+                listener_repo.get_request_filter_listener_using_pool(
+                    context.session, db_pool.id))
+            if filter_listener_id:
+                raise exceptions.PoolInUseByListenerRequestFilter(
+                    id=id, listener_id=filter_listener_id)
             policy_repo = self.repositories.l7policy
             policy_id = (policy_repo.get_weighted_policy_using_pool(
                 context.session, db_pool.id) or

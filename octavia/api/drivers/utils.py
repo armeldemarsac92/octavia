@@ -43,6 +43,8 @@ HTTP_REQUEST_POLICY_PAYLOAD_AVAILABLE = hasattr(
     driver_dm.L7Policy(), 'http_request_policy')
 HTTP_REQUEST_MIRROR_PAYLOAD_AVAILABLE = hasattr(
     driver_dm.L7Policy(), 'request_mirrors')
+LISTENER_REQUEST_FILTERS_PAYLOAD_AVAILABLE = hasattr(
+    driver_dm.Listener(), 'request_filter_sections')
 WEIGHTED_TARGET_PAYLOAD_AVAILABLE = hasattr(driver_dm.L7Policy(), 'targets')
 BACKEND_TLS_H2_ALPN_PAYLOAD_AVAILABLE = hasattr(
     driver_dm.Pool(), 'backend_tls_require_h2')
@@ -120,6 +122,12 @@ def gateway_capabilities(driver):
             driver.name in mirror_providers and
             getattr(driver, 'supports_http_request_mirror', False) is True):
         capabilities.append(constants.GATEWAY_CAPABILITY_HTTP_REQUEST_MIRROR)
+    if (LISTENER_REQUEST_FILTERS_PAYLOAD_AVAILABLE and driver.name in
+            api_settings.enabled_listener_request_filter_providers and
+            getattr(driver, 'supports_listener_request_filters',
+                    False) is True):
+        capabilities.append(
+            constants.GATEWAY_CAPABILITY_LISTENER_REQUEST_FILTERS)
     initial_rules_providers = (
         api_settings.enabled_l7policy_initial_rules_providers)
     if (driver.name in initial_rules_providers and
@@ -307,6 +315,15 @@ def require_http_request_policy(driver, protocol):
         raise exceptions.ProviderUnsupportedOptionError(
             prov=driver.name, user_msg=_(
                 'L7 HTTP request policies are unavailable for this provider.'))
+
+
+def require_listener_request_filters(driver):
+    if (constants.GATEWAY_CAPABILITY_LISTENER_REQUEST_FILTERS not in
+            gateway_capabilities(driver)):
+        raise exceptions.ProviderUnsupportedOptionError(
+            prov=driver.name, user_msg=_(
+                'HTTP listener request filters are unavailable for '
+                'this provider.'))
 
 
 def require_http_request_mirror(driver, protocol):
@@ -736,7 +753,8 @@ def db_listeners_to_provider_dicts_list_of_dicts(db_listeners,
 def db_listener_to_provider_listener(db_listener, for_delete=False):
     new_listener_dict = listener_dict_to_provider_dict(
         db_listener.to_dict(recurse=True), for_delete=for_delete)
-    for attribute in ('default_http_response', 'https_virtual_hosts'):
+    for attribute in ('default_http_response', 'https_virtual_hosts',
+                      'request_filter_sections'):
         if new_listener_dict.get(attribute) is None:
             new_listener_dict.pop(attribute, None)
     if ('default_pool' in new_listener_dict and
@@ -785,6 +803,8 @@ def listener_dict_to_provider_dict(listener_dict, for_delete=False,
 
     # Preserve the existing driver payload for ordinary listeners.
     new_listener_dict.pop('frontend_fallback_owns_error', None)
+    if not LISTENER_REQUEST_FILTERS_PAYLOAD_AVAILABLE:
+        new_listener_dict.pop('request_filter_sections', None)
     if not new_listener_dict.get('tcp_tls_termination'):
         new_listener_dict.pop('tcp_tls_termination', None)
     if (not TCP_TLS_MIXED_MODE_PAYLOAD_AVAILABLE or
