@@ -976,8 +976,7 @@ class HaproxyAmphoraLoadBalancerDriver(
         for pool in loadbalancer.pools:
             digest = certs.get(pool.id, {}).get('system_ca_sha256')
             if (not digest or pool.id in attached or
-                    not cls._is_managed_otlp_collector_pool(pool) or
-                    not pool.alpn_protocols):
+                    not cls._is_managed_otlp_collector_pool(pool)):
                 continue
             try:
                 validate.validate_otlp_collector_transport(
