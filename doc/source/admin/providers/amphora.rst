@@ -542,7 +542,79 @@ can share a name and recognize affinity to the same endpoint across routes.
 The identifier has no role in authorization. The default ``SRV`` cookie
 continues to use the Octavia member UUID.
 
-When regional discovery is disabled, writes supplying a name are blocked.
-Pools with a name already configured keep serving it. To return to the
-default, send ``session_persistence: {"type": "HTTP_COOKIE"}`` in a pool
-update. To remove persistence entirely, send ``session_persistence: null``.
+When regional discovery is disabled, pools with a name already configured
+keep serving it. For pools without an absolute timeout, send
+``session_persistence: {"type": "HTTP_COOKIE"}`` in a pool update to return
+to the default. To remove persistence entirely, send
+``session_persistence: null``.
+
+Absolute HTTP session cookie timeouts
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Apply database migrations through ``6529f4796d83`` and update the API, workers
+and eligible Amphora agents. Qualify the regional OpenSSL-enabled HAProxy builds
+before enabling discovery. The profile uses native HAProxy facilities and
+was qualified against HAProxy 3.0.19. The upgraded agent advertises support
+to the worker for HAProxy 3.0 and newer with OpenSSL. Qualify any later build
+for cookie handling, failover and reload before adding it to the fleet.
+Custom HAProxy templates must provide the same absolute timeout profile.
+
+Provision a dedicated key of exactly 32 random bytes to every Octavia
+worker in the region. The key file must be a regular file readable by the
+worker with no group or other access, for example mode ``0400`` or
+``0600`` owned by the worker. Use the same key bytes for all workers that
+can rebuild the same pool, including during failover. Configure only the
+file path in the worker configuration.
+
+.. code-block:: ini
+
+   [haproxy_amphora]
+   http_cookie_signing_key_file = /run/octavia/http-cookie-key
+
+Keep private file contents out of configuration, logs and diagnostics.
+Amphora configurations carry only a derived key scoped to the Octavia
+project, logical scope, cookie name, timeout and format version. Restrict
+access to these configurations and to any captured management-plane
+requests. Rotate the worker key in a coordinated maintenance window and
+re-render the affected load balancers. Rotation invalidates earlier
+cookies as each Amphora reloads.
+
+Once the worker key and Amphora fleet are ready, enable the profile for
+the provider on the API.
+
+.. code-block:: ini
+
+   [api_settings]
+   enabled_http_cookie_name_providers = amphora
+   enabled_http_cookie_absolute_timeout_providers = amphora
+
+The provider then advertises ``http_cookie_absolute_timeout_v1``. A named
+``HTTP_COOKIE`` pool can supply ``cookie_absolute_timeout_ms`` and
+``cookie_scope``. Across pools of the same logical backend, identical
+scope, project, name and timeout preserve affinity to the same destination
+address and port after a reload or failover. A cookie for an expired,
+unavailable or unknown member falls back to the pool's normal balancing.
+The affinity cookie name is reserved in responses. A response header
+modifier targeting that cookie does not affect the session or remove
+other application cookies.
+
+HAProxy checks age with its native microsecond wall-clock sample. HAProxy
+refreshes this sample after polling and gives no maximum sampling delay
+under overload or a process pause. Keep wall clocks synchronized among
+Amphorae. The difference between their clocks can shift the observed
+deadline by that difference, in addition to sampling delay. A backward
+clock step may make a previously expired cookie eligible again until its
+age reaches the deadline. The arrival check applies to new requests.
+
+Removing API discovery prevents new enrollment and replacement. Existing
+pools continue using their stored policy. If a worker cannot read a valid
+key, or an Amphora does not advertise support, the new configuration
+balances the affected pool without affinity. After an Amphora confirms
+this reload, pool reads report ``ERROR`` for an otherwise active pool.
+Re-render after restoring the key and eligible Amphora support. All
+Amphorae in the allocated topology must confirm the restored policy before
+pool reads stop reporting this affinity error. The pool's own provisioning
+failures remain visible. The load balancer's previously loaded
+configuration remains in use until a reload. Explicitly clear both fields
+with ``null`` to return to named affinity without a timeout, or set
+``session_persistence`` to ``null`` to remove affinity entirely.

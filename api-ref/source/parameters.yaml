@@ -1704,8 +1704,27 @@ session_persistence_cookie:
   description: |
     The cookie name is required for ``APP_COOKIE``. On HTTP pools with a
     provider advertising ``http_cookie_name_v1``, it can also name the cookie
-    generated for ``HTTP_COOKIE``. Omit the name or set it to ``null`` in a
-    supplied ``HTTP_COOKIE`` object to use the provider's default name.
+    generated for ``HTTP_COOKIE``. When there is no stored absolute timeout,
+    omit the name or set it to ``null`` in a supplied ``HTTP_COOKIE`` object
+    to use the provider's default name.
+  in: body
+  required: false
+  type: string
+session_persistence_cookie_absolute_timeout_ms:
+  description: |
+    The absolute age, in milliseconds, of an affinity cookie issued for a
+    named ``HTTP_COOKIE`` HTTP pool. Accepts an integer from 0 through
+    1439985600000 inclusive. A value of 0 expires immediately. Requires
+    ``http_cookie_absolute_timeout_v1`` and ``cookie_scope``.
+  in: body
+  required: false
+  type: integer
+session_persistence_cookie_scope:
+  description: |
+    The logical scope of the absolute affinity cookie, as 64 lowercase
+    hexadecimal characters. Use the same scope on pools in the same project
+    that serve the same logical backend and share the cookie name and timeout.
+    Supply or clear this field with ``cookie_absolute_timeout_ms``.
   in: body
   required: false
   type: string

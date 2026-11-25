@@ -14,6 +14,7 @@
 
 import copy
 import itertools
+from urllib.parse import urlencode
 
 from oslo_log import log as logging
 from pecan import request
@@ -48,6 +49,10 @@ class PaginationHelper:
                           'request_cors', 'request_url_rewrite',
                           'targets'},
         models.Listener: {'default_http_response', 'https_virtual_hosts'},
+    }
+
+    _projected_query_fields = {
+        models.Pool: {'provisioning_status': '_api_provisioning_status'},
     }
 
     def __init__(self, params, sort_dir=constants.DEFAULT_SORT_DIR):
@@ -148,7 +153,7 @@ class PaginationHelper:
             raise exceptions.InvalidSortDirection(key=sort_dir)
         return sort_dir
 
-    def _make_links(self, model_list):
+    def _make_links(self, model_list, preserve_query=False):
         if CONF.api_settings.api_base_uri:
             path_url = (f"{CONF.api_settings.api_base_uri.rstrip('/')}"
                         f"{request.path}")
@@ -157,10 +162,15 @@ class PaginationHelper:
         links = []
         if model_list:
             prev_attr = [f"limit={self.limit}"]
-            if self.params.get('sort'):
-                prev_attr.append(f"sort={self.params.get('sort')}")
-            if self.params.get('sort_key'):
-                prev_attr.append(f"sort_key={self.params.get('sort_key')}")
+            if preserve_query:
+                params = [(name, value) for name, value in self.params.items()
+                          if name not in ('limit', 'marker', 'page_reverse')]
+                prev_attr.append(urlencode(params, doseq=True))
+            else:
+                if self.params.get('sort'):
+                    prev_attr.append(f"sort={self.params.get('sort')}")
+                if self.params.get('sort_key'):
+                    prev_attr.append(f"sort_key={self.params.get('sort_key')}")
             next_attr = copy.copy(prev_attr)
             if self.marker:
                 prev_attr.append(f"marker={model_list[0].get('id')}")
@@ -253,6 +263,8 @@ class PaginationHelper:
         """
 
         non_query_fields = self._non_query_fields.get(model, ())
+        query_fields = self._projected_query_fields.get(model, {})
+        projected_filters = {}
         if (CONF.api_settings.allow_sorting or
                 (CONF.api_settings.allow_pagination and
                  self.marker is not None)):
@@ -308,7 +320,14 @@ class PaginationHelper:
             ):
                 raise exceptions.InvalidFilterArgument()
 
+            projected_filters = {name: self.filters.pop(name)
+                                 for name in query_fields
+                                 if name in self.filters}
             query = model.apply_filter(query, model, self.filters)
+            for name, value in projected_filters.items():
+                query = query.filter(
+                    getattr(model, query_fields[name]) == value)
+            self.filters.update(projected_filters)
             if secondary_query_filter is not None:
                 query = query.filter(model.load_balancer.has(
                     project_id=secondary_query_filter))
@@ -329,6 +348,8 @@ class PaginationHelper:
                 current_sort_key = (
                     model.__v2_wsme__.translate_key_to_db_obj(
                         current_sort_key))
+                current_sort_key = query_fields.get(
+                    current_sort_key, current_sort_key)
                 sort_dir_func = {
                     constants.ASC: sqlalchemy.asc,
                     constants.DESC: sqlalchemy.desc,
@@ -358,7 +379,9 @@ class PaginationHelper:
                 if not marker_object:
                     raise exceptions.InvalidMarker(key=self.marker)
                 marker_values = []
-                for sort_key, _ in self.sort_keys:
+                sort_keys = [(query_fields.get(key, key), direction)
+                             for key, direction in self.sort_keys]
+                for sort_key, _ in sort_keys:
                     v = getattr(marker_object, sort_key)
                     if v is None:
                         v = default
@@ -366,24 +389,23 @@ class PaginationHelper:
 
                 # Build up an array of sort criteria as in the docstring
                 criteria_list = []
-                for i in range(len(self.sort_keys)):
+                for i, (sort_key, this_sort_dir) in enumerate(sort_keys):
                     crit_attrs = []
                     for j in range(i):
-                        model_attr = getattr(model, self.sort_keys[j][0])
+                        model_attr = getattr(model, sort_keys[j][0])
                         default = PaginationHelper._get_default_column_value(
-                            model_attr.property.columns[0].type)
+                            model_attr.type)
                         attr = sa_sql.expression.case(
                             (model_attr.isnot(None), model_attr),
                             else_=default)
                         crit_attrs.append(attr == marker_values[j])
 
-                    model_attr = getattr(model, self.sort_keys[i][0])
+                    model_attr = getattr(model, sort_key)
                     default = PaginationHelper._get_default_column_value(
-                        model_attr.property.columns[0].type)
+                        model_attr.type)
                     attr = sa_sql.expression.case(
                         (model_attr.isnot(None), model_attr),
                         else_=default)
-                    this_sort_dir = self.sort_keys[i][1]
                     if this_sort_dir == constants.DESC:
                         if self.page_reverse == "True":
                             crit_attrs.append(attr > marker_values[i])
@@ -411,6 +433,10 @@ class PaginationHelper:
 
         links = None
         if CONF.api_settings.allow_pagination:
-            links = self._make_links(model_list)
+            projected_sort = any(key in query_fields
+                                 for key, _ in self.sort_keys)
+            links = self._make_links(
+                model_list, preserve_query=bool(projected_filters or
+                                                projected_sort))
 
         return model_list, links

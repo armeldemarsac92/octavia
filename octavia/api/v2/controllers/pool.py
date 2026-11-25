@@ -133,6 +133,25 @@ def _validate_session_persistence(persistence, protocol, *, for_update=False):
     validate.check_session_persistence(persistence)
 
 
+def _validate_http_cookie_absolute_timeout(persistence, protocol):
+    timeout = persistence.get('cookie_absolute_timeout_ms')
+    scope = persistence.get('cookie_scope')
+    if (('cookie_absolute_timeout_ms' in persistence) !=
+            ('cookie_scope' in persistence) or
+            (timeout is None) != (scope is None)):
+        raise exceptions.ValidationException(detail=_(
+            'Set cookie_absolute_timeout_ms and cookie_scope together, or '
+            'set both to null.'))
+    if timeout is None:
+        return False
+    if (protocol != constants.PROTOCOL_HTTP or
+            not _has_named_http_cookie(persistence)):
+        raise exceptions.ValidationException(detail=_(
+            'An absolute cookie timeout requires a named HTTP_COOKIE on '
+            'an HTTP pool.'))
+    return True
+
+
 class PoolsController(base.BaseController):
     RBAC_TYPE = constants.RBAC_POOL
 
@@ -227,6 +246,9 @@ class PoolsController(base.BaseController):
         budget = pool_dict.get('backend_retry_budget')
         persistence = pool_dict.get('session_persistence')
         named_http_cookie = _has_named_http_cookie(persistence)
+        absolute_cookie_timeout = (
+            persistence and _validate_http_cookie_absolute_timeout(
+                persistence, pool_dict['protocol']))
         if (pool_dict.get('backend_h2c') or hostname is not None or
                 require_h2 or sans or budget is not None or named_http_cookie):
             if driver is None:
@@ -258,6 +280,8 @@ class PoolsController(base.BaseController):
             driver_utils.require_http_cookie_name(
                 driver, pool_dict['protocol'])
             persistence['http_cookie_name_enabled'] = True
+        if absolute_cookie_timeout:
+            driver_utils.require_http_cookie_absolute_timeout(driver)
 
         # Make sure we have a client CA if they specify a CRL
         if (pool_dict.get('crl_container_id') and
@@ -484,6 +508,8 @@ class PoolsController(base.BaseController):
                     resource=data_models.Pool._name())
 
             pool_dict = pool.to_dict(render_unsets=True)
+            if pool.session_persistence:
+                pool_dict['session_persistence'] = sp_dict
             if pool.backend_tls_subject_alt_names is wtypes.Unset:
                 pool_dict.pop('backend_tls_subject_alt_names')
             pool_dict = db_prepare.create_pool(pool_dict)
@@ -689,18 +715,53 @@ class PoolsController(base.BaseController):
             driver_utils.require_no_exposed_request_transforms(
                 driver, policy_repo, session, disabling_pool=pool_id)
 
-    def _validate_pool_PUT(self, pool, current, driver):
+    def _validate_pool_persistence_update(self, session, pool_id, pool,
+                                          current, driver):
+        changes = pool.session_persistence
+        if changes:
+            old = self.repositories.session_persistence.get_for_update(
+                session, pool_id)
+            old_timed = old is not None and (
+                old.cookie_absolute_timeout_ms is not None or
+                old.cookie_scope is not None)
+            if not changes.type and old is not None:
+                changes.type = old.type
+            if changes.cookie_name is wtypes.Unset:
+                setting_timeout = changes.cookie_absolute_timeout_ms not in (
+                    wtypes.Unset, None)
+                preserve_name = (old is not None and
+                                 changes.type == old.type and
+                                 old.http_cookie_name_enabled and
+                                 (old_timed or setting_timeout))
+                changes.cookie_name = (
+                    old.cookie_name if preserve_name else None)
 
         if current.protocol in (constants.PROTOCOL_UDP,
                                 lib_consts.PROTOCOL_SCTP):
             self._validate_pool_request_for_udp_sctp(pool)
+        if not changes:
+            return
 
-        if pool.session_persistence:
-            sp_dict = pool.session_persistence.to_dict(render_unsets=False)
-            _validate_session_persistence(
-                sp_dict, current.protocol, for_update=True)
-            if _has_named_http_cookie(sp_dict):
-                driver_utils.require_http_cookie_name(driver, current.protocol)
+        persistence = changes.to_dict(render_unsets=False)
+        _validate_session_persistence(persistence, current.protocol,
+                                      for_update=True)
+        enrolling_timeout = _validate_http_cookie_absolute_timeout(
+            persistence, current.protocol)
+        keep_name = old_timed and old.type == changes.type and (
+            old.cookie_name == changes.cookie_name and
+            old.http_cookie_name_enabled)
+        if (old_timed and
+                changes.cookie_absolute_timeout_ms is wtypes.Unset and
+                not keep_name):
+            raise exceptions.ValidationException(detail=_(
+                'Clear or replace the absolute cookie timeout when changing '
+                'its persistence type or cookie name.'))
+        if _has_named_http_cookie(persistence) and not keep_name:
+            driver_utils.require_http_cookie_name(driver, current.protocol)
+        if enrolling_timeout:
+            driver_utils.require_http_cookie_absolute_timeout(driver)
+
+    def _validate_pool_PUT(self, pool, current):
 
         crl_ref = None
         # If we got a crl_ref and it's not unset, use it
@@ -789,13 +850,6 @@ class PoolsController(base.BaseController):
             if pool.tls_ciphers is None:
                 pool.tls_ciphers = CONF.api_settings.default_pool_ciphers
 
-            if (pool.session_persistence and
-                    not pool.session_persistence.type and
-                    db_pool.session_persistence and
-                    db_pool.session_persistence.type):
-                pool.session_persistence.type = (
-                    db_pool.session_persistence.type)
-
             # Load the driver early as it also provides validation
             driver = driver_factory.get_driver(provider)
 
@@ -812,6 +866,8 @@ class PoolsController(base.BaseController):
                 raise exceptions.ValidationException(detail=_(
                     'Managed UDP pools require round-robin without session '
                     'persistence.'))
+            self._validate_pool_persistence_update(
+                context.session, id, pool, current, driver)
             self._validate_backend_transport_update(pool, current, driver)
             if (pool.backend_retry_budget is not wtypes.Unset and
                     pool.backend_retry_budget is not None):
@@ -845,7 +901,7 @@ class PoolsController(base.BaseController):
                         pool_dict.get('tls_enabled', current.tls_enabled),
                         pool_dict.get('alpn_protocols',
                                       current.alpn_protocols))
-            self._validate_pool_PUT(pool, current, driver)
+            self._validate_pool_PUT(pool, current)
             self._validate_tcp_listener_pool_update(
                 context.session, id, current, pool, driver)
             self._validate_request_transform_exposure(
@@ -876,6 +932,9 @@ class PoolsController(base.BaseController):
             if persistence:
                 persistence['http_cookie_name_enabled'] = (
                     _has_named_http_cookie(persistence))
+                if ('cookie_absolute_timeout_ms' in persistence and
+                        persistence['cookie_absolute_timeout_ms'] is None):
+                    persistence['cookie_absolute_timeout_error'] = False
             self.repositories.update_pool_and_sp(context.session, id,
                                                  db_pool_dict)
 
