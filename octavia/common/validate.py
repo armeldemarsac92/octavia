@@ -955,15 +955,27 @@ def header_operations(operations, field):
     return normalized
 
 
-def grpc_response_header_field_count(operations):
+def grpc_binary_metadata_lists(operations):
+    return [item for item in operations or []
+            if item['name'].endswith('-bin') and ',' in item.get('value', '')]
+
+
+def grpc_metadata_field_count(operations):
     return sum(1 + item['value'].count(',')
                if item['name'].endswith('-bin') else 1
                for item in operations or [] if item['operation'] != 'REMOVE')
 
 
-def validate_grpc_response_header_fields(operations):
+def validate_grpc_metadata_fields(request=None, response=None, targets=None):
     limit = constants.MAX_L7POLICY_HEADER_OPERATIONS
-    if grpc_response_header_field_count(operations) > limit:
+    if (grpc_metadata_field_count(request) > limit or
+            any(grpc_metadata_field_count(target.get(
+                'request_header_operations')) > limit
+                for target in targets or [])):
+        raise exceptions.InvalidL7PolicyArgs(msg=_(
+            'A gRPC request modifier can set or add at most %d fields '
+            'after expanding binary values.') % limit)
+    if grpc_metadata_field_count(response) > limit:
         raise exceptions.InvalidL7PolicyArgs(msg=_(
             'gRPC response metadata can set or add at most %d fields after '
             'expanding binary values.') % limit)
@@ -1514,11 +1526,12 @@ def sanitize_l7policy_api_args(l7policy, create=False, old_policy=None):
             raise exceptions.InvalidL7PolicyArgs(
                 msg=_('%s is unavailable for this policy action.') % field)
 
-    response_operations = l7policy.get('response_header_operations')
-    if response_operations and any(
-            rule['type'] == constants.L7RULE_TYPE_GRPC_CONTENT_TYPE and
-            rule.get('enabled', True) for rule in l7policy.get('rules') or []):
-        validate_grpc_response_header_fields(response_operations)
+    if any(rule['type'] == constants.L7RULE_TYPE_GRPC_CONTENT_TYPE and
+           rule.get('enabled', True) for rule in l7policy.get('rules') or []):
+        validate_grpc_metadata_fields(
+            l7policy.get('request_header_operations'),
+            l7policy.get('response_header_operations'),
+            l7policy.get('targets'))
 
     if effective_action == weighted_action:
         validate_target_request_filter_composition(
