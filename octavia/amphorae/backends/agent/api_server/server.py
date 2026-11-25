@@ -93,6 +93,13 @@ class Server:
                               '/udp_listener',
                               view_func=self.upload_lvs_listener_config,
                               methods=['PUT'])
+        self.app.add_url_rule(rule=PATH_PREFIX + '/udp_guard',
+                              view_func=self._lvs_listener.check_udp_guard,
+                              methods=['GET'])
+        self.app.add_url_rule(rule=PATH_PREFIX +
+                              '/listeners/<listener_id>/udp_guard',
+                              view_func=self._lvs_listener.stage_udp_guard,
+                              methods=['PUT'])
         self.app.add_url_rule(rule=PATH_PREFIX +
                               '/loadbalancer/<lb_id>/haproxy',
                               view_func=self.get_haproxy_config,
@@ -177,14 +184,16 @@ class Server:
 
     def start_stop_lb_object(self, object_id, action):
         backend = util.get_backend_for_lb_object(object_id)
-        if backend == consts.LVS_BACKEND:
+        if (backend == consts.LVS_BACKEND or
+                self._lvs_listener.has_guard(object_id)):
             return self._lvs_listener.manage_lvs_listener(
                 listener_id=object_id, action=action)
         return self._loadbalancer.start_stop_lb(lb_id=object_id, action=action)
 
     def delete_lb_object(self, object_id):
         backend = util.get_backend_for_lb_object(object_id)
-        if backend == consts.LVS_BACKEND:
+        if (backend == consts.LVS_BACKEND or
+                self._lvs_listener.has_guard(object_id)):
             return self._lvs_listener.delete_lvs_listener(object_id)
         return self._loadbalancer.delete_lb(object_id)
 

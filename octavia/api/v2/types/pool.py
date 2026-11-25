@@ -126,6 +126,7 @@ class PoolResponse(BasePoolType):
         BackendTLSSubjectAltNames())
     backend_retry_budget = wtypes.wsattr(BackendRetryBudget())
     tcp_connection_rejection = wtypes.wsattr(types.TCPConnectionRejection())
+    udp_packet_drop = wtypes.wsattr(types.UDPPacketDrop())
     tls_ciphers = wtypes.wsattr(wtypes.StringType())
     tls_versions = wtypes.wsattr(wtypes.ArrayType(wtypes.StringType()))
     alpn_protocols = wtypes.wsattr(wtypes.ArrayType(types.AlpnProtocolType()))
@@ -143,6 +144,8 @@ class PoolResponse(BasePoolType):
                  not driver_factory.provider_supports_tcp_connection_rejection(
                      provider))):
             result.tcp_connection_rejection = wtypes.Unset
+        if result.udp_packet_drop is None:
+            result.udp_packet_drop = wtypes.Unset
 
         result.listeners = [
             types.IdOnlyType.from_db_obj(listener)

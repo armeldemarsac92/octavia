@@ -13,10 +13,12 @@
 #    under the License.
 
 import os
+from pathlib import Path
 import stat
 import subprocess
 from unittest import mock
 
+import fixtures
 import flask
 
 from oslo_config import cfg
@@ -25,6 +27,7 @@ from oslo_utils import uuidutils
 
 from octavia.amphorae.backends.agent.api_server import keepalivedlvs
 from octavia.amphorae.backends.agent.api_server import server
+from octavia.amphorae.backends.agent.api_server import udp_guard
 from octavia.amphorae.backends.agent.api_server import util
 from octavia.common import constants as consts
 from octavia.tests.common import utils as test_utils
@@ -392,3 +395,159 @@ class KeepalivedLvsTestCase(base.TestCase):
             'message': f'Error disabling octavia-keepalivedlvs-{self.FAKE_ID} '
                        f'service',
             'details': None}, res.json)
+
+
+class GuardedKeepalivedLvsTestCase(base.TestCase):
+    IPVS_HEADER = (
+        'IP Virtual Server version 1.2.1 (size=256)\n'
+        'Prot LocalAddress:Port Scheduler Flags\n'
+        '  -> RemoteAddress:Port Forward Weight ActiveConn InActConn\n')
+
+    def setUp(self):
+        super().setUp()
+        self.listener_id = uuidutils.generate_uuid()
+        directory = Path(self.useFixture(fixtures.TempDir()).path)
+        self.useFixture(oslo_fixture.Config(cfg.CONF)).config(
+            group='haproxy_amphora', base_path=str(directory))
+        self.useFixture(fixtures.MockPatchObject(
+            consts, 'SYSTEMD_DIR', str(directory)))
+        self.useFixture(fixtures.MockPatch(
+            'octavia.amphorae.backends.agent.api_server.plug.Plug.plug_lo'))
+        self.systemctl = self.useFixture(fixtures.MockPatchObject(
+            util, 'run_systemctl_command')).mock
+        self.useFixture(fixtures.MockPatchObject(
+            util, 'send_vip_advertisements'))
+        self.useFixture(fixtures.MockPatchObject(
+            keepalivedlvs.KeepalivedLvs, '_guard_command',
+            return_value='/usr/bin/amphora-udp-guard'))
+        self.nft = self.useFixture(fixtures.MockPatchObject(
+            udp_guard, '_in_namespace')).mock
+        self.nft.return_value.stdout = '1\n'
+        self.ipvs = self.useFixture(fixtures.MockPatchObject(
+            udp_guard.keepalivedlvs_query, 'read_kernel_file')).mock
+        self.client = server.Server(mock.Mock()).app.test_client()
+        self.listener_url = (server.PATH_PREFIX +
+                             f'/listeners/{self.listener_id}')
+        self.reload_url = (server.PATH_PREFIX +
+                           f'/loadbalancer/{self.listener_id}/reload')
+        self.guard = udp_guard.Guard(self.listener_id)
+        self.candidate = {
+            'configuration': 'net_namespace amphora-haproxy\n',
+            'guard': {
+                'vip': '192.0.2.30', 'port': 18053, 'has_service': True,
+                'fraction': {'numerator': 1, 'denominator': 4},
+                'destinations': [{'address': '198.51.100.11', 'port': 15001,
+                                  'weight': 3}], 'retiring': False,
+            },
+        }
+
+    def _last_rules(self):
+        return [call.kwargs['input'] for call in self.nft.call_args_list
+                if 'input' in call.kwargs][-1]
+
+    def test_failed_restart_keeps_listener_closed_until_ipvs_matches(self):
+        response = self.client.put(self.listener_url + '/udp_guard',
+                                   json=self.candidate)
+        self.assertEqual(200, response.status_code)
+        self.systemctl.side_effect = subprocess.CalledProcessError(
+            1, 'systemctl', 'restart failed')
+        self.assertEqual(500, self.client.put(self.reload_url).status_code)
+        self.assertFalse(self.guard.read()['committed'])
+        self.assertIn('ip daddr 192.0.2.30 udp dport 18053 counter drop',
+                      self._last_rules())
+        self.assertNotIn('numgen', self._last_rules())
+        self.assertNotIn('192.0.2.31', self._last_rules())
+        self.assertNotIn('18054', self._last_rules())
+
+        self.systemctl.side_effect = None
+        neighboring_service = ('UDP C000021E:4686 wrr\n'
+                               ' -> C633640C:3A9A Masq 1 0 0\n')
+        wrong_destination = ('UDP C000021E:4685 wrr\n'
+                             ' -> C633640C:3A9A Masq 1 0 0\n')
+        self.ipvs.return_value = (self.IPVS_HEADER + neighboring_service +
+                                  wrong_destination)
+        with mock.patch.object(udp_guard, 'CONVERGENCE_TIMEOUT', 0):
+            self.assertEqual(500, self.client.put(self.reload_url).status_code)
+        self.assertFalse(self.guard.read()['committed'])
+        self.assertNotIn('numgen', self._last_rules())
+
+        self.ipvs.return_value = (self.IPVS_HEADER + neighboring_service +
+                                  'UDP C000021E:4685 wrr\n'
+                                  ' -> C633640B:3A99 Masq 3 0 0\n')
+        response = self.client.put(self.reload_url)
+        self.assertEqual(202, response.status_code)
+        self.assertEqual('1', response.headers[udp_guard.CONFIRMATION_HEADER])
+        self.assertTrue(self.guard.read()['committed'])
+        self.assertIn('ip daddr 192.0.2.30 udp dport 18053 '
+                      'numgen inc mod 4 < 1 counter drop', self._last_rules())
+
+    def test_stale_zero_weight_or_persistent_service_keeps_guard_closed(self):
+        response = self.client.put(self.listener_url + '/udp_guard',
+                                   json=self.candidate)
+        self.assertEqual(200, response.status_code)
+        expected = ' -> C633640B:3A99 Masq 3 0 0\n'
+        stale = ' -> C633640C:3A9A Masq 0 1 0\n'
+        with mock.patch.object(udp_guard, 'CONVERGENCE_TIMEOUT', 0):
+            self.ipvs.return_value = (self.IPVS_HEADER +
+                                      'UDP C000021E:4685 wrr\n' +
+                                      expected + stale)
+            self.assertEqual(500, self.client.put(self.reload_url).status_code)
+            self.ipvs.return_value = (
+                self.IPVS_HEADER +
+                'UDP C000021E:4685 wrr persistent 300 FFFFFFFF\n' + expected)
+            self.assertEqual(500, self.client.put(self.reload_url).status_code)
+        self.assertFalse(self.guard.read()['committed'])
+        self.assertNotIn('numgen', self._last_rules())
+
+    def test_remove_pool_retires_only_its_guard(self):
+        response = self.client.put(self.listener_url + '/udp_guard',
+                                   json=self.candidate)
+        self.assertEqual(200, response.status_code)
+        self.candidate['guard'].update(has_service=False, retiring=True,
+                                       destinations=[])
+        response = self.client.put(self.listener_url + '/udp_guard',
+                                   json=self.candidate)
+        self.assertEqual(200, response.status_code)
+        self.ipvs.return_value = self.IPVS_HEADER + 'UDP C000021E:4686 wrr\n'
+        self.assertEqual(202, self.client.put(self.reload_url).status_code)
+        self.assertFalse(self.guard.path.exists())
+        self.assertEqual(f'table ip {self.guard.table} {{}}\n'
+                         f'delete table ip {self.guard.table}\n',
+                         self._last_rules())
+
+    def test_compatible_listener_delete_reestablishes_proof_on_retry(self):
+        self.candidate['guard'].update(has_service=False, retiring=True,
+                                       destinations=[])
+        self.ipvs.return_value = self.IPVS_HEADER + 'UDP C000021E:4686 wrr\n'
+        for attempt in range(2):
+            response = self.client.put(self.listener_url + '/udp_guard',
+                                       json=self.candidate)
+            self.assertEqual(200, response.status_code)
+            response = self.client.delete(self.listener_url)
+            self.assertEqual(200, response.status_code)
+            self.assertEqual('1', response.headers[
+                udp_guard.CONFIRMATION_HEADER])
+            self.assertFalse(self.guard.path.exists())
+            self.assertFalse(os.path.exists(
+                util.keepalived_lvs_cfg_path(self.listener_id)))
+            self.assertEqual(f'table ip {self.guard.table} {{}}\n'
+                             f'delete table ip {self.guard.table}\n',
+                             self._last_rules())
+        self.assertEqual(2, self.ipvs.call_count)
+        self.assertNotIn(mock.call(consts.AMP_ACTION_RESTART, mock.ANY),
+                         self.systemctl.call_args_list)
+
+    def test_listener_delete_removes_guard_and_blocks_legacy_upload(self):
+        response = self.client.put(self.listener_url + '/udp_guard',
+                                   json=self.candidate)
+        self.assertEqual(200, response.status_code)
+        stock_url = (server.PATH_PREFIX +
+                     f'/listeners/amp/{self.listener_id}/udp_listener')
+        response = self.client.put(stock_url, data='old worker')
+        self.assertEqual(409, response.status_code)
+        self.ipvs.return_value = self.IPVS_HEADER + 'UDP C000021E:4686 wrr\n'
+        response = self.client.delete(self.listener_url)
+        self.assertEqual(200, response.status_code)
+        self.assertFalse(self.guard.path.exists())
+        self.assertIn(f'delete table ip {self.guard.table}',
+                      self._last_rules())

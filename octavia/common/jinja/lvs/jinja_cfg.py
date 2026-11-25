@@ -30,6 +30,8 @@ PROTOCOL_MAP = {
     lib_consts.PROTOCOL_SCTP: 'sctp'
 }
 
+REMOVED = (constants.PENDING_DELETE, constants.DELETED)
+
 BALANCE_MAP = {
     constants.LB_ALGORITHM_ROUND_ROBIN: 'wrr',
     constants.LB_ALGORITHM_LEAST_CONNECTIONS: 'lc',
@@ -134,14 +136,22 @@ class LvsJinjaTemplater:
         }
         if listener.connection_limit and listener.connection_limit > -1:
             ret_value['connection_limit'] = listener.connection_limit
-        if (listener.default_pool and
-            listener.default_pool.provisioning_status !=
-                constants.PENDING_DELETE):
-            ret_value['default_pool'] = self._transform_pool(
-                listener.default_pool)
+        pool = listener.default_pool
+        guarded = (listener.protocol == constants.PROTOCOL_UDP and
+                   pool is not None and
+                   getattr(pool, 'udp_packet_drop', None) is not None)
+        if guarded and listener.provisioning_status in REMOVED:
+            ret_value['enabled'] = False
+        if pool and pool.provisioning_status not in (
+                REMOVED if guarded else (constants.PENDING_DELETE,)):
+            rendered_pool = self._transform_pool(pool, guarded=guarded)
+            enabled_members = any(member['enabled']
+                                  for member in rendered_pool['members'])
+            if not guarded or (rendered_pool['enabled'] and enabled_members):
+                ret_value['default_pool'] = rendered_pool
         return ret_value
 
-    def _transform_pool(self, pool):
+    def _transform_pool(self, pool, guarded=False):
         """Transforms a pool into an object that will
 
             be processed by the templating system
@@ -156,10 +166,10 @@ class LvsJinjaTemplater:
             'session_persistence': '',
             'enabled': pool.enabled
         }
-        members_gen = (mem for mem in pool.members if
-                       mem.provisioning_status != constants.PENDING_DELETE)
-        members = [self._transform_member(x) for x in members_gen]
-        ret_value['members'] = members
+        excluded = REMOVED if guarded else (constants.PENDING_DELETE,)
+        ret_value['members'] = [self._transform_member(member)
+                                for member in pool.members
+                                if member.provisioning_status not in excluded]
         if (pool.health_monitor and
             pool.health_monitor.provisioning_status !=
                 constants.PENDING_DELETE):

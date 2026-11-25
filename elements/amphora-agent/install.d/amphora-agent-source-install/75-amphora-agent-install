@@ -30,6 +30,12 @@ ln -s $AMP_VENV/bin/amphora-health-checker /usr/local/bin/amphora-health-checker
 # Link amphora interface script
 ln -s $AMP_VENV/bin/amphora-interface /usr/local/bin/amphora-interface || true
 
+# The UDP guard is available on images that use nftables.
+if [ "${DIB_OCTAVIA_AMP_USE_NFTABLES:-True}" = "True" ]; then
+    test -x "$AMP_VENV/bin/amphora-udp-guard"
+    ln -s "$AMP_VENV/bin/amphora-udp-guard" /usr/local/bin/amphora-udp-guard
+fi
+
 # Link the prometheus proxy
 ln -s $AMP_VENV/bin/prometheus-proxy /usr/local/bin/prometheus-proxy || true
 

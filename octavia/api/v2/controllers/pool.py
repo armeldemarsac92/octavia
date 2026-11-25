@@ -13,12 +13,15 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+from contextlib import ExitStack
+
 from octavia_lib.api.drivers import data_models as driver_dm
 from octavia_lib.common import constants as lib_consts
 from oslo_config import cfg
 from oslo_db import exception as odb_exceptions
 from oslo_log import log as logging
 from oslo_utils import excutils
+from oslo_utils import uuidutils
 from pecan import expose as pecan_expose
 from pecan import request as pecan_request
 from wsme import types as wtypes
@@ -802,6 +805,13 @@ class PoolsController(base.BaseController):
 
             current = self.repositories.pool.get_transport_for_update(
                 context.session, id)
+            if (current.udp_packet_drop is not None and
+                    (pool.session_persistence or
+                     pool.lb_algorithm not in
+                     (wtypes.Unset, constants.LB_ALGORITHM_ROUND_ROBIN))):
+                raise exceptions.ValidationException(detail=_(
+                    'Managed UDP pools require round-robin without session '
+                    'persistence.'))
             self._validate_backend_transport_update(pool, current, driver)
             if (pool.backend_retry_budget is not wtypes.Unset and
                     pool.backend_retry_budget is not None):
@@ -883,12 +893,28 @@ class PoolsController(base.BaseController):
     def delete(self, id):
         """Deletes a pool from a load balancer."""
         context = pecan_request.context.get('octavia_context')
-        with context.session.begin():
-            db_pool = self._get_db_pool(context.session, id,
-                                        show_deleted=False)
-
-            project_id, provider = self._get_lb_project_id_provider(
-                context.session, db_pool.load_balancer_id)
+        session = context.session
+        with session.begin():
+            pool = self._get_db_pool(session, id, show_deleted=False)
+            lb_id, protocol = pool.load_balancer_id, pool.protocol
+        with ExitStack() as render_locks, session.begin():
+            operation = None
+            if protocol == constants.PROTOCOL_UDP:
+                lb_repo = self.repositories.load_balancer
+                lb = lb_repo.get_for_update(session, lb_id)
+                if lb is None or lb.provisioning_status == constants.DELETED:
+                    raise exceptions.NotFound(resource='Pool', id=id)
+                project_id, provider = lb.project_id, lb.provider
+                db_pool = (
+                    self.repositories.pool.get_on_load_balancer_for_update(
+                        session, lb_id, project_id, id,
+                        include_pending_delete=True))
+                if db_pool.udp_packet_drop is not None:
+                    operation = lb_repo.pending_udp_pool_operation(lb, id)
+            else:
+                db_pool = self._get_db_pool(session, id, show_deleted=False)
+                project_id, provider = self._get_lb_project_id_provider(
+                    session, lb_id)
 
             self._auth_validate_action(
                 context,
@@ -903,9 +929,22 @@ class PoolsController(base.BaseController):
             # Load the driver early as it also provides validation
             driver = driver_factory.get_driver(provider)
 
-            self._test_lb_and_listener_statuses(
-                context.session, lb_id=db_pool.load_balancer_id,
-                listener_ids=self._get_affected_listener_ids(db_pool))
+            managed_udp = db_pool.udp_packet_drop is not None
+            if managed_udp:
+                driver_utils.require_listener_render_lock(render_locks, lb_id)
+            if operation:
+                deleting = (operation.get('action') ==
+                            constants.UDP_POOL_DELETE_ACTION)
+                expected = (constants.PENDING_DELETE if deleting else
+                            constants.PENDING_UPDATE)
+                if (db_pool.provisioning_status != expected or
+                        db_pool.tcp_member_batch_id != operation['id']):
+                    raise exceptions.ImmutableObject(
+                        resource='Load Balancer', id=lb_id)
+            else:
+                self._test_lb_and_listener_statuses(
+                    session, lb_id=lb_id,
+                    listener_ids=self._get_affected_listener_ids(db_pool))
             listener_repo = self.repositories.listener
             filter_listener_id = (
                 listener_repo.get_request_filter_listener_using_pool(
@@ -931,6 +970,10 @@ class PoolsController(base.BaseController):
             if policy_id:
                 raise exceptions.PoolInUseByL7Policy(
                     id=db_pool.id, l7policy_id=policy_id)
+            if managed_udp:
+                self._schedule_managed_udp_pool_delete(
+                    driver, lb, db_pool, operation)
+                return
             self.repositories.pool.update(
                 context.session, db_pool.id,
                 provisioning_status=constants.PENDING_DELETE)
@@ -941,6 +984,24 @@ class PoolsController(base.BaseController):
                                                       for_delete=True))
             driver_utils.call_provider(driver.name, driver.pool_delete,
                                        provider_pool)
+
+    @staticmethod
+    def _schedule_managed_udp_pool_delete(driver, lb, pool, operation):
+        if (operation is None or
+                operation.get('action') != constants.UDP_POOL_DELETE_ACTION):
+            pool.provisioning_status = constants.PENDING_DELETE
+            pool.tcp_member_batch_id = uuidutils.generate_uuid()
+            lb.tcp_member_batch = {
+                'id': pool.tcp_member_batch_id,
+                'pool_id': pool.id,
+                'listener_ids': [listener.id for listener in pool.listeners],
+                'protocol': constants.PROTOCOL_UDP,
+                'action': constants.UDP_POOL_DELETE_ACTION,
+                'phase': constants.TCP_MEMBER_BATCH_PENDING,
+            }
+        driver_utils.call_provider(
+            driver.name, driver.delete_managed_udp_pool,
+            lb.id, pool.id, pool.tcp_member_batch_id)
 
     @pecan_expose()
     def _lookup(self, pool_id, *remainder):
