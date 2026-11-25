@@ -224,12 +224,8 @@ class HaproxyAmphoraLoadBalancerDriver(
             if listener.protocol in consts.LVS_PROTOCOLS:
                 if l7policy_activation or tcp_batch_configs is not None:
                     continue
-                # Generate Keepalived LVS configuration from listener object
-                config = self.lvs_jinja.build_config(listener=listener)
-                self.clients[amphora.api_version].upload_udp_config(
-                    amphora, listener.id, config, timeout_dict=timeout_dict)
-                self.clients[amphora.api_version].reload_listener(
-                    amphora, listener.id, timeout_dict=timeout_dict)
+                self._update_udp_amphora(
+                    listener, amphora, timeout_dict=timeout_dict)
             else:
                 has_tcp = True
                 obj_id = loadbalancer.id
@@ -329,21 +325,78 @@ class HaproxyAmphoraLoadBalancerDriver(
 
         return {listener.id for listener in listeners_to_update}
 
-    def _udp_update(self, listener, vip):
-        LOG.debug("Amphora %s keepalivedlvs, updating "
-                  "listener %s, vip %s",
-                  self.__class__.__name__, listener.protocol_port,
-                  vip.ip_address)
+    def _udp_guard_config(self, listener):
+        pool = listener.default_pool
+        fraction = getattr(pool, 'udp_packet_drop', None)
+        if listener.protocol != consts.PROTOCOL_UDP or fraction is None:
+            return None
+        retiring = pool.provisioning_status in jinja_udp_cfg.REMOVED
 
-        for amp in listener.load_balancer.amphorae:
-            if amp.status != consts.DELETED:
-                # Generate Keepalived LVS configuration from listener object
-                self._populate_amphora_api_version(amp)
-                config = self.lvs_jinja.build_config(listener=listener)
-                self.clients[amp.api_version].upload_udp_config(
-                    amp, listener.id, config)
-                self.clients[amp.api_version].reload_listener(
-                    amp, listener.id)
+        lb = listener.load_balancer
+        if (lb.additional_vips or utils.ip_version(lb.vip.ip_address) != 4 or
+                pool.protocol != consts.PROTOCOL_UDP or
+                pool.lb_algorithm != consts.LB_ALGORITHM_ROUND_ROBIN or
+                pool.health_monitor or pool.session_persistence):
+            raise driver_except.ListenerProvisioningError()
+
+        listener_active = (not retiring and lb.enabled and listener.enabled and
+                           listener.provisioning_status not in
+                           jinja_udp_cfg.REMOVED)
+        destinations = []
+        if listener_active and pool.enabled:
+            for member in pool.members:
+                if (member.enabled and member.provisioning_status not in
+                        jinja_udp_cfg.REMOVED):
+                    destinations.append({
+                        'address': member.ip_address,
+                        'port': member.protocol_port,
+                        'weight': member.weight,
+                    })
+        return {'vip': lb.vip.ip_address, 'port': listener.protocol_port,
+                'fraction': fraction, 'has_service': bool(destinations),
+                'destinations': destinations, 'retiring': retiring}
+
+    def _check_udp_guard(self, amphora, timeout_dict=None):
+        try:
+            self.clients[amphora.api_version].check_udp_guard(
+                amphora, timeout_dict=timeout_dict)
+        except exc.NotFound as error:
+            raise driver_except.AmpDriverNotImplementedError() from error
+
+    def _update_udp_amphora(self, listener, amphora, timeout_dict=None):
+        guard = self._udp_guard_config(listener)
+        client = self.clients[amphora.api_version]
+        config = self.lvs_jinja.build_config(listener=listener)
+        if guard is None:
+            client.upload_udp_config(amphora, listener.id, config,
+                                     timeout_dict=timeout_dict)
+        else:
+            self._check_udp_guard(amphora, timeout_dict)
+            client.stage_udp_guard(amphora, listener.id, config, guard,
+                                   timeout_dict=timeout_dict)
+        client.reload_listener(amphora, listener.id, timeout_dict=timeout_dict)
+
+    def apply_udp_member_batch(self, loadbalancer, listener_id):
+        listener = next((listener for listener in loadbalancer.listeners
+                         if listener.id == listener_id), None)
+        if listener is None:
+            raise driver_except.ListenerProvisioningError()
+        guard = self._udp_guard_config(listener)
+        amphorae = [amp for amp in loadbalancer.amphorae
+                    if amp.status != consts.DELETED]
+        if guard is None or guard['retiring'] or not amphorae:
+            raise driver_except.ListenerProvisioningError()
+
+        config = self.lvs_jinja.build_config(listener=listener)
+        for amphora in amphorae:
+            self._populate_amphora_api_version(amphora)
+            self._check_udp_guard(amphora)
+        for amphora in amphorae:
+            self.clients[amphora.api_version].stage_udp_guard(
+                amphora, listener.id, config, guard)
+        for amphora in amphorae:
+            self.clients[amphora.api_version].reload_listener(
+                amphora, listener.id)
 
     def update(self, loadbalancer, *, l7policy_activation=False,
                l7policy_restoration=False, tcp_member_batch=False):
@@ -1340,6 +1393,24 @@ class AmphoraAPIClient1_0(AmphoraAPIClientBase):
             f'listeners/{amp.id}/{listener_id}/udp_listener', timeout_dict,
             data=config)
         return exc.check_exception(r)
+
+    def check_udp_guard(self, amp, timeout_dict=None):
+        response = self.get(amp, 'udp_guard', timeout_dict=timeout_dict,
+                            retry_404=False)
+        exc.check_exception(response)
+        if response.status_code != 200 or response.json() != {
+                'udp_packet_drop_v1': True}:
+            raise driver_except.AmpDriverNotImplementedError()
+
+    def stage_udp_guard(self, amp, listener_id, config, guard,
+                        timeout_dict=None):
+        response = self.put(
+            amp, f'listeners/{listener_id}/udp_guard',
+            timeout_dict=timeout_dict, retry_404=False,
+            json={'configuration': config, 'guard': guard})
+        exc.check_exception(response)
+        if response.status_code != 200:
+            raise driver_except.ListenerProvisioningError()
 
     def update_agent_config(self, amp, agent_config, timeout_dict=None):
         r = self.put(amp, 'config', timeout_dict, data=agent_config)

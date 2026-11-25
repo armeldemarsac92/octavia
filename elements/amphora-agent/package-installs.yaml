@@ -87,5 +87,5 @@ uuid-runtime:
 vim-tiny:
 vlan:
 
+# The guarded UDP dataplane also uses nft with the iptables firewall.
 nftables:
-  when: DIB_OCTAVIA_AMP_USE_NFTABLES = True

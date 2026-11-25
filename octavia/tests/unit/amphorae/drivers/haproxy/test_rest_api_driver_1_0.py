@@ -13,6 +13,7 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 import hashlib
+from types import SimpleNamespace
 from unittest import mock
 
 from oslo_config import cfg
@@ -26,6 +27,7 @@ from octavia.amphorae.drivers.haproxy import exceptions as exc
 from octavia.amphorae.drivers.haproxy import rest_api_driver as driver
 from octavia.common import constants
 from octavia.common import data_models
+from octavia.common.jinja.lvs import jinja_cfg as jinja_udp_cfg
 from octavia.common import utils as octavia_utils
 from octavia.db import models
 from octavia.network import data_models as network_models
@@ -614,6 +616,68 @@ class TestHaproxyAmphoraLoadBalancerDriverTest(base.TestCase):
         self.driver.clients[
             API_VERSION].reload_listener.assert_called_once_with(
             self.amp, self.sl_udp.id, timeout_dict=None)
+
+    def _guarded_udp_graph(self):
+        graph = sample_configs_combined.sample_lb_with_udp_listener_tuple(
+            topology=constants.TOPOLOGY_ACTIVE_STANDBY)
+        listener = graph.listeners[0]
+        pool = SimpleNamespace(**listener.default_pool._asdict())
+        pool.udp_packet_drop = {'numerator': 0, 'denominator': 1}
+        pool.health_monitor = None
+        pool.session_persistence = None
+        pool.members = [member._replace(provisioning_status=status)
+                        for member, status in zip(pool.members, (
+                            constants.ACTIVE, constants.DELETED))]
+        listener = listener._replace(default_pool=pool, load_balancer=graph)
+        graph.listeners[:] = [listener]
+        return graph, listener
+
+    def test_udp_batch_prepares_every_amphora_before_reload(self):
+        graph, listener = self._guarded_udp_graph()
+        client = self.driver.clients[API_VERSION]
+        self.driver.lvs_jinja.build_config.return_value = 'fake_udp_config'
+        self.driver.apply_udp_member_batch(graph, listener.id)
+        guard = client.stage_udp_guard.call_args.args[-1]
+        self.assertEqual({'numerator': 0, 'denominator': 1}, guard['fraction'])
+        member = listener.default_pool.members[0]
+        self.assertEqual([{'address': member.ip_address,
+                           'port': member.protocol_port,
+                           'weight': member.weight}], guard['destinations'])
+        primary, secondary = graph.amphorae
+        client.assert_has_calls([
+            mock.call.check_udp_guard(primary, timeout_dict=None),
+            mock.call.check_udp_guard(secondary, timeout_dict=None),
+            mock.call.stage_udp_guard(primary, listener.id,
+                                      'fake_udp_config', guard),
+            mock.call.stage_udp_guard(secondary, listener.id,
+                                      'fake_udp_config', guard),
+            mock.call.reload_listener(primary, listener.id),
+            mock.call.reload_listener(secondary, listener.id),
+        ])
+        client.upload_udp_config.assert_not_called()
+
+    def test_udp_batch_rejects_old_amphora_before_any_upload(self):
+        graph, listener = self._guarded_udp_graph()
+        client = self.driver.clients[API_VERSION]
+        client.check_udp_guard.side_effect = [None, exc.NotFound()]
+        self.assertRaises(driver_except.AmpDriverNotImplementedError,
+                          self.driver.apply_udp_member_batch, graph,
+                          listener.id)
+        client.stage_udp_guard.assert_not_called()
+        client.upload_udp_config.assert_not_called()
+        client.reload_listener.assert_not_called()
+
+    def test_udp_empty_pool_renders_without_ipvs_service(self):
+        graph, listener = self._guarded_udp_graph()
+        listener.default_pool.members.clear()
+        self.driver.lvs_jinja = jinja_udp_cfg.LvsJinjaTemplater()
+        self.driver.update_amphora_listeners(graph, graph.amphorae[1])
+        client = self.driver.clients[API_VERSION]
+        _, _, config, guard = client.stage_udp_guard.call_args.args
+        self.assertNotIn('virtual_server', config)
+        self.assertFalse(guard['has_service'])
+        self.assertEqual([], guard['destinations'])
+        client.upload_udp_config.assert_not_called()
 
     def test_upload_cert_amp(self):
         self.driver.upload_cert_amp(self.amp, octavia_utils.b('test'))
