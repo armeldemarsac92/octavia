@@ -2363,6 +2363,8 @@ class TestPool(base.BaseAPITest):
                              session_persistence=named, status=400)
         self.create_pool(*args, session_persistence=dict(
             named, cookie_name='cookie@name'), status=400)
+        self.create_pool(*args, session_persistence=dict(
+            named, cookie_name='__SeCuRe-cookie'), status=400)
 
         created = self.create_pool(*args, session_persistence=named)['pool']
         path = self.POOL_PATH.format(pool_id=created['id'])
@@ -2379,6 +2381,8 @@ class TestPool(base.BaseAPITest):
 
         self.set_lb_status(lb_id)
         replacement = 'gw_cookie.2-prod'
+        self.put(path, self._build_body({
+            persistence: {'cookie_name': '__Host-cookie'}}), status=400)
         updated = self.put(path, self._build_body({
             persistence: {'cookie_name': replacement}})).json['pool']
         self.assertEqual(replacement, updated[persistence]['cookie_name'])
@@ -2401,8 +2405,45 @@ class TestPool(base.BaseAPITest):
             persistence: None})).json['pool']
         self.assertIsNone(removed[persistence])
 
+    def test_legacy_http_cookie_name_visibility(self):
+        pool = self.create_pool(
+            self.lb_id, 'HTTP', 'ROUND_ROBIN',
+            session_persistence={'type': 'HTTP_COOKIE'})['pool']
+        pool_id = pool['id']
+        path = self.POOL_PATH.format(pool_id=pool_id)
+        name = 'LEGACY'
+        with db_api.session().begin() as session:
+            repositories.SessionPersistenceRepository().update(
+                session, pool_id, cookie_name=name)
+
+        providers = ('amphora', 'amphorav2', 'octavia', None, 'noop_driver')
+        for provider in providers:
+            with self.subTest(provider=provider):
+                with db_api.session().begin() as session:
+                    repositories.LoadBalancerRepository().update(
+                        session, self.lb_id, provider=provider)
+                    db_pool = repositories.PoolRepository().get(
+                        session, id=pool_id)
+                    dto = driver_utils.db_pool_to_provider_pool(db_pool)
+                    self.assertEqual(
+                        name, db_pool.session_persistence.cookie_name)
+
+                expected = name if provider == 'noop_driver' else None
+                detail = self.get(path).json['pool']
+                persistence = detail['session_persistence']
+                self.assertEqual(expected, persistence['cookie_name'])
+                pools = self.get(
+                    self.POOLS_PATH,
+                    params={'fields': ['id', 'session_persistence']}
+                ).json['pools']
+                listed = next(pool for pool in pools if pool['id'] == pool_id)
+                self.assertEqual(persistence, listed['session_persistence'])
+                self.assertEqual(persistence, dto.session_persistence)
+
     @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
-    def test_http_cookie_name_in_load_balancer_graph(self, rpc):
+    @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.'
+                'AmphoraProviderDriver.loadbalancer_create')
+    def test_http_cookie_name_in_load_balancer_graph(self, create, _rpc):
         named = {'type': 'HTTP_COOKIE', 'cookie_name': 'nested_cookie'}
         pool = {'name': 'pool', 'protocol': 'HTTP',
                 'lb_algorithm': 'ROUND_ROBIN', 'session_persistence': named}
@@ -2414,11 +2455,19 @@ class TestPool(base.BaseAPITest):
         self.post(self.LBS_PATH, {'loadbalancer': fields}, status=501)
         self.conf.config(group='api_settings',
                          enabled_http_cookie_name_providers=['amphora'])
+        for option in ({'persistence_timeout': 0},
+                       {'persistence_granularity': '255.255.255.0'}):
+            pool['session_persistence'] = dict(named, **option)
+            self.post(self.LBS_PATH, {'loadbalancer': fields}, status=400)
+        pool['session_persistence'] = named
         lb = self.post(self.LBS_PATH, {'loadbalancer': fields})
         pool_id = lb.json['loadbalancer']['pools'][0]['id']
         path = self.POOL_PATH.format(pool_id=pool_id)
         persistence = self.get(path).json['pool']['session_persistence']
         self.assertEqual(named['cookie_name'], persistence['cookie_name'])
+        create.assert_called_once()
+        created = create.call_args.args[0]
+        self.assertEqual(persistence, created.pools[0].session_persistence)
 
     def test_create_with_bad_session_persistence(self):
         sp = {"type": "persistence_type",

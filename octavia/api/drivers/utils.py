@@ -993,6 +993,12 @@ def db_pools_to_provider_pools(db_pools, for_delete=False):
 
 def db_pool_to_provider_pool(db_pool, for_delete=False):
     pool_dict = db_pool.to_dict(recurse=True)
+    persistence = pool_dict.get('session_persistence')
+    if persistence and data_models.is_unenrolled_amphora_http_cookie(
+            persistence.get('type'),
+            persistence.get('http_cookie_name_enabled'),
+            (pool_dict.get('load_balancer') or {}).get('provider')):
+        pool_dict['session_persistence'] = dict(persistence, cookie_name=None)
     if pool_dict.get('backend_tls_hostname') is None:
         pool_dict.pop('backend_tls_hostname', None)
     new_pool_dict = pool_dict_to_provider_dict(pool_dict,

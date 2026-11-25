@@ -456,6 +456,16 @@ class TestValidations(base.TestCase):
                           validate.check_session_persistence,
                           invalid_http_cookie)
 
+        for name in ('__Host-cookie', '__Host-Http-cookie',
+                     '__Secure-cookie', '__hTtP-cookie'):
+            with self.subTest(name=name):
+                self.assertRaises(
+                    exceptions.ValidationException,
+                    validate.check_session_persistence,
+                    {'type': 'HTTP_COOKIE', 'cookie_name': name})
+        validate.check_session_persistence(
+            {'type': 'APP_COOKIE', 'cookie_name': '__Host-cookie'})
+
         # Test raises type SOURCE_IP and providing cookie_name
         self.assertRaises(exceptions.ValidationException,
                           validate.check_session_persistence,

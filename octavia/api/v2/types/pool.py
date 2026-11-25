@@ -19,6 +19,7 @@ from octavia.api.common import types
 from octavia.api.v2.types import health_monitor as health_monitor_types
 from octavia.api.v2.types import member as member_types
 from octavia.common import constants
+from octavia.common import data_models
 from octavia.common import exceptions
 from octavia.common import validate
 
@@ -140,16 +141,14 @@ class PoolResponse(BasePoolType):
             for listener in db_obj.listeners
         ]
 
-        if db_obj.session_persistence:
+        persistence = db_obj.session_persistence
+        if persistence:
             result.session_persistence = (
-                SessionPersistenceResponse
-                .from_db_obj(db_obj.session_persistence)
+                SessionPersistenceResponse.from_db_obj(persistence)
             )
-            if (result.session_persistence.type ==
-                    constants.SESSION_PERSISTENCE_HTTP_COOKIE and
-                    not db_obj.session_persistence.http_cookie_name_enabled and
-                    getattr(db_obj.load_balancer, 'provider', None) in
-                    ('amphora', 'octavia')):
+            if data_models.is_unenrolled_amphora_http_cookie(
+                    persistence.type, persistence.http_cookie_name_enabled,
+                    getattr(db_obj.load_balancer, 'provider', None)):
                 # Old Amphora graph creates accepted a name HAProxy ignored.
                 result.session_persistence.cookie_name = None
 

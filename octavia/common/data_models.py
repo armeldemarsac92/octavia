@@ -296,6 +296,14 @@ class HealthMonitor(BaseDataModel):
         self.pool.health_monitor = None
 
 
+def is_unenrolled_amphora_http_cookie(persistence_type, name_enabled,
+                                      provider):
+    # Historical load balancers with no provider used Amphora.
+    return (persistence_type == constants.SESSION_PERSISTENCE_HTTP_COOKIE and
+            name_enabled is False and provider in
+            (None, constants.AMPHORA, constants.AMPHORAV2, constants.OCTAVIA))
+
+
 class Pool(BaseDataModel):
     def __init__(self, id=None, project_id=None, name=None, description=None,
                  protocol=None, lb_algorithm=None, enabled=None,

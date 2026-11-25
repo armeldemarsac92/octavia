@@ -532,6 +532,9 @@ workers before enabling the option in the region.
 An authenticated ``GET /v2/lbaas/providers/amphora/gateway_capabilities``
 then includes ``http_cookie_name_v1``. HTTP pools can set
 ``session_persistence.cookie_name`` when using ``HTTP_COOKIE``.
+Amphora generates these cookies without the ``Secure`` and ``HttpOnly``
+attributes. Names starting with ``__Host-`` (including ``__Host-Http-``),
+``__Secure-`` or ``__Http-`` are rejected regardless of case.
 Named cookies use the same session lifetime and root path as the default
 ``SRV`` cookie. Their opaque member identifier is derived from the project,
 cookie name, member IP address and port. Pools serving the same backend

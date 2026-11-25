@@ -116,6 +116,20 @@ def _has_named_http_cookie(persistence):
             persistence.get('cookie_name') is not None)
 
 
+def _validate_session_persistence(persistence, protocol, *, for_update=False):
+    if (protocol not in (constants.PROTOCOL_UDP, lib_consts.PROTOCOL_SCTP) and
+            (persistence.get('persistence_timeout') is not None or
+             persistence.get('persistence_granularity') is not None)):
+        if for_update:
+            detail = _('persistence_timeout and persistence_granularity '
+                       'is only for UDP protocol pools.')
+        else:
+            detail = _('persistence_timeout and persistence_granularity '
+                       'is only for UDP and SCTP protocol pools.')
+        raise exceptions.ValidationException(detail=detail)
+    validate.check_session_persistence(persistence)
+
+
 class PoolsController(base.BaseController):
     RBAC_TYPE = constants.RBAC_POOL
 
@@ -237,7 +251,7 @@ class PoolsController(base.BaseController):
                 driver, pool_dict['protocol'])
         if named_http_cookie:
             # Fully populated load balancer creation also reaches this path.
-            validate.check_session_persistence(persistence)
+            _validate_session_persistence(persistence, pool_dict['protocol'])
             driver_utils.require_http_cookie_name(
                 driver, pool_dict['protocol'])
             persistence['http_cookie_name_enabled'] = True
@@ -446,17 +460,10 @@ class PoolsController(base.BaseController):
             if pool.protocol in (constants.PROTOCOL_UDP,
                                  lib_consts.PROTOCOL_SCTP):
                 self._validate_pool_request_for_udp_sctp(pool)
-            else:
-                if (pool.session_persistence and (
-                        pool.session_persistence.persistence_timeout or
-                        pool.session_persistence.persistence_granularity)):
-                    raise exceptions.ValidationException(detail=_(
-                        "persistence_timeout and persistence_granularity "
-                        "is only for UDP and SCTP protocol pools."))
 
             if pool.session_persistence:
                 sp_dict = pool.session_persistence.to_dict(render_unsets=False)
-                validate.check_session_persistence(sp_dict)
+                _validate_session_persistence(sp_dict, pool.protocol)
 
             # Load the driver early as it also provides validation
             driver = driver_factory.get_driver(provider)
@@ -679,17 +686,11 @@ class PoolsController(base.BaseController):
         if current.protocol in (constants.PROTOCOL_UDP,
                                 lib_consts.PROTOCOL_SCTP):
             self._validate_pool_request_for_udp_sctp(pool)
-        else:
-            if (pool.session_persistence and (
-                    pool.session_persistence.persistence_timeout or
-                    pool.session_persistence.persistence_granularity)):
-                raise exceptions.ValidationException(detail=_(
-                    "persistence_timeout and persistence_granularity "
-                    "is only for UDP protocol pools."))
 
         if pool.session_persistence:
             sp_dict = pool.session_persistence.to_dict(render_unsets=False)
-            validate.check_session_persistence(sp_dict)
+            _validate_session_persistence(
+                sp_dict, current.protocol, for_update=True)
             if _has_named_http_cookie(sp_dict):
                 driver_utils.require_http_cookie_name(driver, current.protocol)
 
