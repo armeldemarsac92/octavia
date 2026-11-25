@@ -217,6 +217,8 @@ GATEWAY_CAPABILITY_HTTPS_LISTENER_ISOLATION = 'https_listener_isolation_v1'
 GATEWAY_CAPABILITY_FRONTEND_CLIENT_AUTH_INSECURE_FALLBACK = (
     'frontend_client_auth_insecure_fallback_v1')
 GATEWAY_CAPABILITY_HTTP_HEADER_EXACT = 'http_header_exact_v1'
+GATEWAY_CAPABILITY_HTTP_HEADER_NAME_256 = 'http_header_name_256_v1'
+HAPROXY_HTTP_HEADER_NAME_256_OPTION = 'tune.octavia.http-header-name-256'
 GATEWAY_CAPABILITY_HTTP_LONG_HOSTNAME = 'http_long_hostname_v1'
 GATEWAY_CAPABILITY_HTTP_LITERAL_PATH = 'http_literal_path_v1'
 GATEWAY_CAPABILITY_HTTP_METHOD_MATCH = 'http_method_match_v1'
@@ -278,8 +280,10 @@ GRPC_CONTENT_TYPE = 'application/grpc'
 L7RULE_HTTP_METHODS = frozenset((
     'GET', 'HEAD', 'POST', 'PUT', 'DELETE', 'CONNECT', 'OPTIONS', 'TRACE',
     'PATCH'))
-# HAProxy HTX stores HTTP field name lengths in eight bits.
+# Default limit for L7 rule keys, including exact header names on
+# HAProxy builds without the extended HTX representation.
 MAX_L7RULE_KEY_LENGTH = 255
+MAX_L7RULE_HTTP_HEADER_EXACT_KEY_LENGTH = 256
 MAX_LEGACY_L7RULE_VALUE_LENGTH = 255
 MAX_L7RULE_HTTP_HOSTNAME_REGEX_LENGTH = 512
 MAX_L7RULE_HTTP_LITERAL_PATH_LENGTH = 1024

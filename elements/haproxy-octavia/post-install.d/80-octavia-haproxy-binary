@@ -13,6 +13,12 @@ if [[ -f "$binary" ]]; then
     tracing_backoff="$tracing-route-retry-backoff-v1"
     grpc_mirror="$backoff-grpc-mirror-v1"
     tracing_grpc_mirror="$tracing_backoff-grpc-mirror-v1"
+    case "$version" in
+        "$grpc_mirror-http-header-name-256-v1 "*|"$tracing_grpc_mirror-http-header-name-256-v1 "*)
+            # These builds have the same image dependencies as their predecessors.
+            version=${version/-http-header-name-256-v1 / }
+            ;;
+    esac
     if [[ "$version" != "$prefix "* &&
           "$version" != "$prefix-h2-alpn-v1 "* &&
           "$version" != "$prefix-h2-alpn-v1-backend-sans-v1 "* &&

@@ -18,8 +18,8 @@ Build the binary on the target image distribution and architecture::
 The script checks the HAProxy 3.0.19 tarball and each patch by SHA-256. It
 applies the strict DNS, required HTTP/2 ALPN, explicit SAN, HTTP policy,
 HTTP mirror, listener authorization, retry budget, route retry backoff and
-gRPC mirror and authorization body forwarding patches, in that order, with
-zero fuzz.
+gRPC mirror, authorization body forwarding and 256-byte HTTP header name
+patches, in that order, with zero fuzz.
 
 Set ``DIB_OCTAVIA_HAPROXY_BINARY`` to the absolute path of the resulting binary
 when running Octavia's ``diskimage-create.sh``. The element checks the binary in
@@ -33,6 +33,23 @@ Octavia database, octavia-lib, API and workers before adding the provider to
 leave the upgraded workers and Amphora binaries in place while traffic drains
 from protected pools. A package upgrade that replaces the patched HAProxy
 requires a new verified build before that image can serve protected pools.
+
+256-byte HTTP header names
+==========================
+
+Both Octavia HAProxy builds carry the version suffix
+``-http-header-name-256-v1``. Add
+``tune.octavia.http-header-name-256`` to the HAProxy ``global`` section to
+allow HTTP header names up to 256 bytes for that HAProxy process. The
+directive takes no arguments and defaults to disabled. The default limit
+for names is 255 bytes. The trailer name limit remains 255 bytes. HAProxy
+uses its existing HTTP parser and header value limits in both modes.
+
+Run the loopback regression with an HTTP/2-enabled curl::
+
+    python3 elements/haproxy-octavia/test-http-header-name-256.py \
+        /path/to/haproxy -v
+
 
 Listener OTLP/HTTP tracing
 ==========================

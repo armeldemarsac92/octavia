@@ -2621,7 +2621,8 @@ class L7PolicyRepository(BaseRepository):
         return query.with_for_update().limit(1).scalar() is not None
 
     def has_enabled_l7rule(self, session, rule_type, *, compare_type=None,
-                           min_value_length=None, policy_id=None,
+                           min_value_length=None, min_key_length=None,
+                           policy_id=None,
                            load_balancer_id=None,
                            tcp_tls_termination=None, **policy_filters):
         """Find an active child under the parent's provisioning lock.
@@ -2647,6 +2648,9 @@ class L7PolicyRepository(BaseRepository):
         if min_value_length is not None:
             query = query.filter(func.char_length(rule.value) >=
                                  min_value_length)
+        if min_key_length is not None:
+            query = query.filter(func.char_length(rule.key) >=
+                                 min_key_length)
         if tcp_tls_termination is not None or load_balancer_id is not None:
             query = query.join(policy.listener)
         if tcp_tls_termination is not None:

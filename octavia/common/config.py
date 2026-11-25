@@ -278,6 +278,11 @@ api_opts = [
                        'support full-value exact HTTP header L7 rules. '
                        'Enable after upgrading the database, API, workers '
                        'and Amphora fleet.')),
+    cfg.ListOpt('enabled_http_header_name_256_providers', default=[],
+                help=_('Provider drivers whose regional fleets support '
+                       '256-byte exact HTTP header names. Requires '
+                       'enabled_http_header_exact_providers and qualified '
+                       'Amphora agents and HAProxy builds.')),
     cfg.ListOpt('enabled_http_query_param_exact_providers', default=[],
                 help=_('Provider driver names whose regional fleets '
                        'support exact HTTP query parameter L7 rules. '

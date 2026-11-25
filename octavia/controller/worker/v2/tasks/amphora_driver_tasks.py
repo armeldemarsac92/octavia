@@ -135,11 +135,13 @@ class AmpListenersUpdate(BaseAmphoraTask):
             raise driver_except.ListenerProvisioningError()
         weighted = utils.has_tls_sni_passthrough_weighted_policies(
             db_lb, active=False)
+        header_name_256 = validate.http_header_name_256_listeners(db_lb)
         finalizing = (
             db_lb.topology == constants.TOPOLOGY_SINGLE and
             (utils.active_http_retry_backoff_policies(db_lb) or weighted or
-             utils.backend_tls_system_ca_pool_ids(db_lb)))
+             utils.backend_tls_system_ca_pool_ids(db_lb) or header_name_256))
         strict = (finalizing or weighted or _has_managed_udp_listener(db_lb) or
+                  header_name_256 or
                   utils.has_active_http_header_persistence(db_lb))
         if db_amp is None and strict:
             raise driver_except.ListenerProvisioningError()
@@ -180,7 +182,8 @@ class AmphoraIndexListenerUpdate(BaseAmphoraTask):
                 session, id=loadbalancer_id)
         managed_udp = _has_managed_udp_listener(db_lb)
         strict = (
-            managed_udp or utils.active_http_retry_backoff_policies(db_lb) or
+            managed_udp or validate.http_header_name_256_listeners(db_lb) or
+            utils.active_http_retry_backoff_policies(db_lb) or
             utils.backend_tls_system_ca_pool_ids(db_lb) or
             utils.has_active_http_header_persistence(db_lb) or
             utils.has_tls_sni_passthrough_weighted_policies(
@@ -242,12 +245,126 @@ class AmphoraIndexListenerUpdate(BaseAmphoraTask):
                                          status=constants.ERROR)
 
 
+_HEADER_RULE_MATCH_FIELDS = ('type', 'compare_type', 'key', 'value', 'invert')
+
+
+def _http_header_name_changes(loadbalancer, original, updates):
+    """Return rollback attributes for fresh dependent admission."""
+    changes = [
+        (rule, {'enabled': False})
+        for listener in loadbalancer.listeners
+        for policy in listener.l7policies
+        for rule in policy.l7rules
+        if (rule.provisioning_status == constants.PENDING_CREATE and
+            validate.is_http_header_name_256(rule.type, rule.key))]
+    if not original or not updates:
+        return changes
+
+    old_enabled = original.get(constants.ADMIN_STATE_UP)
+    new_enabled = updates.get('enabled', updates.get(constants.ADMIN_STATE_UP))
+    rule_id = original.get(constants.L7RULE_ID)
+    policy_id = original.get(constants.L7POLICY_ID)
+    listener_id = original.get(constants.LISTENER_ID)
+    reopen = old_enabled is False and new_enabled is True
+    for listener in loadbalancer.listeners:
+        if listener_id and listener.id != listener_id:
+            continue
+        for policy in listener.l7policies:
+            if policy_id and policy.id != policy_id:
+                continue
+            for rule in policy.l7rules:
+                if rule_id:
+                    if (rule.id != rule_id or rule.provisioning_status !=
+                            constants.PENDING_UPDATE):
+                        continue
+                    updated = {field: original.get(field)
+                               for field in _HEADER_RULE_MATCH_FIELDS
+                               if (field in updates and
+                                   updates[field] == getattr(rule, field) and
+                                   updates[field] != original.get(field))}
+                    old_dependency = validate.is_http_header_name_256(
+                        original.get('type'), original.get('key'))
+                    new_dependency = validate.is_http_header_name_256(
+                        rule.type, rule.key)
+                    active_policy = (old_enabled and policy.enabled and
+                                     listener.enabled and
+                                     loadbalancer.enabled)
+                    retiring_dependency = False
+                    if active_policy and new_enabled is False:
+                        remaining = [
+                            sibling for sibling in policy.l7rules
+                            if (sibling.id != rule.id and sibling.enabled and
+                                sibling.provisioning_status not in (
+                                    constants.PENDING_DELETE,
+                                    constants.DELETED))]
+                        retiring_dependency = bool(remaining) and (
+                            old_dependency or any(
+                                validate.is_http_header_name_256(
+                                    sibling.type, sibling.key)
+                                for sibling in remaining))
+                    active_mutation = (
+                        old_dependency and active_policy and rule.enabled)
+                    match_changed = updated and (
+                        new_dependency or active_mutation)
+                    if (retiring_dependency or match_changed or
+                            (reopen and new_dependency)):
+                        if 'enabled' in updates and old_enabled is not None:
+                            updated['enabled'] = old_enabled
+                        changes.append((rule, updated))
+                elif (reopen and rule.enabled and
+                      rule.provisioning_status not in (
+                          constants.PENDING_DELETE, constants.DELETED) and
+                      validate.is_http_header_name_256(rule.type, rule.key)):
+                    if policy_id:
+                        resource = policy
+                    elif listener_id:
+                        resource = listener
+                    else:
+                        resource = loadbalancer
+                    changes.append((resource, {'enabled': False}))
+    return changes
+
+
+def _withdraws_http_listener_state(loadbalancer, original, updates):
+    """Identify closures that can be published on a degraded pair."""
+    enabled = updates.get('enabled', updates.get(constants.ADMIN_STATE_UP))
+    shrinking = enabled is False
+    rule_id = original.get(constants.L7RULE_ID)
+    policy_id = original.get(constants.L7POLICY_ID)
+    if shrinking and not rule_id:
+        return True
+    for listener in loadbalancer.listeners:
+        for policy in listener.l7policies:
+            if policy.provisioning_status == constants.PENDING_DELETE:
+                return True
+            policy_closed = not (listener.enabled and policy.enabled)
+            if policy_closed and (
+                    (policy_id and policy.id == policy_id) or
+                    (rule_id and any(rule.id == rule_id
+                                     for rule in policy.l7rules))):
+                return True
+            retired = any(
+                rule.provisioning_status == constants.PENDING_DELETE or
+                (shrinking and rule.id == rule_id)
+                for rule in policy.l7rules)
+            if retired and (policy_closed or not any(
+                    rule.enabled and rule.provisioning_status not in (
+                        constants.PENDING_DELETE, constants.DELETED)
+                    for rule in policy.l7rules)):
+                return True
+    return False
+
+
 class ListenersUpdate(BaseAmphoraTask):
     """Task to update amphora with all specified listeners' configurations."""
 
-    def execute(self, loadbalancer_id):
+    def execute(self, loadbalancer_id, original=None, updates=None):
         """Execute updates per listener for an amphora."""
-        _serialize_render(self._update, loadbalancer_id)
+        if original is None:
+            _serialize_render(self._update, loadbalancer_id)
+        else:
+            _serialize_render(self._update, loadbalancer_id, None,
+                              original, updates)
 
     @staticmethod
     def _scope_for_udp_pool(loadbalancer, pool_id):
@@ -258,14 +375,45 @@ class ListenersUpdate(BaseAmphoraTask):
                 return pool.listeners
         return None
 
-    def _update(self, loadbalancer_id, pool_id=None):
+    def _restore_header_name_changes(self, session, changes):
+        repositories = {
+            octavia_data_models.L7Rule: repo.L7RuleRepository,
+            octavia_data_models.L7Policy: repo.L7PolicyRepository,
+            octavia_data_models.Listener: repo.ListenerRepository,
+            octavia_data_models.LoadBalancer: repo.LoadBalancerRepository,
+        }
+        for resource, attributes in changes:
+            repositories[type(resource)]().update(
+                session, resource.id, **attributes)
+
+    def _update(self, loadbalancer_id, pool_id=None, original=None,
+                updates=None):
         session = db_apis.get_session()
+        unsupported = None
+        changes = []
+        withdrawal = False
         with session.begin():
             if self.loadbalancer_repo.batch_owns_graph(
                     session, loadbalancer_id):
                 return
             loadbalancer = self.loadbalancer_repo.get(session,
                                                       id=loadbalancer_id)
+            if loadbalancer:
+                changes = _http_header_name_changes(
+                    loadbalancer, original, updates)
+                if changes:
+                    driver = driver_factory.get_driver(loadbalancer.provider)
+                    try:
+                        driver_utils.require_http_header_name_256(driver)
+                    except exceptions.ProviderUnsupportedOptionError as error:
+                        unsupported = error
+                        self._restore_header_name_changes(session, changes)
+                if (not changes and
+                        validate.http_header_name_256_listeners(loadbalancer)):
+                    withdrawal = _withdraws_http_listener_state(
+                        loadbalancer, original or {}, updates or {})
+        if unsupported:
+            raise unsupported
         if loadbalancer:
             scoped = self._scope_for_udp_pool(loadbalancer, pool_id)
             if scoped is not None:
@@ -274,7 +422,19 @@ class ListenersUpdate(BaseAmphoraTask):
                 if callable(update_udp):
                     update_udp(loadbalancer, [item.id for item in scoped])
                     return
-            self.amphora_driver.update(loadbalancer)
+            try:
+                self.amphora_driver.update(
+                    loadbalancer,
+                    **({'http_header_name_withdrawal': True}
+                       if withdrawal else {}),
+                    **({'require_http_header_name_256': True}
+                       if changes else {}))
+            except driver_except.HttpHeaderName256Unsupported:
+                # The capability preflight failed before any publication.
+                if changes:
+                    with session.begin():
+                        self._restore_header_name_changes(session, changes)
+                raise
         else:
             LOG.error('Load balancer %s for listeners update not found. '
                       'Skipping update.', loadbalancer_id)
@@ -548,6 +708,10 @@ class ApplyL7PolicyWithInitialRules(BaseAmphoraTask):
                         'The disabled policy and its complete set of rules '
                         'are required for initial provisioning.'))
                 loadbalancer = self.loadbalancer_repo.get(session, id=lb_id)
+                if any(validate.is_http_header_name_256(rule.type, rule.key)
+                       for rule in rules):
+                    driver_utils.require_http_header_name_256(
+                        driver_factory.get_driver(loadbalancer.provider))
                 self.amphora_driver.update(loadbalancer)
             except Exception as e:
                 update_error = e
@@ -632,12 +796,16 @@ class ApplyL7PolicyActivation(BaseAmphoraTask):
         literal_path = any(
             rule.type == constants.L7RULE_TYPE_HTTP_PATH_LITERAL
             for rule in activating_rules)
-        if long_hostname or literal_path:
+        header_name_256 = any(validate.is_http_header_name_256(
+            rule.type, rule.key) for rule in activating_rules)
+        if long_hostname or literal_path or header_name_256:
             driver = driver or driver_factory.get_driver(lb.provider)
             if ((long_hostname and
                  not driver_utils.http_long_hostname_available(driver)) or
                 (literal_path and
-                 not driver_utils.http_literal_path_available(driver))):
+                 not driver_utils.http_literal_path_available(driver)) or
+                (header_name_256 and
+                 not driver_utils.http_header_name_256_available(driver))):
                 return False
         if listener.protocol == constants.PROTOCOL_TCP:
             driver = driver_factory.get_driver(lb.provider)
@@ -925,6 +1093,7 @@ class AmphoraIndexListenersReload(BaseAmphoraTask):
         with session.begin():
             db_lb = self.loadbalancer_repo.get(session, id=loadbalancer_id)
         strict = (
+            validate.http_header_name_256_listeners(db_lb) or
             utils.active_http_retry_backoff_policies(db_lb) or
             utils.has_tls_sni_passthrough_weighted_policies(
                 db_lb, active=False))
