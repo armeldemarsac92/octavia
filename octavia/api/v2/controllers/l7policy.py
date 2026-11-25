@@ -204,6 +204,7 @@ class L7PolicyActivationController(base.BaseController):
                 self._dispatch(driver, lb.id, operation['id'])
                 return
             if (lb.provisioning_status != constants.ACTIVE or
+                    self.repositories.load_balancer.tcp_batch_pending(lb) or
                     listener.provisioning_status != constants.ACTIVE or
                     not listener.enabled or not lb.enabled):
                 raise exceptions.L7PolicyActivationConflict()
@@ -234,6 +235,7 @@ class L7PolicyActivationController(base.BaseController):
                 self._validate_policy(session, policy, listener, driver)
 
             operation_id = uuidutils.generate_uuid()
+            lb.tcp_member_batch = None
             lb.l7policy_activation = {
                 'id': operation_id,
                 'listener_id': listener.id,

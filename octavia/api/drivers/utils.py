@@ -23,6 +23,7 @@ from oslo_log import log as logging
 from oslo_utils import excutils
 from stevedore import driver as stevedore_driver
 
+from octavia.api.drivers import driver_factory
 from octavia.common import constants
 from octavia.common import data_models
 from octavia.common import exceptions
@@ -158,6 +159,12 @@ def gateway_capabilities(driver):
             is True):
         capabilities.append(
             constants.GATEWAY_CAPABILITY_L7POLICY_BATCH_ACTIVATION)
+    tcp_rejection_providers = (
+        api_settings.enabled_tcp_connection_rejection_providers)
+    if (driver.name in tcp_rejection_providers and
+            driver_factory.supports_tcp_connection_rejection(driver)):
+        capabilities.append(
+            constants.GATEWAY_CAPABILITY_TCP_CONNECTION_REJECTION)
     if (driver.name in api_settings.enabled_http_header_exact_providers and
             getattr(driver, 'supports_http_header_exact', False) is True):
         capabilities.append(constants.GATEWAY_CAPABILITY_HTTP_HEADER_EXACT)
@@ -1026,6 +1033,9 @@ def db_pool_to_provider_pool(db_pool, for_delete=False):
 def pool_dict_to_provider_dict(pool_dict, for_delete=False, for_update=False):
     new_pool_dict = _base_to_provider_dict(pool_dict, include_project_id=True)
     new_pool_dict['pool_id'] = new_pool_dict.pop('id')
+    # Only the Amphora member batch extension consumes these DB fields.
+    new_pool_dict.pop('tcp_connection_rejection', None)
+    new_pool_dict.pop('tcp_member_batch_id', None)
     # A legacy DTO can carry the old pool for updates and deletes. The
     # persisted requirement still controls rendering and reactivation.
     supports_h2 = BACKEND_TLS_H2_ALPN_PAYLOAD_AVAILABLE
@@ -1149,6 +1159,7 @@ def member_dict_to_provider_dict(member_dict):
     new_member_dict = _base_to_provider_dict(member_dict,
                                              include_project_id=True)
     new_member_dict['member_id'] = new_member_dict.pop('id')
+    new_member_dict.pop('tcp_batch_quota_released', None)
     if 'ip_address' in new_member_dict:
         new_member_dict['address'] = new_member_dict.pop('ip_address')
     # Remove the DB back references

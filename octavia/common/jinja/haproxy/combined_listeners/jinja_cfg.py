@@ -1083,6 +1083,10 @@ class JinjaTemplater:
             ret_value['closed'] = True
             ret_value['enabled'] = False
             return ret_value
+        rejection = getattr(pool, 'tcp_connection_rejection', None)
+        if pool.protocol == constants.PROTOCOL_TCP and rejection is not None:
+            ret_value['tcp_connection_rejection'] = (
+                validate.tcp_connection_rejection(rejection))
         budget = getattr(pool, 'backend_retry_budget', None)
         if budget is not None:
             ret_value['backend_retry_budget'] = (
