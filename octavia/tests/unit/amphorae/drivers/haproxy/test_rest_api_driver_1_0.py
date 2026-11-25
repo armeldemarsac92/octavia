@@ -620,6 +620,10 @@ class TestHaproxyAmphoraLoadBalancerDriverTest(base.TestCase):
     def _guarded_udp_graph(self):
         graph = sample_configs_combined.sample_lb_with_udp_listener_tuple(
             topology=constants.TOPOLOGY_ACTIVE_STANDBY)
+        graph.amphorae[:] = [
+            amp._replace(status=constants.AMPHORA_ALLOCATED)
+            for amp in graph.amphorae
+        ]
         listener = graph.listeners[0]
         pool = SimpleNamespace(**listener.default_pool._asdict())
         pool.udp_packet_drop = {'numerator': 0, 'denominator': 1}
@@ -636,7 +640,9 @@ class TestHaproxyAmphoraLoadBalancerDriverTest(base.TestCase):
         graph, listener = self._guarded_udp_graph()
         client = self.driver.clients[API_VERSION]
         self.driver.lvs_jinja.build_config.return_value = 'fake_udp_config'
-        self.driver.apply_udp_member_batch(graph, listener.id)
+        receipt = self.driver.apply_udp_member_batch(graph, listener.id)
+        self.assertEqual(tuple((amp.id, amp.role) for amp in graph.amphorae),
+                         receipt)
         guard = client.stage_udp_guard.call_args.args[-1]
         self.assertEqual({'numerator': 0, 'denominator': 1}, guard['fraction'])
         member = listener.default_pool.members[0]
@@ -651,8 +657,8 @@ class TestHaproxyAmphoraLoadBalancerDriverTest(base.TestCase):
                                       'fake_udp_config', guard),
             mock.call.stage_udp_guard(secondary, listener.id,
                                       'fake_udp_config', guard),
-            mock.call.reload_listener(primary, listener.id),
-            mock.call.reload_listener(secondary, listener.id),
+            mock.call.activate_udp_guard(primary, listener.id),
+            mock.call.activate_udp_guard(secondary, listener.id),
         ])
         client.upload_udp_config.assert_not_called()
 
@@ -665,7 +671,51 @@ class TestHaproxyAmphoraLoadBalancerDriverTest(base.TestCase):
                           listener.id)
         client.stage_udp_guard.assert_not_called()
         client.upload_udp_config.assert_not_called()
+        client.activate_udp_guard.assert_not_called()
+
+    def test_udp_batch_rejects_missing_standby_before_staging(self):
+        graph, listener = self._guarded_udp_graph()
+        graph.amphorae.pop()
+        self.assertRaises(driver_except.ListenerProvisioningError,
+                          self.driver.apply_udp_member_batch, graph,
+                          listener.id)
+        client = self.driver.clients[API_VERSION]
+        client.check_udp_guard.assert_not_called()
+        client.stage_udp_guard.assert_not_called()
+        client.activate_udp_guard.assert_not_called()
+
+    def test_udp_pool_retirement_on_old_peer_only_closes_target(self):
+        graph, listener = self._guarded_udp_graph()
+        listener.default_pool.provisioning_status = constants.PENDING_DELETE
+        stock_udp = listener._replace(id='sibling', default_pool=None)
+        graph.listeners.append(stock_udp)
+        client = self.driver.clients[API_VERSION]
+        client.check_udp_guard.side_effect = [exc.NotFound(), None]
+        self.assertRaises(driver_except.AmpDriverNotImplementedError,
+                          self.driver.update_udp_pool_listeners, graph,
+                          [listener.id])
+        legacy, current = graph.amphorae
+        client.close_legacy_udp_listener.assert_called_once_with(
+            legacy, listener.id, timeout_dict=None)
+        self.assertEqual((current, listener.id),
+                         client.stage_udp_guard.call_args.args[:2])
+        client.activate_udp_guard.assert_called_once_with(
+            current, listener.id, timeout_dict=None)
+        client.upload_udp_config.assert_not_called()
         client.reload_listener.assert_not_called()
+
+    def test_udp_stock_pool_retirement_only_reloads_target(self):
+        graph, listener = self._guarded_udp_graph()
+        listener.default_pool.udp_packet_drop = None
+        listener.default_pool.provisioning_status = constants.PENDING_DELETE
+        graph.listeners.append(listener._replace(id='sibling'))
+        self.driver.update_udp_pool_listeners(graph, [listener.id])
+        client = self.driver.clients[API_VERSION]
+        client.reload_listener.assert_has_calls([
+            mock.call(amp, listener.id, timeout_dict=None)
+            for amp in graph.amphorae])
+        self.assertEqual(2, client.reload_listener.call_count)
+        client.check_udp_guard.assert_not_called()
 
     def test_udp_empty_pool_renders_without_ipvs_service(self):
         graph, listener = self._guarded_udp_graph()
@@ -1809,6 +1859,43 @@ class TestAmphoraAPIClientTest(base.TestCase):
             status_code=503)
         self.assertRaises(exc.ServiceUnavailable, self.driver.upload_config,
                           self.amp, FAKE_UUID_1, config)
+
+    @requests_mock.mock()
+    def test_udp_activation_requires_guard_acknowledgement(self, router):
+        reload_url = f'{self.base_url_ver}/loadbalancer/{FAKE_UUID_1}/reload'
+        router.put(reload_url, [
+            {'status_code': 202},
+            {'status_code': 202, 'headers': {'X-Octavia-UDP-Guard': '1'}},
+        ])
+        self.assertRaises(driver_except.ListenerProvisioningError,
+                          self.driver.activate_udp_guard,
+                          self.amp, FAKE_UUID_1)
+        self.driver.activate_udp_guard(self.amp, FAKE_UUID_1)
+
+    @requests_mock.mock()
+    def test_legacy_udp_close_reobserves_only_the_target(self, router):
+        listener_id = 'udp-target'
+        neighbor = {'uuid': 'udp-neighbor', 'type': 'UDP', 'status': 'ACTIVE'}
+        target = {'uuid': listener_id, 'type': 'UDP', 'status': 'ACTIVE'}
+        observed = [
+            {'json': [target, neighbor]},
+            {'json': [{**target, 'status': 'OFFLINE'}, neighbor]},
+            {'json': [neighbor]},
+        ]
+        router.get(f'{self.base_url_ver}/listeners', observed)
+        router.put(f'{self.base_url_ver}/loadbalancer/{listener_id}/stop',
+                   status_code=202)
+        router.delete(f'{self.base_url_ver}/listeners/{listener_id}',
+                      status_code=200)
+        self.driver.close_legacy_udp_listener(self.amp, listener_id)
+        self.assertEqual([
+            ('GET', '/1.0/listeners'),
+            ('PUT', f'/1.0/loadbalancer/{listener_id}/stop'),
+            ('GET', '/1.0/listeners'),
+            ('DELETE', f'/1.0/listeners/{listener_id}'),
+            ('GET', '/1.0/listeners'),
+        ], [(request.method, request.path)
+            for request in router.request_history])
 
     @requests_mock.mock()
     def test_upload_udp_config(self, m):

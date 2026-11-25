@@ -35,6 +35,7 @@ from octavia.i18n import _
 EXPIRE_NODEST = 'net.ipv4.vs.expire_nodest_conn'
 CONVERGENCE_TIMEOUT = 5
 STATE_SUFFIX = '.udp-guard.json'
+CONFIRMATION_HEADER = 'X-Octavia-UDP-Guard'
 DROP_IN = '50-octavia-udp-guard.conf'
 
 
@@ -165,6 +166,8 @@ def _ipvs_matches(spec):
     vip_port = _kernel_address(spec['vip'], spec['port'])
     contents = keepalivedlvs_query.read_kernel_file(
         constants.AMPHORA_NAMESPACE, keepalivedlvs_query.KERNEL_LVS_PATH)
+    if not contents.startswith('IP Virtual Server version '):
+        return False
     service = None
     destinations = {}
     scanning = False
@@ -175,14 +178,17 @@ def _ipvs_matches(spec):
         if fields[0] != '->':
             scanning = fields[:2] == ['UDP', vip_port]
             if scanning:
-                service = fields[2]
-        elif scanning and int(fields[3]) > 0:
+                # The remaining columns include one-packet scheduling and
+                # persistence. Neither is in the guarded WRR service.
+                service = fields[2:]
+        elif scanning:
             destinations[fields[1]] = (fields[2], int(fields[3]))
     expected = {
-        _kernel_address(dest['address'], dest['port']): ('Masq', weight)
-        for dest in spec['destinations'] if (weight := dest['weight']) > 0
+        _kernel_address(dest['address'], dest['port']):
+        ('Masq', dest['weight'])
+        for dest in spec['destinations']
     }
-    return (service == ('wrr' if spec['has_service'] else None) and
+    return (service == (['wrr'] if spec['has_service'] else None) and
             destinations == expected)
 
 

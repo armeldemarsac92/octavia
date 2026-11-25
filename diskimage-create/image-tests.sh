@@ -102,21 +102,29 @@ if [ $? != 0 ]; then
 else
     echo "keepalived package found in the Amphora image"
 fi
-# An opted-in UDP listener needs nftables even on iptables-based Amphorae.
-if ! echo "$AMP_IMAGE_INFO" | virt-inspector --xpath \
-    '/operatingsystems/operatingsystem/applications/application/name[text()="nftables"]' | \
-    grep -q '<name>nftables</name>'; then
-    echo "ERROR: Amphora image is missing the nftables package"
-    exit 1
-fi
-
-AMP_KERNEL_MODULES=$(virt-ls -a "$AMP_IMAGE_LOCATION" -R /lib/modules) || exit 1
-for module in nf_tables nft_ct nft_numgen; do
-    if ! grep -Eq "(^|/)${module}\.ko(\.[[:alnum:]]+)?$" <<< "$AMP_KERNEL_MODULES"; then
-        echo "ERROR: Amphora image is missing the $module kernel module"
+# The opt-out image retains the existing iptables dataplane.
+if [ "${DIB_OCTAVIA_AMP_USE_NFTABLES:-True}" = "True" ]; then
+    if ! echo "$AMP_IMAGE_INFO" | virt-inspector --xpath \
+        '/operatingsystems/operatingsystem/applications/application/name[text()="nftables"]' | \
+        grep -q '<name>nftables</name>'; then
+        echo "ERROR: Amphora image is missing the nftables package"
         exit 1
     fi
-done
+
+    AMP_KERNEL_MODULES=$(virt-ls -a "$AMP_IMAGE_LOCATION" -R /lib/modules) || exit 1
+    for module in nf_tables nft_ct nft_numgen; do
+        if ! grep -Eq "(^|/)${module}\.ko(\.[[:alnum:]]+)?$" <<< "$AMP_KERNEL_MODULES"; then
+            echo "ERROR: Amphora image is missing the $module kernel module"
+            exit 1
+        fi
+    done
+
+    AMP_BINARIES=$(virt-ls -a "$AMP_IMAGE_LOCATION" /usr/local/bin /usr/bin) || exit 1
+    if ! grep -qx 'amphora-udp-guard' <<< "$AMP_BINARIES"; then
+        echo "ERROR: Amphora image is missing the amphora-udp-guard helper"
+        exit 1
+    fi
+fi
 
 echo "Amphora image looks good."
 

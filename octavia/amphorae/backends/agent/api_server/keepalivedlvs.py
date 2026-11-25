@@ -254,6 +254,7 @@ class KeepalivedLvs(lvs_listener_base.LvsListenerApiServerBase):
                             action.lower() != consts.AMP_ACTION_STOP):
                         with guard.lock(kernel=True):
                             guard.finish(state)
+                        response.headers[udp_guard.CONFIRMATION_HEADER] = '1'
                     return response
         return self._manage_lvs_listener(listener_id, action)
 

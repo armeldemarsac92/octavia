@@ -398,6 +398,11 @@ class KeepalivedLvsTestCase(base.TestCase):
 
 
 class GuardedKeepalivedLvsTestCase(base.TestCase):
+    IPVS_HEADER = (
+        'IP Virtual Server version 1.2.1 (size=256)\n'
+        'Prot LocalAddress:Port Scheduler Flags\n'
+        '  -> RemoteAddress:Port Forward Weight ActiveConn InActConn\n')
+
     def setUp(self):
         super().setUp()
         self.listener_id = uuidutils.generate_uuid()
@@ -459,19 +464,40 @@ class GuardedKeepalivedLvsTestCase(base.TestCase):
                                ' -> C633640C:3A9A Masq 1 0 0\n')
         wrong_destination = ('UDP C000021E:4685 wrr\n'
                              ' -> C633640C:3A9A Masq 1 0 0\n')
-        self.ipvs.return_value = neighboring_service + wrong_destination
+        self.ipvs.return_value = (self.IPVS_HEADER + neighboring_service +
+                                  wrong_destination)
         with mock.patch.object(udp_guard, 'CONVERGENCE_TIMEOUT', 0):
             self.assertEqual(500, self.client.put(self.reload_url).status_code)
         self.assertFalse(self.guard.read()['committed'])
         self.assertNotIn('numgen', self._last_rules())
 
-        self.ipvs.return_value = (neighboring_service +
+        self.ipvs.return_value = (self.IPVS_HEADER + neighboring_service +
                                   'UDP C000021E:4685 wrr\n'
                                   ' -> C633640B:3A99 Masq 3 0 0\n')
-        self.assertEqual(202, self.client.put(self.reload_url).status_code)
+        response = self.client.put(self.reload_url)
+        self.assertEqual(202, response.status_code)
+        self.assertEqual('1', response.headers[udp_guard.CONFIRMATION_HEADER])
         self.assertTrue(self.guard.read()['committed'])
         self.assertIn('ip daddr 192.0.2.30 udp dport 18053 '
                       'numgen inc mod 4 < 1 counter drop', self._last_rules())
+
+    def test_stale_zero_weight_or_persistent_service_keeps_guard_closed(self):
+        response = self.client.put(self.listener_url + '/udp_guard',
+                                   json=self.candidate)
+        self.assertEqual(200, response.status_code)
+        expected = ' -> C633640B:3A99 Masq 3 0 0\n'
+        stale = ' -> C633640C:3A9A Masq 0 1 0\n'
+        with mock.patch.object(udp_guard, 'CONVERGENCE_TIMEOUT', 0):
+            self.ipvs.return_value = (self.IPVS_HEADER +
+                                      'UDP C000021E:4685 wrr\n' +
+                                      expected + stale)
+            self.assertEqual(500, self.client.put(self.reload_url).status_code)
+            self.ipvs.return_value = (
+                self.IPVS_HEADER +
+                'UDP C000021E:4685 wrr persistent 300 FFFFFFFF\n' + expected)
+            self.assertEqual(500, self.client.put(self.reload_url).status_code)
+        self.assertFalse(self.guard.read()['committed'])
+        self.assertNotIn('numgen', self._last_rules())
 
     def test_remove_pool_retires_only_its_guard(self):
         response = self.client.put(self.listener_url + '/udp_guard',
@@ -482,7 +508,7 @@ class GuardedKeepalivedLvsTestCase(base.TestCase):
         response = self.client.put(self.listener_url + '/udp_guard',
                                    json=self.candidate)
         self.assertEqual(200, response.status_code)
-        self.ipvs.return_value = 'UDP C000021E:4686 wrr\n'
+        self.ipvs.return_value = self.IPVS_HEADER + 'UDP C000021E:4686 wrr\n'
         self.assertEqual(202, self.client.put(self.reload_url).status_code)
         self.assertFalse(self.guard.path.exists())
         self.assertEqual(f'table ip {self.guard.table} {{}}\n'
@@ -497,7 +523,7 @@ class GuardedKeepalivedLvsTestCase(base.TestCase):
                      f'/listeners/amp/{self.listener_id}/udp_listener')
         response = self.client.put(stock_url, data='old worker')
         self.assertEqual(409, response.status_code)
-        self.ipvs.return_value = 'UDP C000021E:4686 wrr\n'
+        self.ipvs.return_value = self.IPVS_HEADER + 'UDP C000021E:4686 wrr\n'
         response = self.client.delete(self.listener_url)
         self.assertEqual(200, response.status_code)
         self.assertFalse(self.guard.path.exists())

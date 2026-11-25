@@ -276,8 +276,19 @@ OCTAVIA_REPO_PATH
 
 DIB_OCTAVIA_AMP_USE_NFTABLES
     - Boolean that configures nftables inside the amphora image
-    - Required for SR-IOV enabled amphora
+    - Required for SR-IOV enabled amphora and for managed UDP packet drops
     - Default: True
+
+Prepare each Amphora for managed UDP with a guard-capable image before
+configuring the pool. Upgrades must install the matching agent on each peer
+before the controller starts requiring its guard acknowledgement. To retire
+such a pool, keep its guard-capable agent installed until retirement completes.
+On an older agent, the controller stops and deletes only the target listener
+and re-reads the agent's listener inventory. Absence from that inventory proves
+only that the agent no longer reports the listener. Pool retirement remains in
+``ERROR`` until withdrawal from IPVS and nftables can be verified. Recover or
+replace the old Amphora with a guard-capable image, then retry pool deletion.
+Use the affected VIP and UDP port to inspect residual configuration.
 
 Using distribution packages for amphora agent
 ---------------------------------------------
