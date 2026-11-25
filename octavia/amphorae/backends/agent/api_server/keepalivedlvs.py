@@ -346,6 +346,7 @@ class KeepalivedLvs(lvs_listener_base.LvsListenerApiServerBase):
                     if response.status_code == 200:
                         with guard.lock(kernel=True):
                             guard.finish_delete(state)
+                        response.headers[udp_guard.CONFIRMATION_HEADER] = '1'
                     return response
         return self._delete_lvs_listener(listener_id)
 

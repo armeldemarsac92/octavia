@@ -325,11 +325,17 @@ class HaproxyAmphoraLoadBalancerDriver(
 
         return {listener.id for listener in listeners_to_update}
 
+    @staticmethod
+    def _has_udp_guard(listener):
+        return (listener.protocol == consts.PROTOCOL_UDP and
+                getattr(listener.default_pool, 'udp_packet_drop', None)
+                is not None)
+
     def _udp_guard_config(self, listener):
-        pool = listener.default_pool
-        fraction = getattr(pool, 'udp_packet_drop', None)
-        if listener.protocol != consts.PROTOCOL_UDP or fraction is None:
+        if not self._has_udp_guard(listener):
             return None
+        pool = listener.default_pool
+        fraction = pool.udp_packet_drop
         retiring = pool.provisioning_status in jinja_udp_cfg.REMOVED
 
         lb = listener.load_balancer
@@ -363,10 +369,17 @@ class HaproxyAmphoraLoadBalancerDriver(
         except exc.NotFound as error:
             raise driver_except.AmpDriverNotImplementedError() from error
 
-    def _update_udp_amphora(self, listener, amphora, timeout_dict=None):
+    def _update_udp_amphora(self, listener, amphora, timeout_dict=None, *,
+                            delete=False):
         guard = self._udp_guard_config(listener)
         client = self.clients[amphora.api_version]
-        config = self.lvs_jinja.build_config(listener=listener)
+        if delete:
+            # Stage the closed VIP/port even when a prior DELETE already
+            # removed the files. A fresh kernel proof is required on retry.
+            guard.update(has_service=False, destinations=[], retiring=True)
+            config = f'net_namespace {consts.AMPHORA_NAMESPACE}\n'
+        else:
+            config = self.lvs_jinja.build_config(listener=listener)
         if guard is None:
             client.upload_udp_config(amphora, listener.id, config,
                                      timeout_dict=timeout_dict)
@@ -388,11 +401,14 @@ class HaproxyAmphoraLoadBalancerDriver(
             raise
         client.stage_udp_guard(amphora, listener.id, config, guard,
                                timeout_dict=timeout_dict)
-        client.activate_udp_guard(amphora, listener.id,
-                                  timeout_dict=timeout_dict)
+        if delete:
+            client.delete_guarded_udp_listener(amphora, listener.id)
+        else:
+            client.activate_udp_guard(amphora, listener.id,
+                                      timeout_dict=timeout_dict)
 
     @staticmethod
-    def _udp_batch_amphorae(loadbalancer):
+    def _allocated_udp_amphorae(loadbalancer):
         amphorae = [amp for amp in loadbalancer.amphorae
                     if amp.status == consts.AMPHORA_ALLOCATED]
         roles = {
@@ -417,7 +433,7 @@ class HaproxyAmphoraLoadBalancerDriver(
 
         # Ordinary member updates need the complete allocated topology.
         # Replacement Amphorae use the single-peer failover render method.
-        amphorae = self._udp_batch_amphorae(loadbalancer)
+        amphorae = self._allocated_udp_amphorae(loadbalancer)
         config = self.lvs_jinja.build_config(listener=listener)
         for amphora in amphorae:
             self._populate_amphora_api_version(amphora)
@@ -433,25 +449,36 @@ class HaproxyAmphoraLoadBalancerDriver(
 
     def update_udp_pool_listeners(self, loadbalancer, listener_ids):
         if not listener_ids:
-            return
+            return ()
         listeners = {
             listener.id: listener for listener in loadbalancer.listeners
             if listener.protocol == consts.PROTOCOL_UDP
         }
         if not set(listener_ids) <= listeners.keys():
             raise driver_except.ListenerProvisioningError()
+        return self._update_scoped_udp_listeners(
+            loadbalancer, [listeners[listener_id] for listener_id in
+                           listener_ids])
+
+    def _update_scoped_udp_listeners(self, loadbalancer, listeners, *,
+                                     delete=False):
+        if any(self._has_udp_guard(listener) for listener in listeners):
+            amphorae = self._allocated_udp_amphorae(loadbalancer)
+        else:
+            amphorae = [amp for amp in loadbalancer.amphorae
+                        if amp.status != consts.DELETED]
         errors = []
-        for amphora in loadbalancer.amphorae:
-            if amphora.status == consts.DELETED:
-                continue
+        for amphora in amphorae:
             try:
                 self._populate_amphora_api_version(amphora)
-                for listener_id in listener_ids:
-                    self._update_udp_amphora(listeners[listener_id], amphora)
+                for listener in listeners:
+                    self._update_udp_amphora(listener, amphora, delete=delete)
             except Exception as error:
                 errors.append(error)
         if errors:
             raise errors[0]
+        return tuple(sorted((amp.id, amp.role) for amp in amphorae
+                            if amp.status == consts.AMPHORA_ALLOCATED))
 
     def update(self, loadbalancer, *, l7policy_activation=False,
                l7policy_restoration=False, tcp_member_batch=False):
@@ -763,9 +790,10 @@ class HaproxyAmphoraLoadBalancerDriver(
         self._apply('start_listener', loadbalancer, amphora, timeout_dict)
 
     def delete(self, listener):
-        # Delete any UDP/SCTP listeners the old way (we didn't update the way
-        # they are configured)
         loadbalancer = listener.load_balancer
+        if self._has_udp_guard(listener):
+            return self._update_scoped_udp_listeners(
+                loadbalancer, [listener], delete=True)
         if listener.protocol in consts.LVS_PROTOCOLS:
             for amp in loadbalancer.amphorae:
                 if amp.status != consts.DELETED:
@@ -1471,6 +1499,14 @@ class AmphoraAPIClient1_0(AmphoraAPIClientBase):
         response = self._action(consts.AMP_ACTION_RELOAD, amp, listener_id,
                                 timeout_dict=timeout_dict)
         if (response.status_code != 202 or
+                response.headers.get('X-Octavia-UDP-Guard') != '1'):
+            raise driver_except.ListenerProvisioningError()
+
+    def delete_guarded_udp_listener(self, amp, listener_id):
+        response = self.delete(amp, f'listeners/{listener_id}',
+                               retry_404=False)
+        exc.check_exception(response)
+        if (response.status_code != 200 or
                 response.headers.get('X-Octavia-UDP-Guard') != '1'):
             raise driver_except.ListenerProvisioningError()
 
