@@ -17,8 +17,8 @@ Build the binary on the target image distribution and architecture::
 
 The script checks the HAProxy 3.0.19 tarball and each patch by SHA-256. It
 applies the strict DNS, required HTTP/2 ALPN, explicit SAN, HTTP policy,
-HTTP mirror, listener authorization, retry budget and route retry backoff
-patches, in that order, with zero fuzz.
+HTTP mirror, listener authorization, retry budget, route retry backoff and
+gRPC mirror patches, in that order, with zero fuzz.
 
 Set ``DIB_OCTAVIA_HAPROXY_BINARY`` to the absolute path of the resulting binary
 when running Octavia's ``diskimage-create.sh``. The element checks the binary in
@@ -257,16 +257,32 @@ directory. The worker UID must be able to connect to the socket.
 Each HAProxy worker process can run up to 128 copies with eight waiting
 ``tune.bufsize`` buffers and one HTTP client input buffer per copy. The
 private listener does not consume the public connection quota. Connecting
-to the UNIX socket has a two-second timeout, and the copy has a five-second
-inactivity timeout and a 30-second total deadline. A copy can be dropped if
-resources are scarce, the source upload is interrupted or its receiver falls
-behind. Only a complete upload gets an end-of-message marker. The active
-count and drop counters are available through ``show octavia mirrors`` on the
-HAProxy stats socket.
+to the UNIX socket has a two-second timeout. The ordinary HTTP action has a
+five-second inactivity timeout and a 30-second total deadline.
+
+The ``grpc_request_mirror_v1`` build adds ``http-request octavia-grpc-mirror``
+with the same arguments. Amphora uses it for HTTP/2 POST requests with a
+single gRPC Content-Type and an h2c or TLS pool that requires ALPN h2. It
+restores ``TE: trailers`` on the delivery hop. The gRPC upload can continue
+while messages are arriving and the destination accepts them, including
+after the destination starts streaming a reply. The copy expires after a
+five-second gap in source upload progress or five seconds spent waiting
+for the reply after upload ends. Amphora uses the ordinary action for
+other HTTP requests and on images that support the HTTP action alone.
+
+A copy can be dropped if resources are scarce, the source upload is
+interrupted or its receiver falls behind. Only a complete upload gets an
+end-of-message marker. The active count and drop counters are available
+through ``show octavia mirrors`` on the HAProxy stats socket.
 
 Run the loopback qualification with OpenSSL, Python and the ``h2`` package::
 
     python elements/haproxy-octavia/test-request-mirror.py /path/to/haproxy -v
+
+Run the gRPC loopback checks with the ``grpcio`` and ``h2`` packages::
+
+    python elements/haproxy-octavia/test-grpc-request-mirror.py /path/to/haproxy active
+    python elements/haproxy-octavia/test-grpc-request-mirror.py /path/to/haproxy blocked
 
 
 HTTP listener authorization

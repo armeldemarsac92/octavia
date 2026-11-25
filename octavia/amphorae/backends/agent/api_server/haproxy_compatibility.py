@@ -165,6 +165,18 @@ def _supports_tls_sni_passthrough_weighted_pools(haproxy_cmd):
     return True
 
 
+_GRPC_MIRROR_PROBE = """defaults
+    mode http
+    timeout client 1s
+    timeout connect 1s
+    timeout server 1s
+frontend probe
+    bind 127.0.0.1:12345
+    filter octavia-mirror /run/octavia/mirror
+    http-request octavia-grpc-mirror 00000000-0000-0000-0000-000000000000 0 1
+"""
+
+
 def get_haproxy_capabilities():
     haproxy_cmd = CONF.haproxy_amphora.haproxy_cmd
     try:
@@ -201,10 +213,14 @@ def get_haproxy_capabilities():
     listener_auth = f'{http_request_mirror}-listener-auth-v1'
     retry_budget = f'{listener_auth}-backend-retry-budget-v1'
     otlp_tracing = f'{retry_budget}-listener-otlp-v1'
+    backoff = f'{retry_budget}-route-retry-backoff-v1'
+    tracing_backoff = f'{otlp_tracing}-route-retry-backoff-v1'
+    grpc_mirror = f'{backoff}-grpc-mirror-v1 '
+    tracing_grpc_mirror = f'{tracing_backoff}-grpc-mirror-v1 '
     retry_budget_builds = (
-        f'{retry_budget} ', f'{retry_budget}-route-retry-backoff-v1 ')
+        f'{retry_budget} ', f'{backoff} ', grpc_mirror)
     otlp_tracing_builds = (
-        f'{otlp_tracing} ', f'{otlp_tracing}-route-retry-backoff-v1 ')
+        f'{otlp_tracing} ', f'{tracing_backoff} ', tracing_grpc_mirror)
     strict_dns_builds = (
         f'{strict_dns} ', f'{strict_dns}-h2-alpn-v1 ',
         f'{backend_sans} ', f'{http_request_policy} ',
@@ -228,6 +244,9 @@ def get_haproxy_capabilities():
                 constants.GATEWAY_CAPABILITY_HTTP_RETRY_BACKOFF] = True
     if output.startswith(strict_dns_builds[4:]):
         capabilities[constants.GATEWAY_CAPABILITY_HTTP_REQUEST_MIRROR] = True
+    if (output.startswith((grpc_mirror, tracing_grpc_mirror)) and
+            _valid_haproxy_config(haproxy_cmd, _GRPC_MIRROR_PROBE)):
+        capabilities[constants.GATEWAY_CAPABILITY_GRPC_REQUEST_MIRROR] = True
     if (output.startswith(strict_dns_builds[5:]) and
             re.search(r'^\s*\[OCTAVIA\] octavia-auth\s*$', output, re.M)):
         capabilities[

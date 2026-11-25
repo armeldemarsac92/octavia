@@ -106,6 +106,29 @@ class TestGatewayCapabilities(base.BaseAPITest):
         self.assertEqual(empty,
                          self.get(self.capabilities_path('noop_driver')).json)
 
+    def test_grpc_request_mirror_requires_matching_and_mirroring(self):
+        providers = ['amphora', 'noop_driver']
+        path = self.capabilities_path()
+        self.conf.config(group='api_settings',
+                         enabled_http_request_mirror_providers=providers)
+        self.assertEqual(['http_request_mirror_v1'],
+                         self.get(path).json['gateway_capabilities'])
+        self.conf.config(group='api_settings',
+                         enabled_grpc_content_type_providers=providers)
+        features = ['http_request_mirror_v1', 'grpc_content_type_v1']
+        self.assertCountEqual(features,
+                              self.get(path).json['gateway_capabilities'])
+        self.conf.config(group='api_settings',
+                         enabled_grpc_request_mirror_providers=providers)
+        with mock.patch.object(amphora_driver.AmphoraProviderDriver,
+                               'supports_grpc_request_mirror', False):
+            self.assertCountEqual(features,
+                                  self.get(path).json['gateway_capabilities'])
+        self.assertCountEqual(features + ['grpc_request_mirror_v1'],
+                              self.get(path).json['gateway_capabilities'])
+        self.assertEqual([], self.get(self.capabilities_path('noop_driver'))
+                         .json['gateway_capabilities'])
+
     def test_grpc_binary_metadata_capability_requires_both_features(self):
         providers = ['amphora', 'noop_driver']
         path = self.capabilities_path()

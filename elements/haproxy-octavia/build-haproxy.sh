@@ -22,11 +22,11 @@ if [[ $# == 3 ]]; then
     lua_source="$work_dir/lua-5.4.9/src"
     LC_ALL=C SOURCE_DATE_EPOCH=1773936536 make -C "$lua_source" \
         linux MYCFLAGS=-fPIC
-    lua_options=(USE_LUA=1 "LUA_INC=$lua_source" "LUA_LIB=$lua_source"
+    lua_options=(USE_LUA=1 LUA_INC=../lua-5.4.9/src LUA_LIB=../lua-5.4.9/src
                  LUA_LIB_NAME=lua)
     build_suffix+=-listener-otlp-v1
 fi
-build_suffix+=-route-retry-backoff-v1
+build_suffix+=-route-retry-backoff-v1-grpc-mirror-v1
 
 printf '%s  %s
 ' \
@@ -43,6 +43,7 @@ sha256sum --check --strict <<'HASHES'
 dfe62edf7729bb332753384c13d6b58488d0c8c19f9a0651c8b18d8dbce89891  haproxy-3.0.19-listener-auth.patch
 692ebf63778ca21ad3442e85e17d66b405513ad63418a806f8695705573e20ad  haproxy-3.0.19-backend-retry-budget.patch
 4344d1583da5e9aab1ec0e9cb53bbbb92034fc85ef56a06e64f3a6a74b32a344  haproxy-3.0.19-route-retry-backoff.patch
+7099b0616ad78404b464af4c2f0272501e69e7a0bdf02b16257a412c99f21900  haproxy-3.0.19-grpc-mirror.patch
 HASHES
 
 tar -xzf "$tarball" -C "$work_dir"
@@ -51,11 +52,12 @@ for patch_name in haproxy-3.0.19-strict-dns.patch \
     haproxy-3.0.19-require-alpn-h2.patch haproxy-3.0.19-backend-sans.patch \
     haproxy-3.0.19-http-policy.patch haproxy-3.0.19-http-mirror.patch \
     haproxy-3.0.19-listener-auth.patch haproxy-3.0.19-backend-retry-budget.patch \
-    haproxy-3.0.19-route-retry-backoff.patch; do
+    haproxy-3.0.19-route-retry-backoff.patch haproxy-3.0.19-grpc-mirror.patch; do
     patch --batch --forward --fuzz=0 -p1 -i "$element_dir/$patch_name"
 done
 
 LC_ALL=C SOURCE_DATE_EPOCH=1773936536 make \
     TARGET=linux-glibc USE_OPENSSL=1 USE_SYSTEMD=1 \
+    "SILENT_DEFINE=-ffile-prefix-map=$work_dir=/usr/src" \
     "${lua_options[@]}" "EXTRAVERSION=$build_suffix"
 install -m 0755 haproxy "$binary"

@@ -314,6 +314,16 @@ members, balancing algorithm, health checks and transport profile.
 Copies use independent connection and I/O timeouts and a single attempt.
 They use pool balancing without primary session persistence.
 
+For streaming gRPC mirrors, upgrade the regional API replicas, workers and
+eligible Amphora images. Install the HAProxy element with support for
+streaming gRPC copies. Enable ``enabled_grpc_request_mirror_providers``
+alongside ``enabled_http_request_mirror_providers`` and
+``enabled_grpc_content_type_providers`` for each qualified provider.
+The discovery endpoint then advertises ``grpc_request_mirror_v1``.
+Configure the destination pool for cleartext HTTP/2 or certificate-verified
+TLS with required HTTP/2. Amphora sends ``te: trailers`` on that connection
+for gRPC POST requests. The client receives the primary backend's result.
+
 After withdrawing the regional capability, existing mirrors can be removed
 from prepared or active policies. Clear them before rolling back to an
 Octavia, octavia-lib or Amphora build that predates the capability. A

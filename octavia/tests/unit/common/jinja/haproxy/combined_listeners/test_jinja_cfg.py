@@ -2306,7 +2306,36 @@ class TestHaproxyCfg(base.TestCase):
         self.assertEqual(1, rendered.count(rule))
         self.assertIn('option abortonclose', private)
         self.assertIn(' proto h2', private)
+        self.assertIn('acl octavia_grpc_media req.fhdr(content-type) '
+                      '-m reg -i "^[', private)
+        self.assertIn('http-request set-header te trailers if METH_POST '
+                      '{ req.fhdr_cnt(content-type) eq 1 } octavia_grpc_media',
+                      private)
+        self.assertEqual(1, rendered.count('http-request set-header te '))
         self.assertNotIn('http-request octavia-mirror', private)
+        self.assertNotIn('octavia-grpc-mirror', rendered)
+
+        grpc_mirror = constants.GATEWAY_CAPABILITY_GRPC_REQUEST_MIRROR
+        policy.request_mirrors.append(dict(mirror, pool_id=unused_id))
+        rendered = self.jinja_cfg.build_config(
+            amp, [listener], None, haproxy_versions=['3', '0', '19'],
+            amp_details={capability: True, retry_budget: True,
+                         grpc_mirror: True})
+        self.assertIn('if METH_POST { fc_http_major eq 2 } '
+                      '{ req.fhdr_cnt(content-type) eq 1 } '
+                      'octavia_grpc_mirror_media', rendered)
+        first = rendered.split(
+            f'\nbackend {first_pool.id}:{listener.id}\n', 1)[1].split(
+                '\nbackend ', 1)[0]
+        predicate = '{ var(txn.octavia_grpc_mirror) -m bool }'
+        for selection in (match, weighted):
+            self.assertIn(f'http-request octavia-grpc-mirror {copy_id} 7 13 '
+                          f'if {selection} {predicate}', first)
+            self.assertIn(f'http-request octavia-mirror {copy_id} 7 13 '
+                          f'if {selection} !{predicate}', first)
+        self.assertIn(f'http-request octavia-mirror {unused_id} 7 13 '
+                      f'if {match}\n', first)
+        self.assertNotIn(f'octavia-grpc-mirror {unused_id}', rendered)
 
     def test_request_mirrors_keep_tls_identity_and_alpn(self):
         amp = sample_configs_combined.sample_amphora_tuple()
@@ -2327,6 +2356,7 @@ class TestHaproxyCfg(base.TestCase):
             l7policies=[policy], pools=[*listener.pools, mirror_pool])
         details = {
             constants.GATEWAY_CAPABILITY_HTTP_REQUEST_MIRROR: True,
+            constants.GATEWAY_CAPABILITY_GRPC_REQUEST_MIRROR: True,
             constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME: True,
             constants.GATEWAY_CAPABILITY_BACKEND_TLS_H2_ALPN: True,
             constants.GATEWAY_CAPABILITY_BACKEND_TLS_SUBJECT_ALT_NAMES: True,
@@ -2343,6 +2373,10 @@ class TestHaproxyCfg(base.TestCase):
         self.assertIn('check-ssl check-sni sni.example.test check-alpn h2',
                       private)
         self.assertIn('alpn h2 require-alpn-h2', private)
+        self.assertIn(f'http-request octavia-grpc-mirror {pool_id} 1 1 ',
+                      rendered)
+        self.assertIn('http-request set-header te trailers if METH_POST ',
+                      private)
 
     def test_mirror_sees_transforms_before_a_fixed_response(self):
         amp = sample_configs_combined.sample_amphora_tuple()
@@ -2372,6 +2406,7 @@ class TestHaproxyCfg(base.TestCase):
                     amp_details={
                         constants.GATEWAY_CAPABILITY_HTTP_REQUEST_MIRROR:
                         True})
+                self.assertNotIn('http-request set-header te ', config)
                 positions = [config.index(fragment) for fragment in (
                     'http-request set-header "x-copy" "yes"',
                     'http-request set-path "/copy"',

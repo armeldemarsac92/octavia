@@ -432,6 +432,12 @@ denominator. Zero keeps the pool reference and disables sampling for that
 entry. Each positive ratio is sampled independently of the primary backend
 selection. The copy's response is discarded.
 
+Regions that also advertise ``grpc_request_mirror_v1`` can send the copy
+of a gRPC request to an HTTP pool configured with ``backend_h2c`` or
+``backend_tls_require_h2``. The copier advertises trailer support on
+the HTTP/2 connection to that pool. The primary RPC keeps its own
+response and status.
+
 At each level, an optional ``phase`` selects ``before_transforms``,
 ``after_headers`` or ``after_rewrite``. These phases follow request
 header operations and URL rewrites in that order. The default is

@@ -370,6 +370,9 @@ class JinjaTemplater:
         retry_budget_capability = (
             constants.GATEWAY_CAPABILITY_BACKEND_RETRY_BUDGET)
         mirror_capability = constants.GATEWAY_CAPABILITY_HTTP_REQUEST_MIRROR
+        grpc_mirror_cap = constants.GATEWAY_CAPABILITY_GRPC_REQUEST_MIRROR
+        feature_compatibility[grpc_mirror_cap] = (
+            (amp_details or {}).get(grpc_mirror_cap) is True)
         auth_capability = constants.GATEWAY_CAPABILITY_LISTENER_REQUEST_FILTERS
         fallback_capability = (
             constants.GATEWAY_CAPABILITY_FRONTEND_CLIENT_AUTH_INSECURE_FALLBACK)
@@ -704,6 +707,7 @@ class JinjaTemplater:
                 for pool in listener.get('request_mirror_pools', []):
                     mirror_pools[pool['id']] = pool
         if mirror_pools:
+            ret_value['grpc_content_type_acl'] = _GRPC_CONTENT_TYPE_ACL
             ret_value['request_mirror_pools'] = [
                 mirror_pools[pool_id] for pool_id in sorted(mirror_pools)]
         auth_pool_ids = {
@@ -990,6 +994,12 @@ class JinjaTemplater:
             listener.protocol in (constants.PROTOCOL_HTTP,
                                   constants.PROTOCOL_TERMINATED_HTTPS)
         }
+        grpc_mirror_pool_ids = {
+            pool['id'] for pool in pools
+            if pool['id'] in available_mirror_pool_ids and
+            (pool.get('backend_h2c') or pool.get('backend_tls_require_h2'))
+        } if feature_compatibility.get(
+            constants.GATEWAY_CAPABILITY_GRPC_REQUEST_MIRROR) else set()
         primary_pool_ids = {getattr(listener.default_pool, 'id', None)}
         configured_mirror_pool_ids = set()
         if listener.protocol == constants.PROTOCOL_TCP:
@@ -1040,7 +1050,8 @@ class JinjaTemplater:
                 continue
             transformed = self._transform_l7policy(
                 policy, feature_compatibility, tls_enabled, tls_certs,
-                available_pool_ids, available_mirror_pool_ids)
+                available_pool_ids, available_mirror_pool_ids,
+                grpc_mirror_pool_ids)
             primary_pool_ids.add(getattr(policy.redirect_pool, 'id', None))
             targets = getattr(policy, 'targets', None) or []
             primary_pool_ids.update(
@@ -1145,7 +1156,8 @@ class JinjaTemplater:
                     backends.append(('pool', policy['redirect_pool']['id']))
                 if backends:
                     operations = self._transform_request_pipeline(
-                        request_ops or [], rewrite or [], mirrors)
+                        request_ops or [], rewrite or [], mirrors,
+                        grpc_mirror_pool_ids)
                     mirror_pool_ids.update(mirror['pool_id']
                                            for mirror in mirrors)
                     for backend in backends:
@@ -1185,6 +1197,8 @@ class JinjaTemplater:
             ret_value['request_mirror_pools'] = [
                 pool for pool in pools
                 if pool['id'] in mirror_pool_ids]
+            if mirror_pool_ids & grpc_mirror_pool_ids:
+                ret_value['grpc_mirror_media_acl'] = _GRPC_CONTENT_TYPE_ACL
         if configured_mirror_pool_ids - primary_pool_ids:
             ret_value['mirror_only_pool_ids'] = (
                 configured_mirror_pool_ids - primary_pool_ids)
@@ -1720,7 +1734,8 @@ class JinjaTemplater:
     def _transform_l7policy(self, l7policy, feature_compatibility,
                             listener_tls_enabled, tls_certs=None,
                             available_pool_ids=(),
-                            available_mirror_pool_ids=()):
+                            available_mirror_pool_ids=(),
+                            grpc_mirror_pool_ids=()):
         """Transforms an L7 policy into an object that will
 
             be processed by the templating system
@@ -1767,7 +1782,8 @@ class JinjaTemplater:
             elif l7policy.action == constants.L7POLICY_ACTION_WEIGHTED_TARGETS:
                 targets, total = self._transform_weighted_targets(
                     l7policy.targets, available_pool_ids,
-                    available_mirror_pool_ids, grpc_policy_id=grpc_policy_id)
+                    available_mirror_pool_ids, grpc_mirror_pool_ids,
+                    grpc_policy_id=grpc_policy_id)
                 ret_value['weighted_targets'] = targets
                 ret_value['total_weight'] = total
             elif l7policy.action == constants.L7POLICY_ACTION_REDIRECT_REQUEST:
@@ -2039,17 +2055,23 @@ class JinjaTemplater:
                 mirror['pool_id'] in available_pool_ids]
 
     @staticmethod
-    def _transform_request_pipeline(headers, rewrites, mirrors):
+    def _transform_request_pipeline(headers, rewrites, mirrors,
+                                    grpc_mirror_pool_ids=()):
         phases = {phase: [] for phase in validate.REQUEST_MIRROR_PHASES}
         for mirror in mirrors:
             phase = mirror.get('phase', validate.REQUEST_MIRROR_DEFAULT_PHASE)
-            phases[phase].append('octavia-mirror {pool_id} {numerator} '
-                                 '{denominator}'.format(**mirror))
+            action = ('octavia-grpc-mirror'
+                      if mirror['pool_id'] in grpc_mirror_pool_ids
+                      else 'octavia-mirror')
+            phases[phase].append(f'{action} {mirror["pool_id"]} '
+                                 f'{mirror["numerator"]} '
+                                 f'{mirror["denominator"]}')
         return (phases['before_transforms'] + headers +
                 phases['after_headers'] + rewrites + phases['after_rewrite'])
 
     def _transform_weighted_targets(self, targets, available_pool_ids,
-                                    available_mirror_pool_ids=(), *,
+                                    available_mirror_pool_ids=(),
+                                    grpc_mirror_pool_ids=(), *,
                                     grpc_policy_id=None):
         intervals = []
         total = 0
@@ -2080,7 +2102,7 @@ class JinjaTemplater:
                     interval['mirror_pool_ids'] = [
                         mirror['pool_id'] for mirror in mirrors]
                 request_filters = self._transform_request_pipeline(
-                    headers, rewrites, mirrors)
+                    headers, rewrites, mirrors, grpc_mirror_pool_ids)
                 if request_filters:
                     interval['request_filters'] = request_filters
             else:
