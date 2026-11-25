@@ -452,6 +452,14 @@ class TestInitialL7Rules(base.BaseAPITest):
         policy_path = self.L7POLICY_PATH.format(l7policy_id=policy['id'])
         self.put(policy_path, {'l7policy': {'admin_state_up': True}})
         self.set_lb_status(self.lb_id)
+        listed = {pool['id']: pool for pool in
+                  self.get(self.POOLS_PATH).json['pools']}
+        for identifier in (origin['id'], auth_pool['id']):
+            detail = self.get(self.POOL_PATH.format(pool_id=identifier))
+            self.assertEqual([{'id': self.listener_id}],
+                             detail.json['pool']['listeners'])
+            self.assertEqual(detail.json['pool']['listeners'],
+                             listed[identifier]['listeners'])
         pool_path = self.POOL_PATH.format(pool_id=auth_pool['id'])
         self.put(pool_path, {'pool': {'alpn_protocols': ['h2']}}, status=409)
         self.put(pool_path, {'pool': {

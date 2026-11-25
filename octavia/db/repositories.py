@@ -1309,8 +1309,9 @@ class PoolRepository(BaseRepository):
             subqueryload(models.Pool._default_listeners),
             subqueryload(models.Pool._request_filter_listeners),
             (subqueryload(models.Pool._l7policy_auth_refs).
-             subqueryload(models.L7PolicyExternalAuthPool.l7policy).
-             subqueryload(models.L7Policy.listener)),
+             subqueryload(models.L7PolicyExternalAuthPool.l7policy).options(
+                 subqueryload(models.L7Policy.l7rules),
+                 subqueryload(models.L7Policy.listener))),
             subqueryload(models.Pool._otlp_tracing_listeners),
             subqueryload(models.Pool.health_monitor),
             subqueryload(models.Pool.l7policies),
