@@ -1,0 +1,636 @@
+diff --git a/Makefile b/Makefile
+index aba96417ff34f0e46354af688a3629033c13629a..c792a305f5a480de8ba22bba003d28bc1ce4eaa6 100644
+--- a/Makefile
++++ b/Makefile
+@@ -968,7 +968,7 @@ OBJS += src/mux_h2.o src/mux_h1.o src/mux_fcgi.o src/stream.o		\
+         src/map.o src/trace.o src/tcp_sample.o src/tcp_act.o		\
+         src/session.o src/htx.o src/cfgparse-global.o src/mjson.o	\
+         src/h2.o src/ring.o src/fd.o src/sock.o src/mworker.o		\
+-        src/flt_octavia_mirror.o src/flt_trace.o src/thread.o src/proto_rhttp.o src/acl.o \
++        src/flt_octavia_mirror.o src/flt_octavia_auth.o src/flt_trace.o src/thread.o src/proto_rhttp.o src/acl.o \
+         src/http.o src/flt_bwlim.o src/channel.o src/queue.o		\
+         src/mqtt.o src/proto_tcp.o src/lb_chash.o src/http_rules.o	\
+         src/errors.o src/extcheck.o src/dns_ring.o src/stats-json.o	\
+diff --git a/include/haproxy/http_client-t.h b/include/haproxy/http_client-t.h
+index dc8241c4c39386627876620c8b13252a7b63ff58..90cecde62cc6151ee05dcc16e468e1d71083b1c9 100644
+--- a/include/haproxy/http_client-t.h
++++ b/include/haproxy/http_client-t.h
+@@ -49,10 +49,12 @@ struct httpclient {
+ /* status (FS) */
+ #define    HTTPCLIENT_FS_STARTED      0x00010000 /* the httpclient was started */
+ #define    HTTPCLIENT_FS_ENDED        0x00020000 /* the httpclient is stopped */
++#define    HTTPCLIENT_FS_GOT_HEADERS  0x00040000 /* complete final response headers */
+ 
+ /* options */
+ #define    HTTPCLIENT_O_HTTPPROXY     0x00000001 /* the request must be use an absolute URI */
+ #define    HTTPCLIENT_O_IGNORE_RESPONSE 0x00000002 /* discard mirror replies */
++#define    HTTPCLIENT_O_HEADERS_ONLY  0x00000004 /* stop reading after final response headers */
+ 
+ /* States of the HTTP Client Appctx */
+ enum {
+diff --git a/include/haproxy/http_client.h b/include/haproxy/http_client.h
+index 222df6dae6263e370903f71e78b6a8ba0664bdaf..4664045398337c8cd513ee83d7f826f3eaa0b9e4 100644
+--- a/include/haproxy/http_client.h
++++ b/include/haproxy/http_client.h
+@@ -11,6 +11,7 @@ void httpclient_stop_and_destroy(struct httpclient *hc);
+ 
+ struct proxy *httpclient_create_proxy(const char *id);
+ struct proxy *httpclient_create_local_proxy(const char *id);
++struct proxy *httpclient_create_mirror_proxy(const char *id);
+ struct ist httpclient_local_proxy_metadata(const struct session *sess);
+ struct httpclient *httpclient_new(void *caller, enum http_meth_t meth, struct ist url);
+ struct httpclient *httpclient_new_from_proxy(struct proxy *px, void *caller, enum http_meth_t meth, struct ist url);
+diff --git a/include/haproxy/listener-t.h b/include/haproxy/listener-t.h
+index b94b36681a445e93728d676e7e7b6642f0a279f0..6068b41e2ecb70c77f017bcadfabf371cacf6c64 100644
+--- a/include/haproxy/listener-t.h
++++ b/include/haproxy/listener-t.h
+@@ -115,6 +115,7 @@ enum li_status {
+ #define BC_O_REVERSE_HTTP       0x00008000 /* a reverse HTTP bind is used */
+ #define BC_O_XPRT_MAXCONN       0x00010000 /* transport layer allocates its own resource prior to accept and is responsible to check maxconn limit */
+ #define BC_O_OCTAVIA_MIRROR     0x00020000 /* private Octavia HTTP mirror delivery */
++#define BC_O_OCTAVIA_AUTH       0x00040000 /* private Octavia HTTP authorization */
+ 
+ 
+ /* flags used with bind_conf->ssl_options */
+diff --git a/src/flt_octavia_auth.c b/src/flt_octavia_auth.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..75c1972a8aa064d90a16dd99b2ecfb2e04297e71
+--- /dev/null
++++ b/src/flt_octavia_auth.c
+@@ -0,0 +1,453 @@
++/* SPDX-License-Identifier: GPL-2.0-or-later */
++/*
++ * Listener HTTP authorization. The request rule waits for a bodyless check
++ * through a private Unix socket, then resumes normal frontend rules.
++ */
++
++#include <sys/un.h>
++
++#include <haproxy/action.h>
++#include <haproxy/atomic.h>
++#include <haproxy/cfgparse.h>
++#include <haproxy/chunk.h>
++#include <haproxy/filters.h>
++#include <haproxy/http.h>
++#include <haproxy/http_client.h>
++#include <haproxy/http_htx.h>
++#include <haproxy/http_rules.h>
++#include <haproxy/listener.h>
++#include <haproxy/proxy.h>
++#include <haproxy/stream.h>
++#include <haproxy/ticks.h>
++
++#define AUTH_TIMEOUT_MS 3000
++#define AUTH_ACTIVE_LIMIT 256
++#define AUTH_PATH_PREFIX_MAX 1024
++#define AUTH_HEADERS_MAX (64 * (256 + 1))
++
++static const char auth_filter_id[] = "octavia-auth";
++static struct proxy *auth_proxy;
++static unsigned int auth_active;
++static int auth_used;
++
++struct auth_rule {
++	struct sockaddr_storage destination;
++	struct ist prefix;
++	struct ist request_headers;
++	struct ist response_headers;
++};
++
++/* Both configured name lists and Connection options are comma-separated. */
++static int has_name(struct ist list, struct ist name)
++{
++	while (istlen(list)) {
++		size_t len = 0;
++		struct ist token;
++
++		while (len < istlen(list) && list.ptr[len] != ',')
++			len++;
++		token = ist2(list.ptr, len);
++		while (istlen(token) && HTTP_IS_LWS(*token.ptr))
++			token = istadv(token, 1);
++		while (istlen(token) && HTTP_IS_LWS(token.ptr[token.len - 1]))
++			token.len--;
++		if (isteqi(token, name))
++			return 1;
++		list = istadv(list, len + (len < istlen(list)));
++	}
++	return 0;
++}
++
++static int protected_header(struct ist name)
++{
++	return (istlen(name) && *name.ptr == ':') ||
++	       isteqi(name, ist("connection")) || isteqi(name, ist("keep-alive")) ||
++	       isteqi(name, ist("proxy-connection")) || isteqi(name, ist("upgrade")) ||
++	       isteqi(name, ist("te")) || isteqi(name, ist("expect")) ||
++	       isteqi(name, ist("trailer")) || isteqi(name, ist("transfer-encoding")) ||
++	       isteqi(name, ist("content-length")) ||
++	       isteqi(name, ist("proxy-authenticate")) ||
++	       isteqi(name, ist("proxy-authorization"));
++}
++
++static int request_connection_option(const struct htx *source, struct ist name)
++{
++	struct http_hdr_ctx ctx = { .blk = NULL };
++
++	while (http_find_header(source, ist("connection"), &ctx, 0)) {
++		if (isteqi(ctx.value, name))
++			return 1;
++	}
++	return 0;
++}
++
++static int make_auth_request(struct buffer *buffer, const struct htx *source,
++                             const struct htx_sl *line, const struct auth_rule *rule)
++{
++	struct http_uri_parser parser = http_uri_parser_init(htx_sl_req_uri(line));
++	struct ist path = http_parse_path(&parser);
++	struct htx *dest = htx_from_buf(buffer);
++	struct htx_sl *sl;
++	struct htx_blk *blk;
++	int has_host = 0;
++
++	if (!isttest(path))
++		path = isteq(htx_sl_req_uri(line), ist("*")) ? ist("*") : ist("/");
++	if (istlen(rule->prefix)) {
++		struct buffer *scratch = get_trash_chunk();
++
++		if (rule->prefix.len + path.len > b_size(scratch))
++			return 0;
++		memcpy(b_orig(scratch), rule->prefix.ptr, rule->prefix.len);
++		memcpy(b_orig(scratch) + rule->prefix.len, path.ptr, path.len);
++		path = ist2(b_orig(scratch), rule->prefix.len + path.len);
++	}
++	sl = htx_add_stline(dest, HTX_BLK_REQ_SL,
++	                    HTX_SL_F_VER_11 | HTX_SL_F_BODYLESS |
++	                    HTX_SL_F_XFER_LEN | HTX_SL_F_CLEN,
++	                    htx_sl_req_meth(line), path, ist("HTTP/1.1"));
++	if (!sl)
++		return 0;
++	sl->info.req.meth = line->info.req.meth;
++
++	for (blk = htx_get_head_blk(source); blk; blk = htx_get_next_blk(source, blk)) {
++		struct ist name;
++
++		if (htx_get_blk_type(blk) == HTX_BLK_EOH)
++			break;
++		if (htx_get_blk_type(blk) != HTX_BLK_HDR)
++			continue;
++
++		name = htx_get_blk_name(source, blk);
++		if (isteqi(name, ist("host")))
++			has_host = 1;
++		else if (!isteqi(name, ist("authorization")) &&
++		         (protected_header(name) ||
++		          request_connection_option(source, name) ||
++		          !has_name(rule->request_headers, name)))
++			continue;
++		if (!htx_add_header(dest, name, htx_get_blk_value(source, blk)))
++			return 0;
++	}
++	if ((!has_host && !htx_add_header(dest, ist("host"), ist(""))) ||
++	    !htx_add_header(dest, ist("content-length"), ist("0")) ||
++	    !htx_add_endof(dest, HTX_BLK_EOH))
++		return 0;
++	dest->flags |= HTX_FL_EOM;
++	htx_to_buf(dest, buffer);
++	return 1;
++}
++
++static int copy_auth_headers(struct buffer *buffer, const struct http_hdr *headers,
++                             struct ist allowed)
++{
++	struct htx *dest = htx_from_buf(buffer);
++	const struct http_hdr *hdr, *prev;
++
++	for (hdr = headers; isttest(hdr->n); hdr++) {
++		struct http_hdr_ctx ctx = { .blk = NULL };
++
++		if (isteqi(hdr->n, ist("host")) || isteqi(hdr->n, ist("authority")) ||
++		    protected_header(hdr->n) ||
++		    (istlen(allowed) && !has_name(allowed, hdr->n)))
++			continue;
++		for (prev = headers; isttest(prev->n); prev++) {
++			if (isteqi(prev->n, ist("connection")) &&
++			    has_name(prev->v, hdr->n))
++				break;
++		}
++		if (isttest(prev->n))
++			continue;
++
++		/* Replace any incoming values once, then append all response values. */
++		for (prev = headers; prev < hdr; prev++)
++			if (isteqi(prev->n, hdr->n))
++				break;
++		if (prev == hdr)
++			while (http_find_header(dest, hdr->n, &ctx, 1))
++				http_remove_header(dest, &ctx);
++		if (!http_add_header(dest, hdr->n, hdr->v))
++			return 0;
++	}
++	htx_to_buf(dest, buffer);
++	return 1;
++}
++
++static void auth_wake_stream(struct httpclient *client)
++{
++	struct stream *stream = client->caller;
++
++	if (stream)
++		task_wakeup(stream->task, TASK_WOKEN_MSG);
++}
++
++static void auth_detach(struct stream *stream, struct filter *filter)
++{
++	if (filter->ctx) {
++		httpclient_stop_and_destroy(filter->ctx);
++		filter->ctx = NULL;
++		_HA_ATOMIC_DEC(&auth_active);
++	}
++}
++
++static struct flt_ops auth_ops = {
++	.detach = auth_detach,
++};
++
++static enum act_return action_octavia_auth(struct act_rule *rule, struct proxy *px,
++                                           struct session *sess, struct stream *stream, int opts)
++{
++	const struct auth_rule *auth = rule->arg.act.p[0];
++	struct filter *candidate, *filter = NULL;
++	struct httpclient *client;
++	struct htx *incoming;
++	struct htx_sl *line;
++	int status = 503;
++
++	list_for_each_entry(candidate, &strm_flt(stream)->filters, list) {
++		if (FLT_ID(candidate) == auth_filter_id) {
++			filter = candidate;
++			break;
++		}
++	}
++	if (!filter)
++		goto deny;
++
++	if (!(opts & ACT_OPT_FIRST)) {
++		client = filter->ctx;
++		if (!client)
++			goto deny;
++		if (!(opts & ACT_OPT_FINAL) &&
++		    !tick_is_expired(stream->req.analyse_exp, now_ms)) {
++			if (client->flags & HTTPCLIENT_FS_GOT_HEADERS) {
++				status = client->res.status;
++				if (status == 200) {
++					if (!copy_auth_headers(&stream->req.buf, client->res.hdrs,
++					                       auth->response_headers))
++						status = 503;
++				}
++				else if (status >= 500)
++					status = 503;
++				else if (status != 401)
++					status = 403;
++			}
++			else if (!httpclient_ended(client))
++				return ACT_RET_YIELD;
++		}
++		auth_detach(stream, filter);
++		stream->req.analyse_exp = TICK_ETERNITY;
++		if (status == 200)
++			return ACT_RET_CONT;
++		goto deny;
++	}
++
++	if (opts & ACT_OPT_FINAL)
++		goto deny;
++	incoming = htxbuf(&stream->req.buf);
++	line = http_get_stline(incoming);
++	if (!line)
++		goto deny;
++	if (line->info.req.meth == HTTP_METH_CONNECT) {
++		status = 403;
++		goto deny;
++	}
++	if (_HA_ATOMIC_ADD_FETCH(&auth_active, 1) > AUTH_ACTIVE_LIMIT)
++		goto release_slot;
++
++	client = httpclient_new_from_proxy(auth_proxy, stream, line->info.req.meth,
++	                                   ist("http://localhost/"));
++	if (!client ||
++	    !sockaddr_alloc(&client->dst, &auth->destination, sizeof(auth->destination)) ||
++	    !b_alloc(&client->req.buf, DB_CHANNEL) ||
++	    !make_auth_request(&client->req.buf, incoming, line, auth))
++		goto release_client;
++
++	client->options |= HTTPCLIENT_O_HEADERS_ONLY;
++	client->ops.res_headers = auth_wake_stream;
++	client->ops.res_end = auth_wake_stream;
++	httpclient_set_timeout(client, AUTH_TIMEOUT_MS);
++	if (!httpclient_start(client))
++		goto release_client;
++	filter->ctx = client;
++	stream->req.analyse_exp = tick_add(now_ms, MS_TO_TICKS(AUTH_TIMEOUT_MS));
++	return ACT_RET_YIELD;
++
++ release_client:
++	if (client && client->req.buf.size) {
++		b_free(&client->req.buf);
++		offer_buffers(NULL, 1);
++	}
++	httpclient_destroy(client);
++ release_slot:
++	_HA_ATOMIC_DEC(&auth_active);
++ deny:
++	stream->txn->status = status;
++	return ACT_RET_DENY;
++}
++
++static int hex_to_ist(const char *arg, struct ist *decoded, size_t max)
++{
++	size_t len, i;
++	char *value;
++
++	if (strcmp(arg, "-") == 0)
++		return 1;
++	len = strlen(arg);
++	if (!len || len % 2 || len / 2 > max)
++		return 0;
++	value = malloc(len / 2 + 1);
++	if (!value)
++		return 0;
++	for (i = 0; i < len; i += 2) {
++		int high = hex2i(arg[i]), low = hex2i(arg[i + 1]);
++
++		if (!ishex(arg[i]) || !ishex(arg[i + 1]) ||
++		    !(value[i / 2] = (high << 4) | low)) {
++			free(value);
++			return 0;
++		}
++	}
++	value[len / 2] = '\0';
++	*decoded = ist2(value, len / 2);
++	return 1;
++}
++
++static void release_auth_rule(struct act_rule *rule)
++{
++	struct auth_rule *auth = rule->arg.act.p[0];
++
++	istfree(&auth->prefix);
++	istfree(&auth->request_headers);
++	istfree(&auth->response_headers);
++	free(auth);
++}
++
++static int check_auth_rule(struct act_rule *rule, struct proxy *px, char **err)
++{
++	struct flt_conf *filter;
++
++	if (px->mode == PR_MODE_HTTP && (px->cap & PR_CAP_LISTEN) == PR_CAP_FE) {
++		list_for_each_entry(filter, &px->filter_configs, list)
++			if (filter->id == auth_filter_id)
++				return 1;
++	}
++	memprintf(err, "octavia-auth requires the octavia-auth filter on an HTTP frontend");
++	return 0;
++}
++
++static enum act_parse_ret parse_auth_rule(const char **args, int *cur_arg,
++                                          struct proxy *px, struct act_rule *rule, char **err)
++{
++	struct sockaddr_un address = { .sun_family = AF_UNIX };
++	const char *socket = args[*cur_arg];
++	struct auth_rule *auth;
++
++	if (socket[0] != '/' || strlen(socket) + 1 > sizeof(address.sun_path) ||
++	    !*args[*cur_arg + 1] || !*args[*cur_arg + 2] || !*args[*cur_arg + 3])
++		goto invalid;
++	auth = calloc(1, sizeof(*auth));
++	if (!auth)
++		goto invalid;
++	rule->arg.act.p[0] = auth;
++	if (!hex_to_ist(args[*cur_arg + 1], &auth->prefix, AUTH_PATH_PREFIX_MAX) ||
++	    (istlen(auth->prefix) && *auth->prefix.ptr != '/') ||
++	    !hex_to_ist(args[*cur_arg + 2], &auth->request_headers, AUTH_HEADERS_MAX) ||
++	    !hex_to_ist(args[*cur_arg + 3], &auth->response_headers, AUTH_HEADERS_MAX)) {
++		release_auth_rule(rule);
++		goto invalid;
++	}
++	memcpy(address.sun_path, socket, strlen(socket) + 1);
++	memcpy(&auth->destination, &address, sizeof(address));
++	rule->action = ACT_CUSTOM;
++	rule->action_ptr = action_octavia_auth;
++	rule->check_ptr = check_auth_rule;
++	rule->release_ptr = release_auth_rule;
++	*cur_arg += 4;
++	auth_used = 1;
++	return ACT_RET_PRS_OK;
++
++ invalid:
++	memprintf(err, "octavia-auth expects a private Unix socket and hex-encoded path and header lists");
++	return ACT_RET_PRS_ERR;
++}
++
++static int parse_auth_filter(char **args, int *cur_arg, struct proxy *px,
++                             struct flt_conf *fconf, char **err, void *private)
++{
++	fconf->id = auth_filter_id;
++	fconf->ops = &auth_ops;
++	fconf->flags |= FLT_CFG_FL_HTX;
++	(*cur_arg)++;
++	return 0;
++}
++
++static int parse_auth_bind(char **args, int cur_arg, struct proxy *px,
++                           struct bind_conf *bind, char **err)
++{
++	bind->options |= BC_O_OCTAVIA_AUTH;
++	return 0;
++}
++
++static int precheck_auth(void)
++{
++	struct proxy *px;
++
++	if (!auth_used)
++		return ERR_NONE;
++
++	for (px = proxies_list; px; px = px->next) {
++		struct bind_conf *bind;
++
++		list_for_each_entry(bind, &px->conf.bind, by_fe) {
++			struct listener *li;
++			const struct sockaddr_un *address;
++
++			if (!(bind->options & BC_O_OCTAVIA_AUTH))
++				continue;
++			if (LIST_ISEMPTY(&bind->listeners))
++				continue;
++			li = LIST_ELEM(bind->listeners.n, struct listener *, by_bind);
++			address = (const struct sockaddr_un *)&li->rx.addr;
++			if (px->mode != PR_MODE_HTTP || (px->cap & PR_CAP_LISTEN) != PR_CAP_LISTEN ||
++			    px->conn_retries || !LIST_ISEMPTY(&px->filter_configs) ||
++			    !LIST_ISEMPTY(&px->switching_rules) || px->defbe.name ||
++			    px->conf.bind.n != px->conf.bind.p ||
++			    bind->listeners.n != bind->listeners.p ||
++			    bind->settings.ux.mode != 0600 ||
++			    (bind->options & (BC_O_USE_SSL | BC_O_ACC_PROXY | BC_O_ACC_CIP)) ||
++			    address->sun_family != AF_UNIX || address->sun_path[0] != '/') {
++				ha_alert("Proxy '%s': octavia-auth-socket requires one private mode 600 Unix bind in a dedicated HTTP listen section with retries 0.\n",
++				         px->id);
++				return ERR_FATAL;
++			}
++			bind->options |= BC_O_UNLIMITED;
++			px->maxconn = AUTH_ACTIVE_LIMIT;
++		}
++	}
++	/* At most three private sockets per in-flight check. */
++	global.maxsock += 3 * AUTH_ACTIVE_LIMIT;
++	auth_proxy = httpclient_create_local_proxy("<OCTAVIA-AUTH>");
++	return auth_proxy ? ERR_NONE : ERR_FATAL;
++}
++
++static struct action_kw_list auth_actions = {
++	.kw = {
++		{ "octavia-auth", parse_auth_rule, 0 },
++		{ NULL, NULL, 0 },
++	},
++};
++
++static struct flt_kw_list auth_filters = { "OCTAVIA", { }, {
++	{ "octavia-auth", parse_auth_filter, NULL },
++	{ NULL, NULL, NULL },
++} };
++
++static struct bind_kw_list auth_binds = { "OCTAVIA", { }, {
++	{ "octavia-auth-socket", parse_auth_bind, 0 },
++	{ NULL, NULL, 0 },
++} };
++
++INITCALL1(STG_REGISTER, http_req_keywords_register, &auth_actions);
++INITCALL1(STG_REGISTER, flt_register_keywords, &auth_filters);
++INITCALL1(STG_REGISTER, bind_register_keywords, &auth_binds);
++REGISTER_PRE_CHECK(precheck_auth);
+diff --git a/src/flt_octavia_mirror.c b/src/flt_octavia_mirror.c
+index 32d17d95f30ce55f2f6f0695a9e6038d8e0fa38a..dc8abeb9fd96e3dde024ea4aae3d4ab6d8894b9e 100644
+--- a/src/flt_octavia_mirror.c
++++ b/src/flt_octavia_mirror.c
+@@ -726,7 +726,7 @@ static int precheck_mirror(void)
+ 		return ERR_NONE;
+ 	/* Internal client socket, private listener's accepted socket and pool-side socket. */
+ 	global.maxsock += 3 * MIRROR_ACTIVE_LIMIT;
+-	mirror_proxy = httpclient_create_local_proxy("<OCTAVIA-MIRROR>");
++	mirror_proxy = httpclient_create_mirror_proxy("<OCTAVIA-MIRROR>");
+ 	return mirror_proxy ? ERR_NONE : ERR_FATAL;
+ }
+ 
+diff --git a/src/http_client.c b/src/http_client.c
+index 8fb3a6dc2e3cf9bbd0e1e756c1f32d981e96f274..e23ccf4b3fdc76c9aba1ed57af0b7ff299b0fc2e 100644
+--- a/src/http_client.c
++++ b/src/http_client.c
+@@ -699,6 +699,40 @@ int httpclient_set_proxy(struct httpclient *hc, struct proxy *px)
+ 	return 0;
+ }
+ 
++/* A headers-only caller makes a decision at EOH. Never queue a payload. */
++static int httpclient_capture_headers(struct httpclient *hc, struct htx *htx)
++{
++	struct htx_blk *blk;
++	unsigned int count = 0, i = 0;
++
++	for (blk = htx_get_head_blk(htx); blk; blk = htx_get_next_blk(htx, blk)) {
++		if (htx_get_blk_type(blk) == HTX_BLK_EOH)
++			break;
++		if (htx_get_blk_type(blk) != HTX_BLK_HDR || ++count > global.tune.max_http_hdr)
++			return 0;
++	}
++	if (!blk)
++		return 0;
++
++	hc->res.hdrs = calloc(count + 1, sizeof(*hc->res.hdrs));
++	if (!hc->res.hdrs)
++		return 0;
++	for (blk = htx_get_head_blk(htx); i < count; blk = htx_get_next_blk(htx, blk), i++) {
++		struct http_hdr *hdr = &hc->res.hdrs[i];
++
++		hdr->n = istdup(htx_get_blk_name(htx, blk));
++		if (!isttest(hdr->n))
++			return 0;
++		hdr->v = istdup(htx_get_blk_value(htx, blk));
++		if (!isttest(hdr->v))
++			return 0;
++	}
++	hc->flags |= HTTPCLIENT_FS_GOT_HEADERS;
++	if (hc->ops.res_headers)
++		hc->ops.res_headers(hc);
++	return 1;
++}
++
+ void httpclient_applet_io_handler(struct appctx *appctx)
+ {
+ 	struct httpclient *hc = appctx->svcctx;
+@@ -933,6 +967,16 @@ void httpclient_applet_io_handler(struct appctx *appctx)
+ 				break;
+ 
+ 			case HTTPCLIENT_S_RES_HDR:
++				if (hc->options & HTTPCLIENT_O_HEADERS_ONLY) {
++					if (!co_data(res))
++						goto out;
++					htx = htxbuf(&res->buf);
++					if (!httpclient_capture_headers(hc, htx))
++						goto error;
++					channel_htx_erase(res, htx);
++					appctx->st0 = HTTPCLIENT_S_RES_END;
++					break;
++				}
+ 				/* first copy the headers in a local hdrs
+ 				 * structure, once we the total numbers of the
+ 				 * header we allocate the right size and copy
+@@ -1292,8 +1336,15 @@ static int httpclient_resolve_init(struct proxy *px)
+  *
+  * Return a proxy or NULL.
+  */
+-static struct proxy *httpclient_create_proxy_mode(const char *id, int local)
++enum httpclient_proxy_mode {
++	HTTPCLIENT_PROXY_DEFAULT,
++	HTTPCLIENT_PROXY_UNIX,
++	HTTPCLIENT_PROXY_MIRROR,
++};
++
++static struct proxy *httpclient_create_proxy_mode(const char *id, enum httpclient_proxy_mode mode)
+ {
++	int local = mode != HTTPCLIENT_PROXY_DEFAULT;
+ 	int err_code = ERR_NONE;
+ 	char *errmsg = NULL;
+ 	struct proxy *px = NULL;
+@@ -1348,7 +1399,7 @@ static struct proxy *httpclient_create_proxy_mode(const char *id, int local)
+ 	srv_raw->xprt = xprt_get(XPRT_RAW);
+ 	if (!local)
+ 		srv_raw->flags |= SRV_F_MAPPORTS;  /* needed to apply the port change with resolving */
+-	else
++	else if (mode == HTTPCLIENT_PROXY_MIRROR)
+ 		srv_raw->pp_opts |= SRV_PP_V2 | SRV_PP_V2_OCTAVIA_MIRROR;
+ 	srv_raw->id = strdup("<HTTPCLIENT>");
+ 	if (!srv_raw->id) {
+@@ -1452,13 +1503,19 @@ static struct proxy *httpclient_create_proxy_mode(const char *id, int local)
+ 
+ struct proxy *httpclient_create_proxy(const char *id)
+ {
+-	return httpclient_create_proxy_mode(id, 0);
++	return httpclient_create_proxy_mode(id, HTTPCLIENT_PROXY_DEFAULT);
+ }
+ 
+ /* Cleartext HTX over an explicit local socket, without DNS or request replay. */
+ struct proxy *httpclient_create_local_proxy(const char *id)
+ {
+-	return httpclient_create_proxy_mode(id, 1);
++	return httpclient_create_proxy_mode(id, HTTPCLIENT_PROXY_UNIX);
++}
++
++/* Mirror delivery additionally carries the original scheme and TLS server name. */
++struct proxy *httpclient_create_mirror_proxy(const char *id)
++{
++	return httpclient_create_proxy_mode(id, HTTPCLIENT_PROXY_MIRROR);
+ }
+ 
+ /*

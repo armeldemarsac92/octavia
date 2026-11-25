@@ -84,6 +84,7 @@ class ToDictMixin:
             if attr.startswith('_') or not kwargs.get(attr, True):
                 continue
             if attr in ('tags', 'https_virtual_hosts',
+                        'request_filter_sections',
                         'backend_tls_subject_alt_names'):
                 # Preserve JSON attributes in shallow payloads.
                 ret[attr] = value
@@ -435,7 +436,8 @@ class Listener(BaseDataModel):
                  default_http_response=None, https_virtual_hosts=None,
                  tcp_tls_termination=False, tcp_tls_mixed_mode=False,
                  client_authentication_insecure_fallback=None,
-                 frontend_fallback_owns_error=None):
+                 frontend_fallback_owns_error=None,
+                 request_filter_sections=None):
         self.id = id
         self.project_id = project_id
         self.name = name
@@ -443,6 +445,7 @@ class Listener(BaseDataModel):
         self.default_pool_id = default_pool_id
         self.default_http_response = default_http_response
         self.https_virtual_hosts = https_virtual_hosts
+        self.request_filter_sections = request_filter_sections
         self.tcp_tls_termination = tcp_tls_termination
         self.tcp_tls_mixed_mode = tcp_tls_mixed_mode
         self.load_balancer_id = load_balancer_id

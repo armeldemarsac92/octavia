@@ -17,7 +17,7 @@
 
 
 {% from 'macros.j2' import frontend_macro, mixed_tls_frontend_macro, backend_macro, closed_backend_macro, fixed_response_backend_macro, request_redirect_backend_macro %}
-{% from 'macros.j2' import mirror_delivery_macro, peers_macro %}
+{% from 'macros.j2' import listener_auth_delivery_macro, mirror_delivery_macro, peers_macro %}
 
 
 {% set loadbalancer_id = loadbalancer.id %}
@@ -80,6 +80,9 @@ backend prometheus-exporter-internal
                  {{- closed_backend_macro(listener, pool) }}
                {% endif %}
              {% endfor %}
+         {% endfor %}
+         {% for pool in loadbalancer.get('listener_auth_pools', []) %}
+           {{- listener_auth_delivery_macro(constants, lib_consts, pool, state_file) }}
          {% endfor %}
          {% for pool in loadbalancer.get('request_mirror_pools', []) %}
            {{- mirror_delivery_macro(constants, lib_consts, pool, state_file) }}

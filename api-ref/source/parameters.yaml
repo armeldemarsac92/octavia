@@ -2060,3 +2060,14 @@ weight-optional:
   in: body
   required: false
   type: integer
+
+
+request_filter_sections:
+  description: |
+    Optional ordered HTTP request filter sections for an HTTP or
+    TERMINATED_HTTPS listener. Available with the regional
+    listener_request_filters_v1 capability. Omit on update to retain the
+    current value or send [] to clear it.
+  in: body
+  required: false
+  type: array

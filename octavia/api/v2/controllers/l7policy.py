@@ -208,6 +208,8 @@ class L7PolicyActivationController(base.BaseController):
                     not listener.enabled or not lb.enabled):
                 raise exceptions.L7PolicyActivationConflict()
 
+            if listener.request_filter_sections:
+                driver_utils.require_listener_request_filters(driver)
             graph, order = l7policy_activation.snapshot(
                 session, self.repositories, lb, listener)
             policies = [policy for policy in order if policy.id in revisions]

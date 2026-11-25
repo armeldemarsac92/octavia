@@ -450,6 +450,44 @@ backend {{ pool.id }}:{{ listener.id }}
 {% endmacro %}
 
 
+{% macro listener_request_filters_macro(constants, listener) %}
+    {% set sections = listener.request_filter_sections %}
+    {% set tls = listener.protocol == constants.PROTOCOL_TERMINATED_HTTPS %}
+    {% set dns_label = '[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?' %}
+    {% set dns_name = '^(' ~ dns_label ~ '[.])+' ~ dns_label ~ '$' %}
+    {% set fetch = 'ssl_fc_sni' if tls else 'var(txn.octavia_auth_authority)' %}
+    {% if not tls %}
+    http-request set-var(txn.octavia_auth_authority) req.fhdr(host),host_only
+    {% endif %}
+    acl octavia_auth_dns {{ fetch }} -m reg -i {{ dns_name }}
+    {% set found = namespace(auth=false) %}
+    {% for section in sections %}
+        {% if section.requests|selectattr('available')|list %}
+            {% set found.auth = true %}
+        {% endif %}
+    http-request set-var(txn.octavia_auth_section) int({{ section.id }}) if !{ var(txn.octavia_auth_section) -m found }{% if section.hostname != '*' %}{{ https_section_condition(fetch, 'octavia_auth_dns', section.hostname) }}{% endif %}
+
+    {% endfor %}
+    http-request return status {{ 421 if tls else 404 }} unless { var(txn.octavia_auth_section) -m found }
+    {% if found.auth %}
+    filter octavia-auth
+    {% endif %}
+    {% for section in sections %}
+        {% set condition = '{ var(txn.octavia_auth_section) -m int eq ' ~ section.id ~ ' }' %}
+        {% if section.reject %}
+    http-request deny deny_status 403 if {{ condition }}
+        {% endif %}
+        {% for auth in section.requests %}
+            {% if auth.available %}
+    http-request octavia-auth /run/octavia/listener-auth/{{ auth.pool_id }}.sock {{ auth.prefix }} {{ auth.request_headers }} {{ auth.response_headers }} if {{ condition }}
+            {% else %}
+    http-request deny deny_status 503 if {{ condition }}
+            {% endif %}
+        {% endfor %}
+    {% endfor %}
+{% endmacro %}
+
+
 {% macro frontend_macro(constants, lib_consts, listener, lb_vip_address, additional_vips) %}
 frontend {{ listener.id }}
     {% if listener.connection_limit is defined %}
@@ -458,7 +496,11 @@ frontend {{ listener.id }}
     {% if (listener.protocol.lower() ==
        constants.PROTOCOL_TERMINATED_HTTPS.lower()) %}
         {% if listener.https_sections is not defined %}
+            {% if listener.request_filter_sections is defined %}
+    http-request redirect scheme https if !{ ssl_fc }
+            {% else %}
     redirect scheme https if !{ ssl_fc }
+            {% endif %}
         {% endif %}
         {% if listener.hsts_directives is defined %}
     http-response set-header Strict-Transport-Security "{{ listener.hsts_directives }}"
@@ -478,6 +520,9 @@ frontend {{ listener.id }}
     {% endif %}
     {% if listener.https_sections is defined %}
         {{- https_listener_isolation_macro(listener.https_sections) -}}
+    {% endif %}
+    {% if listener.request_filter_sections is defined %}
+        {{- listener_request_filters_macro(constants, listener) -}}
     {% endif %}
     {% set policies = listener.l7policies|selectattr('enabled')|selectattr('l7rules')|list %}
     {% set structured = policies|selectattr('action', 'equalto', constants.L7POLICY_ACTION_REDIRECT_REQUEST)|list %}
@@ -783,6 +828,27 @@ backend {{ reject }}
     external-check command /var/lib/octavia/ping-wrapper.sh
         {% endif %}
     {% endif %}
+{% endmacro %}
+
+
+{% macro listener_auth_delivery_macro(constants, lib_consts, pool, state_file) %}
+listen octavia-auth-{{ pool.id }}
+    bind /run/octavia/listener-auth/{{ pool.id }}.sock user nobody mode 600 octavia-auth-socket
+    mode http
+    no log
+    retries 0
+    no option redispatch
+    http-request disable-l7-retry
+    option abortonclose
+    timeout client 3s
+    timeout connect 1s
+    timeout server 3s
+    balance {{ pool.lb_algorithm }}
+    option allbackups
+{{ pool_health_monitor(constants, pool, state_file) -}}
+    {% for member in pool.members %}
+        {{- member_macro(constants, lib_consts, pool, member, persistence=False) -}}
+    {% endfor %}
 {% endmacro %}
 
 
