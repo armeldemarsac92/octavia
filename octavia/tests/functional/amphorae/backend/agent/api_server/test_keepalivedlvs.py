@@ -534,8 +534,9 @@ class GuardedKeepalivedLvsTestCase(base.TestCase):
                              f'delete table ip {self.guard.table}\n',
                              self._last_rules())
         self.assertEqual(2, self.ipvs.call_count)
-        self.assertNotIn(mock.call(consts.AMP_ACTION_RESTART, mock.ANY),
-                         self.systemctl.call_args_list)
+        actions = {call.args[0] for call in self.systemctl.call_args_list}
+        self.assertTrue(actions.isdisjoint({'start', 'reload', 'restart'}),
+                        actions)
 
     def test_listener_delete_removes_guard_and_blocks_legacy_upload(self):
         response = self.client.put(self.listener_url + '/udp_guard',
