@@ -124,6 +124,17 @@ winning L7 policy modifies its responses, including a programmed fixed
 response. Operators can disable the option and clear existing lists.
 Request and response header options can be enabled independently.
 
+To modify headers on responses from a single weighted pool target, migrate
+the database, upgrade the API and rendering workers, then enable
+``enabled_weighted_target_response_header_providers`` alongside
+``enabled_gateway_action_providers`` and
+``enabled_response_header_operation_providers``. Discovery advertises
+``weighted_http_target_response_headers_v1``. Each pool occurrence accepts
+``response_header_operations``. Its operations run on the selected
+upstream response before any rule-level response operations. A fixed
+response and a second occurrence of the same pool have their own behavior.
+After withdrawal, operators can clear the target operations.
+
 To send binary request metadata, upgrade the API and Amphora workers and
 enable ``enabled_grpc_content_type_providers``. Enroll rule-level headers
 with ``enabled_request_header_operation_providers``. For headers on a

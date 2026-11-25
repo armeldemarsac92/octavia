@@ -19,6 +19,7 @@ Defined here so these can also be used at deeper levels than the API.
 """
 
 
+import base64
 import ipaddress
 import os
 import re
@@ -834,11 +835,12 @@ def weighted_l7policy_targets(targets):
         if (not isinstance(target, dict) or
                 (target.keys() != {'weight', 'fixed_response'} and
                  target.keys() - {*TARGET_REQUEST_FILTER_FIELDS,
-                                  'request_mirrors'} !=
+                                  'request_mirrors',
+                                  'response_header_operations'} !=
                  {'weight', 'pool_id'})):
             raise exceptions.InvalidL7PolicyArgs(
                 msg=_('Each target requires weight and exactly one of '
-                      'pool_id or fixed_response. Request filters are '
+                      'pool_id or fixed_response. Target filters are '
                       'available only on pool targets.'))
 
         weight = target['weight']
@@ -854,12 +856,12 @@ def weighted_l7policy_targets(targets):
                 raise exceptions.InvalidL7PolicyArgs(
                     msg=_('Target pool_id must be a UUID.')) from e
             result = {'weight': weight, 'pool_id': pool_id}
-            if 'request_header_operations' in target:
-                operations = header_operations(
-                    target['request_header_operations'],
-                    'request_header_operations')
-                if operations:
-                    result['request_header_operations'] = operations
+            for field in ('request_header_operations',
+                          'response_header_operations'):
+                if field in target:
+                    operations = header_operations(target[field], field)
+                    if operations:
+                        result[field] = operations
             if 'request_url_rewrite' in target:
                 result['request_url_rewrite'] = http_request_url_rewrite(
                     target['request_url_rewrite'])
@@ -880,6 +882,7 @@ def weighted_l7policy_targets(targets):
 
 _HEADER_NAME_RE = re.compile(r"[!#$%&'*+\-.^_\x60|~0-9A-Za-z]{1,256}")
 _HEADER_VALUE_CONTROL_RE = re.compile(r'[\x00-\x08\x0a-\x1f\x7f\ud800-\udfff]')
+_GRPC_METADATA_NAME_RE = re.compile(r'[a-z0-9_.-]+')
 
 
 # Connection management and framing are controlled by HAProxy.
@@ -964,6 +967,37 @@ def grpc_metadata_field_count(operations):
     return sum(1 + item['value'].count(',')
                if item['name'].endswith('-bin') else 1
                for item in operations or [] if item['operation'] != 'REMOVE')
+
+
+def validate_grpc_target_response_headers(operations):
+    limit = constants.MAX_L7POLICY_HEADER_OPERATIONS
+    if grpc_metadata_field_count(operations) > limit:
+        raise exceptions.InvalidL7PolicyArgs(msg=_(
+            'gRPC response metadata can set or add at most %d fields after '
+            'expanding binary values.') % limit)
+    for item in operations or []:
+        name = item['name']
+        if name == 'content-type' or name.startswith('grpc-'):
+            raise exceptions.InvalidL7PolicyArgs(msg=_(
+                'Response header %s is managed by gRPC.') % name)
+        if not _GRPC_METADATA_NAME_RE.fullmatch(name):
+            raise exceptions.InvalidL7PolicyArgs(msg=_(
+                'Invalid gRPC response metadata name: %s.') % name)
+        if item['operation'] == 'REMOVE' or not name.endswith('-bin'):
+            continue
+        for value in item['value'].split(','):
+            value = value.strip(' ')
+            if not value.endswith('='):
+                value += '=' * (-len(value) % 4)
+            try:
+                decoded = base64.b64decode(value, validate=True)
+            except ValueError:
+                decoded = None
+            # A canonical round trip also checks the unused padding bits.
+            if decoded is None or base64.b64encode(decoded).decode() != value:
+                raise exceptions.InvalidL7PolicyArgs(msg=_(
+                    'gRPC binary response metadata %s requires base64 '
+                    'values.') % name)
 
 
 def validate_grpc_metadata_fields(request=None, response=None, targets=None):
@@ -1532,6 +1566,9 @@ def sanitize_l7policy_api_args(l7policy, create=False, old_policy=None):
             l7policy.get('request_header_operations'),
             l7policy.get('response_header_operations'),
             l7policy.get('targets'))
+        for target in l7policy.get('targets') or []:
+            validate_grpc_target_response_headers(
+                target.get('response_header_operations'))
 
     if effective_action == weighted_action:
         validate_target_request_filter_composition(

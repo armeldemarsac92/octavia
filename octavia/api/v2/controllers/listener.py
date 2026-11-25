@@ -157,6 +157,8 @@ def validate_policy_options_on_create(
             driver_utils.require_grpc_request_metadata(
                 driver, protocol, checked.get('request_header_operations'),
                 checked.get('targets'))
+            driver_utils.require_grpc_target_response_metadata(
+                driver, protocol, checked.get('targets'))
         if creating_load_balancer and validate.request_mirror_pool_ids(
                 checked.get('request_mirrors'), checked.get('targets')):
             raise exceptions.ValidationException(

@@ -68,6 +68,7 @@ class AmphoraProviderDriver(driver_base.ProviderDriver):
     supports_weighted_target_request_filters = True
     supports_request_header_operations = True
     supports_response_header_operations = True
+    supports_weighted_target_response_headers = True
     supports_http_request_redirect = True
     supports_request_url_rewrite = True
     supports_request_cors = True

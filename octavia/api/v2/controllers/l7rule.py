@@ -41,6 +41,19 @@ def validate_create_rule_data(rule):
         raise exceptions.L7RuleValidation(error=e) from e
 
 
+def _validate_grpc_policy_headers(driver, protocol, policy):
+    driver_utils.require_grpc_request_metadata(
+        driver, protocol, policy.request_header_operations, policy.targets)
+    driver_utils.require_grpc_target_response_metadata(
+        driver, protocol, policy.targets)
+    validate.validate_grpc_metadata_fields(
+        policy.request_header_operations, policy.response_header_operations,
+        policy.targets)
+    for target in policy.targets:
+        validate.validate_grpc_target_response_headers(
+            target.get('response_header_operations'))
+
+
 class L7RuleController(base.BaseController):
     RBAC_TYPE = constants.RBAC_L7RULE
 
@@ -195,13 +208,7 @@ class L7RuleController(base.BaseController):
                 driver, protocol, tcp_tls_termination)
             if (l7rule_dict['enabled'] and
                     l7rule.type == constants.L7RULE_TYPE_GRPC_CONTENT_TYPE):
-                driver_utils.require_grpc_request_metadata(
-                    driver, protocol, db_l7policy.request_header_operations,
-                    db_l7policy.targets)
-                validate.validate_grpc_metadata_fields(
-                    db_l7policy.request_header_operations,
-                    db_l7policy.response_header_operations,
-                    db_l7policy.targets)
+                _validate_grpc_policy_headers(driver, protocol, db_l7policy)
             if l7rule_dict['enabled'] or tcp_policy:
                 driver_utils.require_gateway_policy_action(
                     driver, db_l7policy.action, db_l7policy.listener.protocol,
@@ -411,14 +418,8 @@ class L7RuleController(base.BaseController):
             if ((enabled and (not db_l7rule.enabled or match_changed)) or
                     (tcp_policy and match_changed)):
                 if rule_type == constants.L7RULE_TYPE_GRPC_CONTENT_TYPE:
-                    driver_utils.require_grpc_request_metadata(
-                        driver, protocol,
-                        db_l7policy.request_header_operations,
-                        db_l7policy.targets)
-                    validate.validate_grpc_metadata_fields(
-                        db_l7policy.request_header_operations,
-                        db_l7policy.response_header_operations,
-                        db_l7policy.targets)
+                    _validate_grpc_policy_headers(
+                        driver, protocol, db_l7policy)
                 if db_l7policy.https_listener_hostname is not None:
                     driver_utils.require_https_listener_isolation(driver)
                 driver_utils.require_gateway_policy_action(
@@ -439,7 +440,7 @@ class L7RuleController(base.BaseController):
                     if (db_l7rule.enabled and match_changed and
                             db_l7rule.type !=
                             constants.L7RULE_TYPE_GRPC_CONTENT_TYPE):
-                        driver_utils.require_no_active_grpc_request_metadata(
+                        driver_utils.require_no_active_grpc_metadata(
                             driver, self.repositories.l7policy,
                             context.session, policy_id=db_l7policy.id,
                             listener_id=db_l7policy.listener_id)

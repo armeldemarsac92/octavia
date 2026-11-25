@@ -2825,6 +2825,51 @@ class TestHaproxyCfg(base.TestCase):
         ], [line.strip() for line in config.splitlines()
             if line.lstrip().startswith('http-after-response ')])
 
+    def test_weighted_response_headers_follow_the_forwarded_occurrence(self):
+        amp = sample_configs_combined.sample_amphora_tuple()
+        listener = sample_configs_combined.sample_listener_tuple(l7=True)
+        base = listener.l7policies[0]
+        pool = base.redirect_pool
+        field = 'response_header_operations'
+        value = dict(operation='SET', name='picked-bin', value='YQ, Yg==')
+        rule = dict(operation='ADD', name='picked-bin', value='Yw==')
+        selected = dict(weight=3, pool_id=pool.id)
+        targets = [dict(selected, **{field: [value]}), selected,
+                   dict(weight=1, fixed_response={'status_code': 500}),
+                   dict(selected, pool_id='absent', **{field: [value]})]
+        grpc = base._replace(
+            id='grpc', action='WEIGHTED_TARGETS', redirect_pool=None,
+            targets=targets, **{field: [rule]},
+            l7rules=[sample_configs_combined.sample_l7rule_tuple(
+                'media', type='GRPC_CONTENT_TYPE', compare_type='EQUAL_TO',
+                value='application/grpc')])
+        http = base._replace(id='http', action='WEIGHTED_TARGETS',
+                             redirect_pool=None, targets=targets)
+        listener = listener._replace(l7policies=[grpc, http])
+        rendered = self.jinja_cfg.build_config(
+            amp, [listener], None, haproxy_versions=['3', '0', '19'],
+            amp_details=None)
+        selected_pool = rendered.split(
+            f'\nbackend {pool.id}:{listener.id}\n', 1)[1].split(
+                '\nbackend ', 1)[0]
+        operations = [line.strip() for line in selected_pool.splitlines()
+                      if '"picked-bin"' in line]
+        grpc_acl = '{ var(txn.octavia_l7_policy) -m str grpc }'
+        http_acl = '{ var(txn.octavia_l7_policy) -m str http }'
+        draw = '{ var(txn.octavia_weighted_draw) -m int 0:2 }'
+        self.assertEqual([
+            f'http-response set-header "picked-bin" "YQ" if {grpc_acl} {draw}',
+            f'http-response add-header "picked-bin" "Yg==" '
+            f'if {grpc_acl} {draw}',
+            'http-after-response add-header "picked-bin" "Yw==" '
+            f'if {grpc_acl}',
+            f'http-response set-header "picked-bin" "YQ, Yg==" '
+            f'if {http_acl} {draw}',
+        ], operations)
+        self.assertEqual(3, sum(
+            'http-response ' in line and '"picked-bin"' in line
+            for line in rendered.splitlines()))
+
     def test_grpc_request_metadata_follows_weighted_occurrence(self):
         amp = sample_configs_combined.sample_amphora_tuple()
         listener = sample_configs_combined.sample_listener_tuple(l7=True)
