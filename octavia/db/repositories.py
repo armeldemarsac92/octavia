@@ -1172,7 +1172,8 @@ class PoolRepository(BaseRepository):
         # pool read may be from an older REPEATABLE READ snapshot.
         pool = self.model_class
         row = (session.query(pool.protocol, pool.backend_h2c, pool.tls_enabled,
-                             pool.enabled, pool.backend_tls_hostname,
+                             pool.enabled, pool.udp_packet_drop,
+                             pool.backend_tls_hostname,
                              pool.backend_tls_require_h2,
                              pool.backend_tls_subject_alt_names,
                              pool.ca_tls_certificate_id,

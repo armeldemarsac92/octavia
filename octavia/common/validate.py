@@ -842,6 +842,25 @@ def tcp_connection_rejection(rejection):
     return rejection
 
 
+def udp_packet_drop(drop):
+    """Validate the drop fraction without coercing JSON types."""
+    if (not isinstance(drop, dict) or
+            drop.keys() != {'numerator', 'denominator'}):
+        raise exceptions.ValidationException(detail=_(
+            'udp_packet_drop requires numerator and denominator.'))
+    numerator = drop['numerator']
+    denominator = drop['denominator']
+    if (type(numerator) is not int or type(denominator) is not int or
+            not (1 <= denominator <=
+                 constants.MAX_UDP_PACKET_DROP_DENOMINATOR and
+                 0 <= numerator <= denominator)):
+        raise exceptions.ValidationException(detail=_(
+            'udp_packet_drop requires integers with '
+            '0 <= numerator <= denominator and '
+            '1 <= denominator <= 16000000.'))
+    return drop
+
+
 def backend_retry_budget(budget):
     """Validate the complete pool-level Service budget without coercion."""
     bounds = {

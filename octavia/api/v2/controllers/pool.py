@@ -797,6 +797,13 @@ class PoolsController(base.BaseController):
 
             current = self.repositories.pool.get_transport_for_update(
                 context.session, id)
+            if (current.udp_packet_drop is not None and
+                    (pool.session_persistence or
+                     pool.lb_algorithm not in
+                     (wtypes.Unset, constants.LB_ALGORITHM_ROUND_ROBIN))):
+                raise exceptions.ValidationException(detail=_(
+                    'Managed UDP pools require round-robin without session '
+                    'persistence.'))
             self._validate_backend_transport_update(pool, current, driver)
             if (pool.backend_retry_budget is not wtypes.Unset and
                     pool.backend_retry_budget is not None):

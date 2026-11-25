@@ -107,6 +107,7 @@ class MemberRootPUT(types.BaseType):
 class MembersRootPUT(types.BaseType):
     members = wtypes.wsattr([MemberPOST])
     tcp_connection_rejection = wtypes.wsattr(types.TCPConnectionRejection())
+    udp_packet_drop = wtypes.wsattr(types.UDPPacketDrop())
 
 
 class MemberSingleCreate(BaseMemberType):

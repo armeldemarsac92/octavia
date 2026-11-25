@@ -80,6 +80,7 @@ class AmphoraProviderDriver(driver_base.ProviderDriver):
     supports_l7policy_initial_rules = True
     supports_l7policy_batch_activation = True
     supports_tcp_connection_rejection = True
+    supports_udp_packet_drop = True
     supports_http_header_exact = True
     supports_http_query_param_exact = True
     supports_grpc_content_type = True
@@ -380,6 +381,11 @@ class AmphoraProviderDriver(driver_base.ProviderDriver):
         # The worker takes the LB row lock before reading the committed graph.
         # Keep the base provider's member_batch_update RPC unchanged.
         self.client.cast({}, 'apply_tcp_member_batch',
+                         loadbalancer_id=loadbalancer_id, pool_id=pool_id,
+                         batch_id=batch_id)
+
+    def apply_udp_member_batch(self, loadbalancer_id, pool_id, batch_id):
+        self.client.cast({}, 'apply_udp_member_batch',
                          loadbalancer_id=loadbalancer_id, pool_id=pool_id,
                          batch_id=batch_id)
 

@@ -642,6 +642,13 @@ class ControllerWorker:
             'batch_id': batch_id,
         })
 
+    def apply_udp_member_batch(self, loadbalancer_id, pool_id, batch_id):
+        self.run_flow(flow_utils.get_apply_udp_member_batch_flow, store={
+            constants.LOADBALANCER_ID: loadbalancer_id,
+            constants.POOL_ID: pool_id,
+            'batch_id': batch_id,
+        })
+
     def update_member(self, member, member_updates):
         """Updates a pool member.
 

@@ -136,6 +136,10 @@ class Endpoints:
                                batch_id):
         self.worker.apply_tcp_member_batch(loadbalancer_id, pool_id, batch_id)
 
+    def apply_udp_member_batch(self, context, loadbalancer_id, pool_id,
+                               batch_id):
+        self.worker.apply_udp_member_batch(loadbalancer_id, pool_id, batch_id)
+
     def delete_member(self, context, member):
         LOG.info('Deleting member \'%s\'...', member.get(constants.MEMBER_ID))
         self.worker.delete_member(member)

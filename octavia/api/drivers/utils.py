@@ -165,6 +165,9 @@ def gateway_capabilities(driver):
             driver_factory.supports_tcp_connection_rejection(driver)):
         capabilities.append(
             constants.GATEWAY_CAPABILITY_TCP_CONNECTION_REJECTION)
+    if (driver.name in api_settings.enabled_udp_packet_drop_providers and
+            driver_factory.supports_udp_packet_drop(driver)):
+        capabilities.append(constants.GATEWAY_CAPABILITY_UDP_PACKET_DROP)
     if (driver.name in api_settings.enabled_http_header_exact_providers and
             getattr(driver, 'supports_http_header_exact', False) is True):
         capabilities.append(constants.GATEWAY_CAPABILITY_HTTP_HEADER_EXACT)
@@ -1036,6 +1039,7 @@ def pool_dict_to_provider_dict(pool_dict, for_delete=False, for_update=False):
     # Only the Amphora member batch extension consumes these DB fields.
     new_pool_dict.pop('tcp_connection_rejection', None)
     new_pool_dict.pop('tcp_member_batch_id', None)
+    new_pool_dict.pop('udp_packet_drop', None)
     # A legacy DTO can carry the old pool for updates and deletes. The
     # persisted requirement still controls rendering and reactivation.
     supports_h2 = BACKEND_TLS_H2_ALPN_PAYLOAD_AVAILABLE

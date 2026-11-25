@@ -182,6 +182,10 @@ def get_apply_tcp_member_batch_flow():
     return M_FLOWS.get_apply_tcp_member_batch_flow()
 
 
+def get_apply_udp_member_batch_flow():
+    return M_FLOWS.get_apply_udp_member_batch_flow()
+
+
 def get_create_pool_flow():
     return P_FLOWS.get_create_pool_flow()
 
