@@ -3599,6 +3599,26 @@ class TestPool(base.BaseAPITest):
         self.assertIsNone(
             self.get(path).json['pool']['backend_tls_system_ca_sha256'])
 
+        # The worker leaves a closed protected pool in ERROR. A tags-only
+        # update can retry it in place without changing the TLS profile.
+        with db_api.session().begin() as session:
+            repository.set_backend_tls_pool_statuses(
+                session, closed={pool['id']}, recovered=())
+            repository.mark_active(session, pool['id'])
+        self.assertEqual(constants.ERROR,
+                         self.get(path).json['pool']['provisioning_status'])
+        retry_tags = [constants.GATEWAY_OTLP_COLLECTOR_POOL_TAG]
+        retried = self.put(path, {'pool': {'tags': retry_tags}}).json['pool']
+        self.assertEqual(pool['id'], retried['id'])
+        self.assertEqual(constants.PENDING_UPDATE,
+                         retried['provisioning_status'])
+        self.assertEqual(retry_tags, retried['tags'])
+        self.assertIs(True, retried['backend_tls_system_ca'])
+        self.assertEqual(options['backend_tls_hostname'],
+                         retried['backend_tls_hostname'])
+        self.assertIsNone(retried['backend_tls_system_ca_sha256'])
+        self.set_lb_status(self.lb_id)
+
         self.conf.config(group='api_settings',
                          enabled_backend_tls_system_ca_providers=[])
         self.put(path, {'pool': {'admin_state_up': False}})

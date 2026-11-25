@@ -380,6 +380,8 @@ class HaproxyAmphoraLoadBalancerDriver(
         otlp_tls_certs = {}
         tracing_targets = self._otlp_render_targets(loadbalancer)
         tracing_results = {}
+        system_ca_pools = utils.backend_tls_system_ca_pool_ids(loadbalancer)
+        tracing_system_pools = {}
         certs = dict(backend_tls_certs or {})
         frontend_tls_certs = frontend_tls_certs or {}
         listeners_to_update = []
@@ -425,14 +427,26 @@ class HaproxyAmphoraLoadBalancerDriver(
                             loadbalancer, tracing, amp_details)
                         if can_trace:
                             pool_id = tracing['collector_pool_id']
-                            if pool_id not in otlp_tls_certs:
+                            system_ca = pool_id in system_ca_pools
+                            if system_ca:
+                                # Protected pools share the material staged
+                                # for all Amphora peers, including mTLS.
+                                material = (backend_tls_certs or {}).get(
+                                    pool_id, {})
+                                otlp_tls_certs[pool_id] = (
+                                    material if material.get(
+                                        'system_ca_sha256') else
+                                    {'closed': True})
+                                tracing_system_pools[listener.id] = pool_id
+                            elif pool_id not in otlp_tls_certs:
                                 otlp_tls_certs[pool_id] = (
                                     self._process_otlp_collector_certs(
                                         listener, loadbalancer, amphora,
                                         pool_id))
                             can_trace = not otlp_tls_certs[pool_id].get(
                                 'closed')
-                            if tcp_batch_configs is not None and not can_trace:
+                            if (tcp_batch_configs is not None and
+                                    not can_trace and not system_ca):
                                 raise driver_except.ListenerProvisioningError()
                         if not can_trace:
                             tracing_status = consts.ERROR
@@ -471,6 +485,10 @@ class HaproxyAmphoraLoadBalancerDriver(
                 tracing_options = {}
                 if otlp_tls_certs:
                     tracing_options['otlp_tls_certs'] = otlp_tls_certs
+                otlp_system_ca_applied = set()
+                if tracing_system_pools:
+                    tracing_options['otlp_system_ca_applied'] = (
+                        otlp_system_ca_applied)
                 configured = {listener.id for listener in listeners_to_update}
                 tracing_results = {
                     listener_id: tracing_results[listener_id]
@@ -509,6 +527,19 @@ class HaproxyAmphoraLoadBalancerDriver(
                        if read_http_header_key is not None else {}),
                     **({'weighted_passthrough_degraded': True}
                        if weighted_passthrough_degraded else {}))
+                for listener_id, pool_id in tracing_system_pools.items():
+                    if listener_id not in configured:
+                        continue
+                    if listener_id not in otlp_system_ca_applied:
+                        tracing_results[listener_id] = consts.ERROR
+                    elif system_ca_results is not None:
+                        system_ca_results[pool_id] = (
+                            otlp_tls_certs[pool_id]['system_ca_sha256'])
+                if system_ca_results is not None:
+                    self._record_staged_otlp_system_ca(
+                        loadbalancer, listeners_to_update, tracing_targets,
+                        backend_tls_certs or {}, amp_details,
+                        system_ca_results)
                 if any(backoff_results.get(policy_id) == consts.ERROR
                        for policy_id in required_backoff_policies):
                     http_retry_backoff_observed[amphora.id] = backoff_results
@@ -879,9 +910,25 @@ class HaproxyAmphoraLoadBalancerDriver(
         return capabilities
 
     @staticmethod
-    def _backend_tls_pools(loadbalancer):
-        opted_in = bool(utils.backend_tls_system_ca_pool_ids(loadbalancer))
+    def _is_otlp_collector_listener(listener):
+        return (listener.enabled and
+                listener.protocol in (consts.PROTOCOL_HTTP,
+                                      consts.PROTOCOL_TERMINATED_HTTPS) and
+                listener.provisioning_status not in
+                (consts.PENDING_DELETE, consts.DELETED))
+
+    @staticmethod
+    def _is_managed_otlp_collector_pool(pool):
+        return (pool.protocol == consts.PROTOCOL_HTTP and
+                consts.GATEWAY_OTLP_COLLECTOR_POOL_TAG in (pool.tags or ()))
+
+    @classmethod
+    def _backend_tls_pools(cls, loadbalancer):
+        system_ca = bool(utils.backend_tls_system_ca_pool_ids(loadbalancer))
+        opted_in = system_ca
         pools = {}
+        collector_frontend = None
+        collector_listeners = {}
         for listener in loadbalancer.listeners:
             if listener.protocol in consts.LVS_PROTOCOLS:
                 continue
@@ -894,7 +941,55 @@ class HaproxyAmphoraLoadBalancerDriver(
                         pool.enabled and pool.provisioning_status not in
                         (consts.PENDING_DELETE, consts.DELETED)):
                     pools[pool.id] = (listener, pool)
+            if system_ca and cls._is_otlp_collector_listener(listener):
+                collector_frontend = collector_frontend or listener
+                tracing = getattr(listener, 'otlp_tracing', None)
+                if isinstance(tracing, dict):
+                    collector_listeners[tracing.get(
+                        'collector_pool_id')] = listener
+        if collector_frontend is not None and loadbalancer.enabled:
+            for pool in loadbalancer.pools:
+                if (getattr(pool, 'backend_tls_system_ca', False) is True and
+                        pool.enabled and pool.provisioning_status not in
+                        (consts.PENDING_DELETE, consts.DELETED) and
+                        (pool.id in collector_listeners or
+                         cls._is_managed_otlp_collector_pool(pool))):
+                    pools.setdefault(pool.id, (
+                        collector_listeners.get(pool.id, collector_frontend),
+                        pool))
         return opted_in, pools
+
+    @classmethod
+    def _record_staged_otlp_system_ca(
+            cls, loadbalancer, listeners, tracing_targets, certs, amp_details,
+            results):
+        if (not loadbalancer.enabled or
+                (amp_details or {}).get(
+                    consts.GATEWAY_CAPABILITY_LISTENER_OTLP_TRACING)
+                is not True or
+                not any(cls._is_otlp_collector_listener(listener)
+                        for listener in listeners)):
+            return
+        attached = {profile.get('collector_pool_id')
+                    for profile, _ in tracing_targets.values()
+                    if profile is not None}
+        for pool in loadbalancer.pools:
+            digest = certs.get(pool.id, {}).get('system_ca_sha256')
+            if (not digest or pool.id in attached or
+                    not cls._is_managed_otlp_collector_pool(pool) or
+                    not pool.alpn_protocols):
+                continue
+            try:
+                validate.validate_otlp_collector_transport(
+                    pool.protocol, pool.backend_h2c,
+                    pool.backend_tls_require_h2, pool.tls_enabled,
+                    pool.alpn_protocols)
+            except exceptions.ValidationException:
+                continue
+            # The detached pool has no route to any member. Record the exact
+            # bundle staged on this peer only after the HAProxy reload is
+            # acknowledged by the caller.
+            results[pool.id] = digest
 
     @staticmethod
     def _frontend_fallback_listeners(loadbalancer):
