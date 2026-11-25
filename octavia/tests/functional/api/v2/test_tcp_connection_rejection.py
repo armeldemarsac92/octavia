@@ -12,9 +12,15 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import contextlib
+import pathlib
+import tempfile
 from unittest import mock
 
 from oslo_utils import uuidutils
+from taskflow import engines
+from taskflow.persistence import backends
+from taskflow import states
 
 from octavia.amphorae.drivers.noop_driver import driver as amphora_noop
 from octavia.api.drivers import driver_factory
@@ -23,14 +29,21 @@ from octavia.common import constants
 from octavia.common import exceptions
 from octavia.common.jinja.haproxy.combined_listeners import jinja_cfg
 from octavia.common import policy
+from octavia.common import utils
 from octavia.controller.queue.v2 import endpoints
+from octavia.controller.worker.v2.flows import flow_utils
 from octavia.controller.worker.v2.tasks import amphora_driver_tasks
 from octavia.controller.worker.v2.tasks import database_tasks
+from octavia.controller.worker.v2.tasks import network_tasks
 from octavia.db import api as db_api
 from octavia.db import repositories
 from octavia.network import data_models as network_models
 from octavia.network.drivers.noop_driver import driver as network_noop
 from octavia.tests.functional.api.v2 import base
+
+
+class WorkerInterrupted(BaseException):
+    """Stop both TaskFlow engines without reverting the Neutron attachment."""
 
 
 class TestTCPConnectionRejection(base.BaseAPITest):
@@ -370,3 +383,188 @@ class TestTCPConnectionRejection(base.BaseAPITest):
             self.assertIn(capability, caps['gateway_capabilities'])
             self.assertIsNone(self._pool()['tcp_connection_rejection'])
             self._batch({'reject_weight': 1, 'total_weight': 1})
+
+    def _place_member_on_new_network(self):
+        self._enroll()
+        subnet_id = uuidutils.generate_uuid()
+        subnet = network_models.Subnet(
+            id=subnet_id, network_id='member-network', cidr='192.0.2.0/24')
+        existing_subnet = network_models.Subnet(
+            id='existing-subnet', network_id=subnet.network_id,
+            cidr='198.51.100.0/24')
+        fixed_ip = network_models.FixedIP(
+            subnet_id=subnet_id, ip_address='192.0.2.5')
+        with db_api.session().begin() as session:
+            self.amphora_repo.create(
+                session, id=uuidutils.generate_uuid(),
+                load_balancer_id=self.lb_id,
+                status=constants.AMPHORA_ALLOCATED, lb_network_ip='192.0.2.11',
+                compute_id=uuidutils.generate_uuid())
+            lb = self.lb_repo.get(session, id=self.lb_id)
+
+        # Per-compute Neutron view persists across reconstructed engines.
+        interfaces = {
+            amp.compute_id: [
+                network_models.Interface(
+                    network_id=lb.vip.network_id,
+                    fixed_ips=[network_models.FixedIP(
+                        subnet_id=lb.vip.subnet_id)]),
+                network_models.Interface(network_id='old-member-network'),
+            ] for amp in lb.amphorae
+        }
+        shared_port = network_models.Port(
+            id='already-attached', network_id=subnet.network_id,
+            fixed_ips=[network_models.FixedIP(
+                subnet_id=existing_subnet.id, ip_address='198.51.100.5')])
+        interfaces[lb.amphorae[1].compute_id].append(network_models.Interface(
+            network_id=shared_port.network_id, port_id=shared_port.id,
+            fixed_ips=shared_port.fixed_ips))
+        ports = {shared_port.id: shared_port}
+        subnets = {subnet.id: subnet, existing_subnet.id: existing_subnet}
+        network = mock.Mock()
+        network.get_plugged_networks.side_effect = interfaces.__getitem__
+        network.get_subnet.side_effect = (
+            lambda subnet_id, **kwargs: subnets[subnet_id])
+        network.get_network.return_value = network_models.Network(
+            id=subnet.network_id)
+        network.get_network_configs.return_value = {
+            amp.id: network_models.AmphoraNetworkConfig()
+            for amp in lb.amphorae
+        }
+
+        def create_port(network_id, *, name, fixed_ips, vnic_type):
+            port = network_models.Port(
+                id=name, network_id=network_id, fixed_ips=[fixed_ip],
+                vnic_type=vnic_type)
+            ports[port.id] = port
+            return port
+
+        def plug_port(amp, port):
+            interfaces[amp.compute_id].append(network_models.Interface(
+                network_id=port.network_id, port_id=port.id,
+                fixed_ips=port.fixed_ips))
+
+        def plug_fixed_ip(port_id, subnet_id):
+            port = ports[port_id]
+            port.fixed_ips.append(fixed_ip)
+            return port
+
+        network.create_port.side_effect = create_port
+        network.plug_port.side_effect = plug_port
+        network.plug_fixed_ip.side_effect = plug_fixed_ip
+        network.get_port.side_effect = ports.__getitem__
+        patch = mock.patch.object(utils, 'get_network_driver',
+                                  return_value=network)
+        patch.start()
+        self.addCleanup(patch.stop)
+        return network, {'address': '192.0.2.3', 'protocol_port': 9000,
+                         'subnet_id': subnet_id}
+
+    def _interrupt_persisted_batch(self, delivery, persistence):
+        engine = engines.load_from_factory(
+            flow_utils.get_apply_tcp_member_batch_flow,
+            backend=persistence, engine='serial', store=delivery)
+        attach = network_tasks.HandleNetworkDeltas.execute
+
+        def interrupt(task, *args, **kwargs):
+            attach(task, *args, **kwargs)
+            raise WorkerInterrupted()
+
+        with mock.patch.object(network_tasks.HandleNetworkDeltas,
+                               'execute', new=interrupt):
+            self.assertRaises(WorkerInterrupted, engine.run)
+        with contextlib.closing(persistence.get_connection()) as connection:
+            detail = connection.get_flow_details(engine.storage.flow_uuid)
+        apply = next(atom for atom in detail
+                     if atom.name.endswith('.ApplyTCPMemberBatch'))
+        self.assertEqual(states.RUNNING, apply.state)
+        self.assertEqual(constants.PENDING_UPDATE,
+                         self._pool()['provisioning_status'])
+        return engines.load_from_detail(
+            detail, backend=persistence, engine='serial')
+
+    @contextlib.contextmanager
+    def _persistent_network_batch(self):
+        calls = mock.Mock()
+        with (tempfile.TemporaryDirectory() as directory,
+              backends.backend(
+                  f'sqlite:///{pathlib.Path(directory) / "taskflow.sqlite"}')
+              as persistence,
+              mock.patch.object(amphora_noop.NoopAmphoraLoadBalancerDriver,
+                                'post_network_plug', calls.post_plug),
+              mock.patch.object(amphora_noop.NoopAmphoraLoadBalancerDriver,
+                                'update', calls.reload)):
+            yield persistence, calls
+
+    def test_resumed_jobboard_batch_configures_attached_ports_before_reload(
+            self):
+        network, member_address = self._place_member_on_new_network()
+        delivery = self._batch(
+            {'reject_weight': 1, 'total_weight': 4}, [member_address])
+        with self._persistent_network_batch() as (persistence, calls):
+            resumed = self._interrupt_persisted_batch(delivery, persistence)
+            network.plug_port.assert_called_once()
+            network.plug_fixed_ip.assert_called_once()
+            calls.post_plug.assert_not_called()
+            calls.reload.assert_not_called()
+
+            def verify_pending(*args, **kwargs):
+                self.assertEqual(constants.PENDING_UPDATE,
+                                 self._pool()['provisioning_status'])
+
+            calls.reload.side_effect = verify_pending
+            resumed.run()
+            self.assertEqual(constants.ACTIVE,
+                             self._pool()['provisioning_status'])
+            self.assertEqual(
+                ['post_plug', 'post_plug', 'reload'],
+                [call[0] for call in calls.mock_calls])
+            self.assertEqual(2, len({
+                call.args[0].id for call in calls.post_plug.call_args_list
+            }))
+            self.assertEqual({1, 2}, {
+                len(call.args[1].fixed_ips)
+                for call in calls.post_plug.call_args_list
+            })
+            network.plug_port.assert_called_once()
+            network.plug_fixed_ip.assert_called_once()
+            network.unplug_network.assert_not_called()
+            network.unplug_fixed_ip.assert_not_called()
+
+    def test_redispatch_reports_post_plug_failure_and_fences_old_job(self):
+        network, member_address = self._place_member_on_new_network()
+        one_invalid = {'reject_weight': 1, 'total_weight': 4}
+        delivery = self._batch(one_invalid, [member_address])
+        worker = endpoints.Endpoints()
+        with self._persistent_network_batch() as (persistence, calls):
+            stale = self._interrupt_persisted_batch(delivery, persistence)
+            self.assertEqual(delivery, self._batch(
+                one_invalid, [member_address]))
+            calls.post_plug.side_effect = [None, RuntimeError('post plug')]
+            self.assertRaises(RuntimeError, worker.apply_tcp_member_batch,
+                              {}, **delivery)
+            self.assertEqual(2, calls.post_plug.call_count)
+            calls.reload.assert_not_called()
+            self.assertEqual(constants.ERROR,
+                             self._pool()['provisioning_status'])
+
+            replacement = self._batch(
+                {'reject_weight': 2, 'total_weight': 4}, [member_address])
+            network.reset_mock()
+            calls.reset_mock(side_effect=True)
+            stale.run()
+            self.assertEqual([], calls.mock_calls)
+            self.assertEqual([], network.mock_calls)
+            self.assertEqual(constants.PENDING_UPDATE,
+                             self._pool()['provisioning_status'])
+
+            worker.apply_tcp_member_batch({}, **replacement)
+            self.assertEqual(
+                ['post_plug', 'post_plug', 'reload'],
+                [call[0] for call in calls.mock_calls])
+            network.plug_port.assert_not_called()
+            network.plug_fixed_ip.assert_not_called()
+            network.unplug_network.assert_not_called()
+            network.unplug_fixed_ip.assert_not_called()
+            self.assertEqual(constants.ACTIVE,
+                             self._pool()['provisioning_status'])
