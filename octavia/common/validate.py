@@ -57,7 +57,7 @@ def otlp_tracing(value):
         return None
     required = {'collector_pool_id', 'service_name', 'span_name'}
     if (not isinstance(value, dict) or not
-            required <= value.keys() <= required | {'sampling'}):
+            required <= value.keys() <= required | {'sampling', 'attributes'}):
         raise exceptions.ValidationException(detail=_(
             'otlp_tracing requires collector_pool_id, service_name, and '
             'span_name.'))
@@ -92,7 +92,65 @@ def otlp_tracing(value):
         tracing['sampling'] = {
             mode: _otlp_sampling_fraction(fraction)
             for mode, fraction in sampling.items()}
+    if 'attributes' in value:
+        attributes = _otlp_span_attributes(value['attributes'])
+        if attributes:
+            tracing['attributes'] = attributes
     return tracing
+
+
+def _otlp_span_attributes(attributes):
+    if not isinstance(attributes, list):
+        raise exceptions.ValidationException(detail=_(
+            'OTLP span attributes must be an array.'))
+    result = {}
+    for entry in attributes:
+        if not isinstance(entry, dict):
+            raise exceptions.ValidationException(detail=_(
+                'Every OTLP span attribute must be an object.'))
+        name, source = entry.get('name'), entry.get('source_type')
+        if not isinstance(name, str) or not re.fullmatch(
+                r'[A-Za-z0-9_.:/-]{1,256}', name):
+            raise exceptions.ValidationException(detail=_(
+                'Invalid OTLP span attribute name.'))
+        if name in result:
+            raise exceptions.ValidationException(detail=_(
+                'OTLP span attribute names must be unique.'))
+        fields = constants.OTLP_SPAN_ATTRIBUTE_SOURCE_FIELDS
+        field = fields.get(source) if isinstance(source, str) else None
+        if not field or entry.keys() != {'name', 'source_type', field}:
+            raise exceptions.ValidationException(detail=_(
+                'OTLP span attributes require exactly the value field for '
+                'their Literal, Header, or Attribute source_type.'))
+        value = entry[field]
+        if not isinstance(value, str):
+            raise exceptions.ValidationException(detail=_(
+                'OTLP span attribute source values must be strings.'))
+        if source == 'Literal':
+            try:
+                value.encode('utf-8')
+            except UnicodeEncodeError as exc:
+                raise exceptions.ValidationException(detail=_(
+                    'OTLP literal_value must contain valid Unicode.')) from exc
+            if not 1 <= len(value) <= 1024:
+                raise exceptions.ValidationException(detail=_(
+                    'OTLP literal_value must contain 1 to 1024 characters.'))
+        elif source == 'Header':
+            if not re.fullmatch(r"[A-Za-z0-9!#$%&'*+\-.^_`|~]{1,256}", value):
+                raise exceptions.ValidationException(detail=_(
+                    'Invalid OTLP span attribute header_name.'))
+            value = value.lower()
+        elif value not in constants.OTLP_BUILTIN_SPAN_ATTRIBUTES:
+            raise exceptions.ValidationException(detail=_(
+                'Unsupported OTLP span attribute attribute_key.'))
+        status_key = constants.OTLP_HTTP_STATUS_ATTRIBUTE
+        if (name == status_key and
+                (source != 'Attribute' or value != status_key)):
+            raise exceptions.ValidationException(detail=_(
+                'The standard http.response.status_code span attribute is '
+                'reserved for the HTTP status code.'))
+        result[name] = {'name': name, 'source_type': source, field: value}
+    return [result[name] for name in sorted(result)]
 
 
 def _otlp_sampling_fraction(fraction):

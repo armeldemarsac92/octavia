@@ -188,6 +188,7 @@ class HAProxyCompatTestCase(base.TestCase):
             '2026/03/19\nFeature list : +OPENSSL +LUA')
         tracing = constants.GATEWAY_CAPABILITY_LISTENER_OTLP_TRACING
         sampling = constants.GATEWAY_CAPABILITY_LISTENER_OTLP_SAMPLING
+        attrs = constants.GATEWAY_CAPABILITY_LISTENER_OTLP_SPAN_ATTRIBUTES
         isfile.return_value = False
         self.assertNotIn(tracing,
                          haproxy_compatibility.get_haproxy_capabilities())
@@ -196,11 +197,19 @@ class HAProxyCompatTestCase(base.TestCase):
         features = haproxy_compatibility.get_haproxy_capabilities()
         self.assertTrue(features[tracing])
         self.assertNotIn(sampling, features)
+        self.assertNotIn(attrs, features)
+        isfile.side_effect = lambda path: path in (
+            constants.HAPROXY_OTLP_TRACING_SCRIPT,
+            constants.HAPROXY_OTLP_SPAN_ATTRIBUTES_SCRIPT)
+        features = haproxy_compatibility.get_haproxy_capabilities()
+        self.assertTrue(features[attrs])
+        self.assertNotIn(sampling, features)
         isfile.side_effect = None
         isfile.return_value = True
         features = haproxy_compatibility.get_haproxy_capabilities()
         self.assertTrue(features[tracing])
         self.assertTrue(features[sampling])
+        self.assertTrue(features[attrs])
         self.assertTrue(
             features[constants.GATEWAY_CAPABILITY_BACKEND_RETRY_BUDGET])
 

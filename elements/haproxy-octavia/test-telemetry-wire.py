@@ -36,13 +36,21 @@ TRACEPARENT = f'00-{TRACE_ID}-{PARENT_ID}-01'
 class App(BaseHTTPRequestHandler):
     def do_GET(self):
         body = b'normal application response'
-        self.send_response(418 if self.path == '/child' else 200)
+        self.send_response(418 if self.path.split('?')[0] == '/child' else 200)
         self.send_header('Content-Length', str(len(body)))
         if 'traceparent' in self.headers:
             self.send_header('X-Backend-Traceparent',
                              self.headers['traceparent'])
+        if self.path.endswith('?demo=attributes'):
+            self.send_header('X-Demo-Request', 'response-fallback')
+            self.send_header('X-Demo-Response', 'response-only')
+            if 'X-Demo-Request' in self.headers:
+                self.send_header('X-Demo-Echo', self.headers['X-Demo-Request'])
         self.end_headers()
         self.wfile.write(body)
+
+    do_PROPFIND = do_GET
+    do_QUERY = do_GET
 
     def log_message(self, *_args):
         pass
@@ -82,7 +90,8 @@ def wait_port(port, proc):
     raise TimeoutError(f'No listener on port {port}')
 
 
-def app_request(port, path, headers=None, tls=None):
+def app_request(port, path, headers=None, tls=None, expected_headers=None,
+                method='GET'):
     if tls:
         with_response = http.client.HTTPSConnection(
             '127.0.0.1', port, timeout=3, context=tls)
@@ -91,9 +100,11 @@ def app_request(port, path, headers=None, tls=None):
             '127.0.0.1', port, timeout=3)
     start = time.time_ns()
     try:
-        with_response.request('GET', path, headers=headers or {})
+        with_response.request(method, path, headers=headers or {})
         response = with_response.getresponse()
         assert response.read() == b'normal application response'
+        for name, value in (expected_headers or {}).items():
+            assert response.getheader(name) == value
         return (response.status, response.getheader('X-Backend-Traceparent'),
                 start, time.time_ns())
     finally:
@@ -123,7 +134,18 @@ def wait_spans(path, count):
     raise TimeoutError(f'Expected {count} collected spans, got {len(spans)}')
 
 
-def check_span(observed, app, trace_id=None, parent_id=None, parent_flags=1):
+def assert_publication(config, socket_dir):
+    description = next(
+        line.strip().split()[1] for line in config.read_text().splitlines()
+        if line.startswith('    description octavia-otlp-'))
+    query = haproxy_query.HAProxyQuery(
+        str(socket_dir / 'stats.sock'), timeout=0.3)
+    info = query.show_info()
+    assert info['description'] == description and info['Stopping'] == '0'
+
+
+def check_span(observed, app, trace_id=None, parent_id=None, parent_flags=1,
+               custom_attributes=None):
     attributes, span = observed
     code, traceparent, start, end = app
     assert attributes == [{'key': 'service.name',
@@ -141,8 +163,10 @@ def check_span(observed, app, trace_id=None, parent_id=None, parent_flags=1):
     span_start = int(span['startTimeUnixNano'])
     span_end = int(span['endTimeUnixNano'])
     assert start <= span_start <= span_end <= end
-    assert span['attributes'] == [{'key': 'http.response.status_code',
-                                   'value': {'intValue': str(code)}}]
+    expected = {'http.response.status_code': {'intValue': str(code)}}
+    expected.update(custom_attributes or {})
+    assert len(span['attributes']) == len(expected)
+    assert {a['key']: a['value'] for a in span['attributes']} == expected
     return span
 
 
@@ -188,12 +212,16 @@ def create_local_certificate(directory):
     return cert, key
 
 
-def render_config(directory, socket_dir, app_port, listener_ports,
-                  collector_ports, cert, key, sampling_listeners=()):
+def render_config(args, directory, socket_dir, app_port, listener_ports,
+                  collector_ports, cert, key, sampling_listeners=(),
+                  span_attributes=None):
     cfg.CONF.set_override('base_cert_dir', str(directory),
                           group='haproxy_amphora')
-    if sampling_listeners:
-        for profile in ('tracing', 'sampling'):
+    for profile, enabled in (
+            ('tracing', sampling_listeners or span_attributes),
+            ('sampling', sampling_listeners),
+            ('span_attributes', span_attributes)):
+        if enabled:
             cfg.CONF.set_override(f'enabled_listener_otlp_{profile}_providers',
                                   ['amphora'], group='api_settings')
 
@@ -231,6 +259,8 @@ def render_config(directory, socket_dir, app_port, listener_ports,
                         span_name='Gateway HTTP') if collector else None)
         if sampling:
             tracing['sampling'] = sampling
+        if span_attributes and port in span_attributes:
+            tracing['attributes'] = span_attributes[port]
         https = collector is tls_collector
         lb.listeners.append(data_models.Listener(
             id=str(uuid.uuid4()), load_balancer=lb, protocol_port=port,
@@ -249,15 +279,24 @@ def render_config(directory, socket_dir, app_port, listener_ports,
     templater = jinja_cfg.JinjaTemplater(
         base_amp_path=str(directory), base_crt_dir=str(directory))
     lua = Path(__file__).with_name('octavia-telemetry.lua').resolve()
+    sampling_lua = args.sampling_lua.resolve() if args.sampling_lua else lua
+    if args.sampling_first:
+        lb.listeners.sort(key=lambda listener: bool(
+            listener.otlp_tracing and 'attributes' in listener.otlp_tracing))
 
-    def render(name, sampling_capable, tracing_capable=True):
-        publication = uuid.uuid4().hex if sampling_listeners else None
+    def render(name, sampling_capable, tracing_capable=True,
+               attributes_capable=False):
+        publication = (uuid.uuid4().hex
+                       if sampling_listeners or span_attributes else None)
+        attributes_cap = (
+            constants.GATEWAY_CAPABILITY_LISTENER_OTLP_SPAN_ATTRIBUTES)
         config = templater.build_config(
             amphora, lb.listeners, tls_certs={}, haproxy_versions=('3', '0'),
             amp_details={constants.GATEWAY_CAPABILITY_LISTENER_OTLP_TRACING:
                          tracing_capable,
                          constants.GATEWAY_CAPABILITY_LISTENER_OTLP_SAMPLING:
                          sampling_capable,
+                         attributes_cap: attributes_capable,
                          'active_tuned_profiles': 'amphora',
                          'cpu_count': 5},
             socket_path=str(socket_dir / 'stats.sock'),
@@ -266,7 +305,10 @@ def render_config(directory, socket_dir, app_port, listener_ports,
         # Use the harness account and temporary paths in the local process.
         config = (config
                   .replace(constants.HAPROXY_OTLP_TRACING_SCRIPT, str(lua))
-                  .replace(constants.HAPROXY_OTLP_SAMPLING_SCRIPT, str(lua))
+                  .replace(constants.HAPROXY_OTLP_SAMPLING_SCRIPT,
+                           str(sampling_lua))
+                  .replace(constants.HAPROXY_OTLP_SPAN_ATTRIBUTES_SCRIPT,
+                           str(lua))
                   .replace(constants.HAPROXY_OTLP_TRACING_SOCKET_DIR,
                            str(socket_dir))
                   .replace('    user nobody\n', '')
@@ -276,10 +318,14 @@ def render_config(directory, socket_dir, app_port, listener_ports,
         path.write_text(config)
         return path
 
-    traced = render('haproxy.cfg', bool(sampling_listeners))
-    if not sampling_listeners:
-        lb.listeners[0].otlp_tracing = None
-    cleared = render('haproxy-cleared.cfg', False, not sampling_listeners)
+    traced = render('haproxy.cfg', bool(sampling_listeners),
+                    attributes_capable=bool(span_attributes))
+    if span_attributes:
+        cleared = render('haproxy-cleared.cfg', bool(sampling_listeners))
+    else:
+        if not sampling_listeners:
+            lb.listeners[0].otlp_tracing = None
+        cleared = render('haproxy-cleared.cfg', False, not sampling_listeners)
     tls_collector.backend_tls_hostname = 'wrong.test'
     return traced, cleared, render('haproxy-wrong-identity.cfg', False)
 
@@ -290,7 +336,7 @@ def prove(args, directory, socket_dir, app_port):
     cert, key = create_local_certificate(directory)
     tls = ssl.create_default_context(cafile=cert)
     config, cleared, wrong_identity = render_config(
-        directory, socket_dir, app_port, (enabled, neighbor, disabled),
+        args, directory, socket_dir, app_port, (enabled, neighbor, disabled),
         (receiver_port, tls_port), cert, key)
     for path in (config, cleared, wrong_identity):
         subprocess.run([args.haproxy, '-c', '-f', path], check=True)
@@ -397,7 +443,7 @@ def prove_sampling(args, directory, socket_dir, app_port):
     always = {'numerator': 1, 'denominator': 1}
     half = {'numerator': 1, 'denominator': 2}
     config, withdrawn, _ = render_config(
-        directory, socket_dir, app_port, (legacy, neighbor, disabled),
+        args, directory, socket_dir, app_port, (legacy, neighbor, disabled),
         (receiver, tls_port), cert, key, sampling_listeners=(
             (zero, {'base': never}),
             (full, {'base': always, 'parent': always}),
@@ -407,15 +453,6 @@ def prove_sampling(args, directory, socket_dir, app_port):
     subprocess.run([args.haproxy, '-c', '-f', withdrawn], check=True)
     collector_path, spans = collector_config(directory, receiver, 'sampling')
     expected = {}
-
-    def assert_publication(path):
-        description = next(
-            line.strip().split()[1] for line in path.read_text().splitlines()
-            if line.startswith('    description octavia-otlp-'))
-        query = haproxy_query.HAProxyQuery(
-            str(socket_dir / 'stats.sock'), timeout=0.3)
-        info = query.show_info()
-        assert info['description'] == description and info['Stopping'] == '0'
 
     def request(port, sampled, incoming=None, valid_parent=False):
         headers = {'traceparent': incoming} if incoming else None
@@ -443,7 +480,7 @@ def prove_sampling(args, directory, socket_dir, app_port):
                   directory / 'collector.log') as collector):
         wait_port(legacy, proxy)
         wait_port(receiver, collector)
-        assert_publication(config)
+        assert_publication(config, socket_dir)
         not_sampled = f'00-{TRACE_ID}-{PARENT_ID}-02'
         sampled_parent = f'00-{TRACE_ID}-{PARENT_ID}-03'
         invalid = f'00-{TRACE_ID}-{"0" * 16}-01'
@@ -478,7 +515,7 @@ def prove_sampling(args, directory, socket_dir, app_port):
         ) as replacement:
             proxy.wait(timeout=5)
             wait_port(full, replacement)
-            assert_publication(withdrawn)
+            assert_publication(withdrawn, socket_dir)
             for port in (full, legacy):
                 response = app_request(
                     port, '/withdrawn', {'traceparent': sampled_parent})
@@ -490,12 +527,134 @@ def prove_sampling(args, directory, socket_dir, app_port):
               'additional exports on legacy and sampled listeners')
 
 
+def prove_span_attributes(args, directory, socket_dir, app_port):
+    (enabled, neighbor, disabled, combined, sampling_only, receiver,
+     tls_port) = (free_port() for _ in range(7))
+    cert, key = create_local_certificate(directory)
+    tls = ssl.create_default_context(cafile=cert)
+    literal = '測試🍋\n"a\\b"\x00\t$' '{fake-value} # ;'
+    literal += '🍋' * (1024 - len(literal))
+    configured = [
+        dict(name='demo.literal', source_type='Literal',
+             literal_value=literal),
+        dict(name='demo.header', source_type='Header',
+             header_name='X-DEMO-REQUEST'),
+        dict(name='demo.response', source_type='Header',
+             header_name='X-Demo-Response'),
+        dict(name='demo.absent', source_type='Header',
+             header_name='X-Demo-Absent'),
+        dict(name='demo.method', source_type='Attribute',
+             attribute_key='http.request.method'),
+        dict(name='demo.status', source_type='Attribute',
+             attribute_key='http.response.status_code'),
+        dict(name='http.response.status_code', source_type='Attribute',
+             attribute_key='http.response.status_code'),
+        dict(name='demo.path', source_type='Attribute',
+             attribute_key='url.path'),
+        dict(name='demo.scheme', source_type='Attribute',
+             attribute_key='url.scheme'),
+    ]
+    always = {'numerator': 1, 'denominator': 1}
+    never = {'numerator': 0, 'denominator': 1}
+    config, suspended, _ = render_config(
+        args, directory, socket_dir, app_port, (enabled, neighbor, disabled),
+        (receiver, tls_port), cert, key,
+        sampling_listeners=((combined, {'base': always, 'parent': always}),
+                            (sampling_only, {'base': never})),
+        span_attributes={enabled: configured, combined: configured})
+    for path in (config, suspended):
+        subprocess.run([args.haproxy, '-c', '-f', path], check=True)
+    collector_path, spans = collector_config(directory, receiver, 'attributes')
+    tls_config, tls_spans = collector_config(
+        directory, tls_port, 'neighbor', tls=(cert, key))
+
+    with (
+        running([args.haproxy, '-db', '-f', config],
+                directory / 'haproxy.log') as proxy,
+        running([args.otelcol, '--config', collector_path],
+                directory / 'collector.log') as collector,
+        running([args.otelcol, '--config', tls_config],
+                directory / 'collector-tls.log') as tls_collector,
+    ):
+        wait_port(enabled, proxy)
+        wait_port(receiver, collector)
+        wait_port(tls_port, tls_collector)
+        assert_publication(config, socket_dir)
+        known_methods = os.getenv('OTEL_INSTRUMENTATION_HTTP_KNOWN_METHODS',
+                                  'GET,QUERY').split(',')
+        cases = ((enabled, 'GET', '/child', 418, 'request, whole "field"'),
+                 (combined, 'PROPFIND', '/root', 200, None),
+                 (combined, 'QUERY', '/root', 200, None))
+        for count, (port, method, path, code, demo_header) in enumerate(
+                cases, start=1):
+            sent = {'traceparent': TRACEPARENT}
+            unchanged = {'X-Demo-Request': 'response-fallback',
+                         'X-Demo-Response': 'response-only'}
+            if demo_header is not None:
+                sent['X-Demo-Request'] = demo_header
+                unchanged['X-Demo-Echo'] = demo_header
+            response = app_request(port, path + '?demo=attributes',
+                                   sent, expected_headers=unchanged,
+                                   method=method)
+            assert response[0] == code
+            method_value = method if method in known_methods else '_OTHER'
+            custom = {
+                'demo.literal': {'stringValue': literal},
+                'demo.header': {
+                    'stringValue': demo_header or 'response-fallback'},
+                'demo.response': {'stringValue': 'response-only'},
+                'demo.method': {'stringValue': method_value},
+                'demo.status': {'intValue': str(code)},
+                'demo.path': {'stringValue': path},
+                'demo.scheme': {'stringValue': 'http'},
+            }
+            check_span(wait_spans(spans, count)[-1], response, TRACE_ID,
+                       PARENT_ID, custom_attributes=custom)
+            print(f'{method} exported as {method_value}')
+        sampled_response = app_request(
+            sampling_only, '/sampling', {'traceparent': TRACEPARENT})
+        version, trace, span, flags = sampled_response[1].split('-')
+        assert sampled_response[0] == 200
+        assert (version, trace, flags) == ('00', TRACE_ID, '00')
+        assert span != PARENT_ID and int(span, 16)
+        neighbor_response = app_request(neighbor, '/root', tls=tls)
+        check_span(wait_spans(tls_spans, 1)[0], neighbor_response)
+        print('HTTP 418 and 200: typed attributes verified, including a '
+              '1024-character literal, request and response headers, '
+              'missing-field omission and the existing status attribute')
+        print('The sampling-only listener propagated the unsampled context '
+              'and the HTTPS neighbor exported a standard span')
+        with running(
+            [args.haproxy, '-db', '-f', suspended, '-sf', str(proxy.pid)],
+            directory / 'haproxy-suspended.log',
+        ) as replacement:
+            proxy.wait(timeout=5)
+            wait_port(enabled, replacement)
+            assert_publication(suspended, socket_dir)
+            response = app_request(
+                enabled, '/child', {'traceparent': TRACEPARENT})
+            assert response[:2] == (418, TRACEPARENT)
+            response = app_request(neighbor, '/root', tls=tls)
+            check_span(wait_spans(tls_spans, 2)[1], response)
+            time.sleep(0.3)
+            assert len(record_spans(spans)) == len(cases)
+        print('Missing attributes capability: HTTP 418 and inbound trace '
+              'context preserved without further exports, legacy HTTPS '
+              'neighbor still exported a standard span')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('haproxy')
     parser.add_argument('otelcol')
     parser.add_argument('evidence_dir', type=Path)
-    parser.add_argument('--sampling', action='store_true')
+    profile = parser.add_mutually_exclusive_group()
+    profile.add_argument('--sampling', action='store_true')
+    profile.add_argument('--attributes', action='store_true')
+    parser.add_argument('--sampling-lua', type=Path,
+                        help='use a previously installed sampling script')
+    parser.add_argument('--sampling-first', action='store_true',
+                        help='load sampling actions before attribute actions')
     args = parser.parse_args()
     octavia_config.init([])
     directory = Path(tempfile.mkdtemp(
@@ -505,7 +664,11 @@ def main():
           ThreadingHTTPServer(('127.0.0.1', 0), App) as app):
         Thread(target=app.serve_forever, daemon=True).start()
         try:
-            check = prove_sampling if args.sampling else prove
+            check = prove
+            if args.sampling:
+                check = prove_sampling
+            elif args.attributes:
+                check = prove_span_attributes
             check(args, directory, Path(sockets), app.server_port)
         finally:
             app.shutdown()

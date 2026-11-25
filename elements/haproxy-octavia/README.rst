@@ -70,6 +70,9 @@ with its Python dependencies installed::
 
 Add ``--sampling`` to exercise propagation and collector delivery for
 zero, full and fractional rates with the same harness and binaries.
+Use ``--attributes --sampling-lua /path/to/previous-sampling.lua`` to check
+attribute listeners alongside the previous sampling script. Repeat with
+``--sampling-first`` to reverse the load order.
 
 The ``backend_tls_h2_alpn_v1`` pool capability additionally verifies negotiated
 HTTP/2 before sending application data, including TLS health checks. HTTP
@@ -87,6 +90,59 @@ TLS connections and TLS health checks. Once the combined binary is installed
 across the fleet, enable
 ``[api_settings] enabled_backend_tls_subject_alt_names_providers`` along with
 ``enabled_backend_tls_hostname_providers``.
+
+Listener OTLP span attributes
+=============================
+
+The Amphora image installs
+``/var/lib/octavia/octavia-telemetry-span-attributes-v1.lua`` with the same
+Lua-enabled HAProxy build. The agent reports
+``listener_otlp_span_attributes_v1`` when tracing and this script are
+available. Qualify eligible Amphora images, API processes and workers before
+including the provider in
+``[api_settings] enabled_listener_otlp_span_attributes_providers``. Enable
+``enabled_listener_otlp_tracing_providers`` alongside it. Sampling has its
+own opt-in and can be combined with span attributes.
+
+``otlp_tracing.attributes`` is a list of attributes with distinct ``name``
+values. Each item has ``source_type`` set to ``Literal`` with
+``literal_value``, ``Header`` with ``header_name`` or ``Attribute`` with
+``attribute_key``. Literal strings are encoded as data in HAProxy's
+configuration and exported as OTLP string values.
+
+The listener captures incoming request headers before proxy filters and
+separately reads outgoing response headers after response processing. For
+``Header``, the first full field line from the request takes precedence,
+including commas within the field. The first response field is used when
+the request header is absent. If both headers are absent or the selected
+value is invalid UTF-8, the attribute is omitted. Collecting headers leaves
+the application headers intact.
+
+``Attribute`` supports ``http.request.method`` (incoming method), ``url.path``
+(incoming path without query), ``url.scheme`` (from frontend TLS) and
+``http.response.status_code`` (outgoing status). The status is an OTLP
+integer and the other values are strings. The standard
+``http.response.status_code`` output key is reserved. It may explicitly
+reference the same built-in without creating a duplicate.
+
+The default known HTTP methods are CONNECT, DELETE, GET, HEAD, OPTIONS,
+PATCH, POST, PUT, QUERY and TRACE.
+Unknown methods are exported as ``_OTHER``. Set
+``OTEL_INSTRUMENTATION_HTTP_KNOWN_METHODS`` in the Amphora HAProxy process
+environment to replace the entire list with comma-separated, case-sensitive
+method names.
+
+The API returns attributes sorted by name with lowercase header names and
+omits empty lists. Setting the tracing object without attributes withdraws
+the custom attributes while retaining tracing when the base profile is still
+enabled. The published status is tied to the complete desired tracing
+configuration and only reaches ``ACTIVE`` when each peer confirms its
+reload with the requested profile. A peer missing attribute support loads
+the application listener without tracing for that profile.
+
+Use ``--attributes`` in the local wire check to capture typed spans in a
+real Collector and verify that HTTP traffic continues when the Amphora
+does not report the capability.
 
 HTTP request budgets and retries
 ================================
