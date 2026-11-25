@@ -586,6 +586,14 @@ Enroll the provider in
 ``[api_settings] enabled_tcp_tls_backend_auth_providers`` after qualifying
 the regional API, workers and Amphora fleet.
 
+The ``backend_tls_system_ca_v1`` capability allows a TLS pool with
+``backend_tls_hostname`` to use a regional Amphora image CA bundle.
+It requires ``backend_tls_hostname_v1`` and, for TCP pools, the usual
+``tcp_tls_backend_auth_v1``. To select the profile, set
+``backend_tls_system_ca`` to true and omit ``ca_tls_container_ref``.
+Read ``backend_tls_system_ca_sha256`` after provisioning to confirm the
+bundle prepared for the active configuration across the serving topology.
+
 ``tls_sni_weighted_pools_v1`` enables ``WEIGHTED_TARGETS`` for
 ``TLS_SNI`` policies on terminating TCP listeners, including the terminating
 side of a mixed-mode listener. Enroll a compatible provider in

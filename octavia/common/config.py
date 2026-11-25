@@ -246,6 +246,10 @@ api_opts = [
                        'support strict backend DNS authentication. '
                        'Enable after upgrading the database, API, '
                        'workers and all Amphora images.')),
+    cfg.ListOpt('enabled_backend_tls_system_ca_providers', default=[],
+                help=_('Providers enrolled for backend TLS system CA. '
+                       'Requires strict hostname support and a valid '
+                       'regional Amphora system CA profile.')),
     cfg.ListOpt('enabled_backend_tls_h2_alpn_providers', default=[],
                 help=_('Provider drivers whose regional Amphora fleets '
                        'require negotiated HTTP/2 on protected TLS pools. '
@@ -524,6 +528,13 @@ haproxy_amphora_opts = [
     cfg.StrOpt('base_cert_dir',
                default='/var/lib/octavia/certs',
                help=_('Base directory for cert storage.')),
+    cfg.StrOpt('backend_tls_system_ca_path',
+               default='/etc/ssl/certs/ca-certificates.crt',
+               help=_('Absolute path to the image system CA PEM bundle '
+                      'on each Amphora.')),
+    cfg.StrOpt('backend_tls_system_ca_sha256',
+               help=_('Expected SHA-256 of the regional Amphora image '
+                      'system CA PEM bundle.')),
     cfg.StrOpt('haproxy_template', help=_('Custom haproxy template.')),
     cfg.StrOpt('http_cookie_signing_key_file',
                help=_('Worker-only path to a private 32-byte key file for '

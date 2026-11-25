@@ -267,7 +267,7 @@ class TestHaproxyAmphoraLoadBalancerDriverTest(base.TestCase):
         listener = mock.Mock(enabled=True, pools=[pool], l7policies=[],
                              protocol=constants.PROTOCOL_HTTP)
         loadbalancer = mock.Mock(id='lb', enabled=True, listeners=[listener],
-                                 amphorae=amphorae)
+                                 amphorae=amphorae, pools=[pool])
         details = self.driver.clients[API_VERSION].get_details
         details.side_effect = [{capability: True}, {}]
         with (
@@ -293,6 +293,176 @@ class TestHaproxyAmphoraLoadBalancerDriverTest(base.TestCase):
         self.assertEqual(
             [mock.call(amp, timeout_dict=None) for amp in amphorae],
             details.call_args_list)
+
+    @mock.patch('octavia.db.api.session')
+    @mock.patch('octavia.db.repositories.PoolRepository.'
+                'set_backend_tls_system_ca_digests')
+    @mock.patch('octavia.db.repositories.PoolRepository.'
+                'set_backend_tls_pool_statuses')
+    def test_system_ca_pairs_confirm_load_then_close_on_failover_mismatch(
+            self, close_status, proof, db_session):
+        digest = 'a' * 64
+        config = self.useFixture(oslo_fixture.Config(cfg.CONF))
+        config.config(group='api_settings',
+                      enabled_backend_tls_hostname_providers=['amphora'],
+                      enabled_backend_tls_system_ca_providers=['amphora'])
+        config.config(group='haproxy_amphora',
+                      backend_tls_system_ca_sha256=digest)
+        peers = [data_models.Amphora(id=role, role=role,
+                                     status=constants.AMPHORA_ALLOCATED)
+                 for role in (constants.ROLE_MASTER, constants.ROLE_BACKUP)]
+        for amp in peers:
+            amp.api_version = API_VERSION
+        pool = data_models.Pool(
+            id='system', enabled=True, protocol=constants.PROTOCOL_HTTP,
+            backend_tls_system_ca=True, tls_enabled=True,
+            backend_tls_hostname='system.example.test')
+        neighbor = data_models.Pool(
+            id='private', enabled=True, protocol=constants.PROTOCOL_HTTP,
+            backend_tls_hostname='private.example.test', tls_enabled=True,
+            ca_tls_certificate_id='private-ca')
+        listener = data_models.Listener(
+            id='http', protocol=constants.PROTOCOL_HTTP,
+            enabled=True, pools=[pool, neighbor])
+        lb = data_models.LoadBalancer(
+            id='lb', enabled=True, pools=[pool, neighbor],
+            listeners=[listener], amphorae=peers, provider='amphora',
+            topology=constants.TOPOLOGY_ACTIVE_STANDBY)
+        client = self.driver.clients[API_VERSION]
+        client.get_details.return_value = {
+            constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME: True,
+            constants.GATEWAY_CAPABILITY_BACKEND_TLS_SYSTEM_CA: True,
+        }
+        client.stage_backend_tls_system_ca.return_value = digest
+
+        def render(lb, peer, *, backend_tls_certs, system_ca_observed,
+                   **kwargs):
+            material = backend_tls_certs[pool.id]
+            if material.get('system_ca_sha256'):
+                system_ca_observed[peer.id] = {pool.id: digest}
+            return {listener.id}
+
+        with (
+            mock.patch.object(self.driver, '_update_amphora_listeners',
+                              side_effect=render) as reload_config,
+            mock.patch.object(self.driver, '_process_secret',
+                              return_value='private.pem'),
+        ):
+            self.driver.update(lb)
+            self.assertEqual([mock.call(
+                amp, lb.id, '/etc/ssl/certs/ca-certificates.crt', digest,
+                timeout_dict=None) for amp in peers],
+                client.stage_backend_tls_system_ca.call_args_list)
+            self.assertEqual({pool.id: digest}, proof.call_args.args[2])
+            self.assertEqual(2, reload_config.call_count)
+            for call in reload_config.call_args_list:
+                material = call.kwargs['backend_tls_certs']
+                self.assertEqual(digest, material[pool.id]['system_ca_sha256'])
+
+            proof.reset_mock()
+            reload_config.reset_mock()
+            client.stage_backend_tls_system_ca.side_effect = [
+                digest, exc.Conflict()]
+            statuses = {amp.id: {} for amp in peers}
+            self.assertTrue(self.driver.update_failover_listeners(
+                lb, 0, statuses))
+            self.assertEqual([{pool.id: None}] * 2,
+                             [call.args[2] for call in proof.call_args_list])
+            self.assertEqual({pool.id},
+                             close_status.call_args.kwargs['closed'])
+            self.assertEqual(2, reload_config.call_count)
+            for call in reload_config.call_args_list:
+                material = call.kwargs['backend_tls_certs']
+                self.assertEqual({'closed': True}, material[pool.id])
+                self.assertTrue(material[neighbor.id]['ca_cert'].endswith(
+                    '/private.pem'))
+
+    @mock.patch('octavia.db.api.session')
+    @mock.patch('octavia.db.repositories.PoolRepository.'
+                'set_backend_tls_system_ca_digests')
+    @mock.patch('octavia.db.repositories.PoolRepository.'
+                'set_backend_tls_pool_statuses')
+    def test_system_ca_publication_failure_closes_reachable_peer(
+            self, close_status, proof, db_session):
+        digest = 'a' * 64
+        config = self.useFixture(oslo_fixture.Config(cfg.CONF))
+        config.config(group='api_settings',
+                      enabled_backend_tls_hostname_providers=['amphora'],
+                      enabled_backend_tls_system_ca_providers=['amphora'])
+        config.config(group='haproxy_amphora',
+                      backend_tls_system_ca_sha256=digest)
+        peers = [data_models.Amphora(id=role, role=role,
+                                     status=constants.AMPHORA_ALLOCATED)
+                 for role in (constants.ROLE_MASTER, constants.ROLE_BACKUP)]
+        for amp in peers:
+            amp.api_version = API_VERSION
+        pool = data_models.Pool(
+            id='system', enabled=True, protocol=constants.PROTOCOL_HTTP,
+            backend_tls_system_ca=True, tls_enabled=True,
+            backend_tls_hostname='system.example.test')
+        listener = data_models.Listener(
+            id='http', protocol=constants.PROTOCOL_HTTP,
+            enabled=True, pools=[pool])
+        lb = data_models.LoadBalancer(
+            id='lb', enabled=True, pools=[pool], listeners=[listener],
+            amphorae=peers, provider='amphora',
+            topology=constants.TOPOLOGY_ACTIVE_STANDBY)
+        client = self.driver.clients[API_VERSION]
+        client.get_details.return_value = {
+            constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME: True,
+            constants.GATEWAY_CAPABILITY_BACKEND_TLS_SYSTEM_CA: True,
+        }
+        upload_error = exc.Conflict()
+        uploaded = {}
+        installed = []
+
+        def render(*, tls_certs, system_ca_results, config_publication,
+                   **kwargs):
+            closed = tls_certs[pool.id].get('closed', False)
+            if not closed:
+                system_ca_results[pool.id] = digest
+            return closed, config_publication
+
+        def upload(peer, lb_id, config, **kwargs):
+            if peer == peers[1]:
+                raise upload_error
+            uploaded[peer.id] = config
+
+        def reload(peer, lb_id, *, config_publication, **kwargs):
+            closed, token = uploaded.pop(peer.id)
+            self.assertEqual(token, config_publication)
+            installed.append((peer.id, closed))
+            return mock.Mock(
+                status_code=202, headers={
+                    constants.HAPROXY_CONFIG_PUBLICATION_HEADER: token})
+
+        self.driver.jinja_combo.build_config.side_effect = render
+        client.upload_config.side_effect = upload
+        client.reload_listener.side_effect = reload
+        with (mock.patch.object(self.driver, '_process_listener_tls_certs',
+                                return_value={}),
+              mock.patch.object(self.driver, '_process_listener_pool_certs',
+                                return_value={})):
+            client.stage_backend_tls_system_ca.side_effect = [
+                digest, exc.Conflict()]
+            self.assertRaises(exc.Conflict, self.driver.update, lb,
+                              tcp_member_batch=True)
+            self.assertEqual([(peers[0].id, True)], installed)
+            self.assertEqual({pool.id: None}, proof.call_args.args[2])
+            self.assertEqual({pool.id},
+                             close_status.call_args.kwargs['closed'])
+
+            installed.clear()
+            client.stage_backend_tls_system_ca.side_effect = [digest, digest]
+            error = self.assertRaises(
+                driver_except.CoordinatedListenerUpdateError,
+                self.driver.update_failover_listeners,
+                lb, 0, {amp.id: {} for amp in peers})
+            self.assertEqual({peers[1].id: upload_error},
+                             error.amphora_errors)
+            self.assertEqual([(peers[0].id, False), (peers[0].id, True)],
+                             installed)
+            self.assertEqual({pool.id: None}, proof.call_args.args[2])
 
     def test_missing_tls_capabilities_close_only_affected_pools(self):
         hostname = constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME
@@ -324,7 +494,8 @@ class TestHaproxyAmphoraLoadBalancerDriverTest(base.TestCase):
             enabled=True, protocol=constants.PROTOCOL_TCP,
             tcp_tls_termination=True, pools=[tcp_pool], l7policies=[])
         lb = mock.Mock(enabled=True, listeners=[listener, tcp_listener],
-                       amphorae=amphorae)
+                       amphorae=amphorae,
+                       pools=[tls_pool, grpc_pool, san_pool, tcp_pool])
         sans = constants.GATEWAY_CAPABILITY_BACKEND_TLS_SUBJECT_ALT_NAMES
         tcp_auth = constants.GATEWAY_CAPABILITY_TCP_TLS_BACKEND_AUTH
         self.driver.clients[API_VERSION].get_details.side_effect = [

@@ -390,6 +390,146 @@ class TestInitialL7Rules(base.BaseAPITest):
                          [p['admin_state_up'] for p in
                           self._activation_policies(path)])
 
+    def test_batch_activation_attaches_an_empty_system_ca_pool(self):
+        digest = 'a' * 64
+        self.conf.config(
+            group='api_settings',
+            enabled_backend_tls_hostname_providers=['amphora'],
+            enabled_backend_tls_system_ca_providers=['amphora'])
+        self.conf.config(group='haproxy_amphora',
+                         backend_tls_system_ca_sha256=digest)
+        pool = self.create_pool(
+            self.lb_id, 'HTTP', 'ROUND_ROBIN', tls_enabled=True,
+            backend_tls_hostname='backend.example.test',
+            backend_tls_system_ca=True)['pool']
+        self.set_lb_status(self.lb_id)
+        with self.session.begin():
+            self.create_amphora(uuidutils.generate_uuid(), self.lb_id,
+                                role=constants.ROLE_STANDALONE,
+                                status=constants.AMPHORA_ALLOCATED,
+                                lb_network_ip='192.0.2.100')
+        path, payload = self._prepare_activation_group(
+            action='REDIRECT_TO_POOL', redirect_pool_id=pool['id'],
+            redirect_prefix=None)
+        pool_path = self.POOL_PATH.format(pool_id=pool['id'])
+        self.assertIsNone(self.get(pool_path).json['pool'][
+            'backend_tls_system_ca_sha256'])
+        self.post(path, payload, status=204)
+        delivery = self.rpc.cast.call_args.kwargs
+        self.conf.config(group='controller_worker',
+                         amphora_driver='amphora_haproxy_rest_driver')
+        client = rest_api_driver.AmphoraAPIClient1_0
+        capabilities = {
+            constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME: True,
+            constants.GATEWAY_CAPABILITY_BACKEND_TLS_SYSTEM_CA: True,
+        }
+
+        def acknowledge(action, amp, lb_id, *, timeout_dict,
+                        config_publication):
+            self.assertEqual('reload', action)
+            self.assertEqual(self.lb_id, lb_id)
+            self.assertIn('description octavia-config-' + config_publication,
+                          upload.call_args.args[2])
+            return mock.Mock(
+                status_code=202, headers={
+                    constants.HAPROXY_CONFIG_PUBLICATION_HEADER:
+                    config_publication})
+
+        with (mock.patch.object(rest_api_driver.AmphoraAPIClientBase,
+                                'get_api_version',
+                                return_value={'api_version': '1.0'}),
+              mock.patch.object(client, 'get_info', return_value={
+                  'haproxy_version': '3.0.19'}),
+              mock.patch.object(client, 'get_details',
+                                return_value=capabilities),
+              mock.patch.object(client, 'stage_backend_tls_system_ca',
+                                return_value=digest),
+              mock.patch.object(client, 'upload_config') as upload,
+              mock.patch.object(client, '_action',
+                                side_effect=acknowledge) as reload):
+            endpoints.Endpoints().activate_l7policies({}, **delivery)
+        reload.assert_called_once()
+        self.assertIn(f'/backend-system-ca/{digest}.pem',
+                      upload.call_args.args[2])
+        self.assertIn('default-server ca-file', upload.call_args.args[2])
+        self.assertEqual(digest, self.get(pool_path).json['pool'][
+            'backend_tls_system_ca_sha256'])
+        self.assertEqual([True, True, False],
+                         [p['admin_state_up'] for p in
+                          self._activation_policies(path)])
+        with self.session.begin():
+            lb = self.lb_repo.get_for_update(self.session, self.lb_id)
+            self.assertEqual('applied', lb.l7policy_activation['phase'])
+        after = self._activation_request(path)
+        with self.session.begin():
+            # Isolate this configuration field from the receipt generation.
+            self.session.get(models.Pool, pool['id']).backend_tls_system_ca = (
+                False)
+        self.assertNotEqual(after['l7policy_activation'][
+            'expected_graph_revision'], self._activation_request(path)[
+                'l7policy_activation']['expected_graph_revision'])
+
+    def test_backend_tls_system_ca_replacement_requires_new_peer_proof(self):
+        digest = 'a' * 64
+        self.conf.config(
+            group='api_settings',
+            enabled_backend_tls_hostname_providers=['amphora'],
+            enabled_backend_tls_system_ca_providers=['amphora'])
+        self.conf.config(group='haproxy_amphora',
+                         backend_tls_system_ca_sha256=digest)
+        pool = self.create_pool(
+            self.lb_id, constants.PROTOCOL_HTTP,
+            constants.LB_ALGORITHM_ROUND_ROBIN, tls_enabled=True,
+            backend_tls_hostname='backend.example.test',
+            backend_tls_system_ca=True)['pool']
+        pool_id = pool['id']
+        path = self.POOL_PATH.format(pool_id=pool_id)
+        topology = constants.TOPOLOGY_ACTIVE_STANDBY
+        first, failed, replacement = (
+            uuidutils.generate_uuid() for _ in range(3))
+        original = {first: constants.ROLE_MASTER,
+                    failed: constants.ROLE_BACKUP}
+        with self.session.begin():
+            self.lb_repo.update(self.session, self.lb_id, topology=topology)
+            for amphora_id, role in original.items():
+                amp = self.create_amphora(
+                    amphora_id, self.lb_id, role=role,
+                    status=constants.AMPHORA_ALLOCATED)
+            failed_amp = amp.to_dict()
+            self.pool_repo.set_backend_tls_system_ca_digests(
+                self.session, (self.lb_id, topology, original),
+                {pool_id: digest})
+
+        def assert_readback(expected):
+            self.assertEqual(expected, self.get(path).json['pool'][
+                'backend_tls_system_ca_sha256'])
+            pools = self.get(self.POOLS_PATH).json['pools']
+            listed = next(item for item in pools if item['id'] == pool_id)
+            self.assertEqual(expected, listed['backend_tls_system_ca_sha256'])
+
+        assert_readback(digest)
+        database_tasks.MarkAmphoraPendingDeleteInDB().execute(failed_amp)
+        assert_readback(None)
+        with self.session.begin():
+            self.amphora_repo.update(self.session, failed,
+                                     status=constants.DELETED)
+            self.create_amphora(replacement, self.lb_id,
+                                role=constants.ROLE_BACKUP,
+                                status=constants.AMPHORA_ALLOCATED)
+        assert_readback(None)
+        with self.session.begin():
+            self.pool_repo.set_backend_tls_system_ca_digests(
+                self.session, (self.lb_id, topology, original),
+                {pool_id: digest})
+        assert_readback(None)
+        with self.session.begin():
+            current = {first: constants.ROLE_MASTER,
+                       replacement: constants.ROLE_BACKUP}
+            self.pool_repo.set_backend_tls_system_ca_digests(
+                self.session, (self.lb_id, topology, current),
+                {pool_id: digest})
+        assert_readback(digest)
+
     def test_batch_activation_rejects_stale_or_foreign_state(self):
         path, payload = self._prepare_activation_group()
         activation = payload['l7policy_activation']

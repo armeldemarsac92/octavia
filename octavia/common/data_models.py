@@ -340,7 +340,10 @@ class Pool(BaseDataModel):
                  backend_tls_hostname=None, backend_tls_require_h2=False,
                  backend_tls_subject_alt_names=None,
                  backend_retry_budget=None, tcp_connection_rejection=None,
-                 tcp_member_batch_id=None, udp_packet_drop=None):
+                 tcp_member_batch_id=None, udp_packet_drop=None, *,
+                 backend_tls_system_ca=False,
+                 backend_tls_system_ca_sha256=None,
+                 backend_tls_system_ca_peers=None):
         self.id = id
         self.project_id = project_id
         self.name = name
@@ -369,12 +372,19 @@ class Pool(BaseDataModel):
         self.alpn_protocols = alpn_protocols
         self.backend_h2c = backend_h2c
         self.backend_tls_hostname = backend_tls_hostname
+        self.backend_tls_system_ca = backend_tls_system_ca
+        self.backend_tls_system_ca_sha256 = backend_tls_system_ca_sha256
+        self._backend_tls_system_ca_peers = backend_tls_system_ca_peers
         self.backend_tls_require_h2 = backend_tls_require_h2
         self.backend_tls_subject_alt_names = backend_tls_subject_alt_names
         self.backend_retry_budget = backend_retry_budget
         self.tcp_connection_rejection = tcp_connection_rejection
         self.tcp_member_batch_id = tcp_member_batch_id
         self.udp_packet_drop = udp_packet_drop
+
+    @property
+    def backend_tls_system_ca_peers(self):
+        return self._backend_tls_system_ca_peers
 
     def update(self, update_dict):
         for key, value in update_dict.items():

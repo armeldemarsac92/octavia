@@ -58,15 +58,15 @@ def _validate_backend_h2c(driver, protocol, tls_enabled, *, enrolling):
 
 
 def _validate_backend_tls_hostname(driver, protocol, hostname, tls_enabled,
-                                   ca_ref, *, enrolling):
+                                   ca_ref, *, enrolling, system_ca=False):
     if not validate.is_exact_sni_name(hostname):
         raise exceptions.ValidationException(detail=_(
             'backend_tls_hostname must be a literal DNS hostname.'))
     if (protocol not in (constants.PROTOCOL_HTTP, constants.PROTOCOL_TCP) or
-            tls_enabled is not True or not ca_ref):
+            tls_enabled is not True or not (ca_ref or system_ca)):
         raise exceptions.ValidationException(detail=_(
             'backend_tls_hostname requires an HTTP or TCP pool with '
-            'tls_enabled true and a CA certificate reference.'))
+            'tls_enabled true and a trusted CA source.'))
     if not enrolling:
         return
     if protocol == constants.PROTOCOL_TCP:
@@ -77,6 +77,19 @@ def _validate_backend_tls_hostname(driver, protocol, hostname, tls_enabled,
             prov=driver.name, user_msg=_(
                 'Backend TLS hostname authentication is unavailable '
                 'for this provider.'))
+
+
+def _validate_backend_tls_system_ca(driver, hostname, ca_ref, *,
+                                    enrolling):
+    if hostname is None or ca_ref is not None:
+        raise exceptions.ValidationException(detail=_(
+            'backend_tls_system_ca requires backend_tls_hostname and '
+            'cannot be combined with ca_tls_container_ref.'))
+    if (enrolling and constants.GATEWAY_CAPABILITY_BACKEND_TLS_SYSTEM_CA
+            not in driver_utils.gateway_capabilities(driver)):
+        raise exceptions.ProviderUnsupportedOptionError(
+            prov=driver.name, user_msg=_(
+                'Backend TLS system CA is unavailable in this region.'))
 
 
 def _validate_backend_tls_require_h2(driver, protocol, hostname, *,
@@ -262,7 +275,12 @@ class PoolsController(base.BaseController):
         if require_h2 is None:
             raise exceptions.ValidationException(
                 detail=_('backend_tls_require_h2 must be true or false.'))
+        system_ca = pool_dict.get('backend_tls_system_ca', False)
+        if system_ca is None:
+            raise exceptions.ValidationException(
+                detail=_('backend_tls_system_ca must be true or false.'))
         hostname = pool_dict.get('backend_tls_hostname')
+        ca_ref = pool_dict.get('ca_tls_certificate_id')
         sans = pool_dict.get('backend_tls_subject_alt_names', [])
         if sans is None:
             validate.backend_tls_subject_alt_names(sans)
@@ -276,7 +294,7 @@ class PoolsController(base.BaseController):
             persistence and _validate_http_cookie_absolute_timeout(
                 persistence, pool_dict['protocol']))
         if (pool_dict.get('backend_h2c') or hostname is not None or
-                require_h2 or sans or budget is not None or
+                system_ca or require_h2 or sans or budget is not None or
                 named_http_cookie or custom_cookie_path):
             if driver is None:
                 # Fully populated load balancer creation uses this path too.
@@ -286,11 +304,14 @@ class PoolsController(base.BaseController):
         if pool_dict.get('backend_h2c'):
             _validate_backend_h2c(driver, pool_dict['protocol'],
                                   pool_dict['tls_enabled'], enrolling=True)
+        if system_ca:
+            _validate_backend_tls_system_ca(
+                driver, hostname, ca_ref, enrolling=True)
         if hostname is not None:
             _validate_backend_tls_hostname(
                 driver, pool_dict['protocol'], hostname,
-                pool_dict['tls_enabled'],
-                pool_dict.get('ca_tls_certificate_id'), enrolling=True)
+                pool_dict['tls_enabled'], ca_ref, enrolling=True,
+                system_ca=system_ca)
         if require_h2:
             _validate_backend_tls_require_h2(
                 driver, pool_dict['protocol'], hostname, enrolling=True)
@@ -391,7 +412,11 @@ class PoolsController(base.BaseController):
         ca_ref = (current.ca_tls_certificate_id
                   if changes.ca_tls_container_ref is wtypes.Unset
                   else changes.ca_tls_container_ref)
-        identity_changed = (hostname != current.backend_tls_hostname or
+        system_ca = (current.backend_tls_system_ca
+                     if changes.backend_tls_system_ca is wtypes.Unset
+                     else changes.backend_tls_system_ca)
+        identity_changed = (system_ca != current.backend_tls_system_ca or
+                            hostname != current.backend_tls_hostname or
                             (hostname is not None and
                              ca_ref != current.ca_tls_certificate_id))
         if not (identity_changed or reopening or changes.tls_enabled is True):
@@ -416,7 +441,7 @@ class PoolsController(base.BaseController):
                     'authentication.'))
             validate.validate_tcp_redirect_pool_protocol(
                 current.protocol, tls_enabled, tcp_tls_termination=True,
-                hostname=hostname, ca_ref=ca_ref)
+                hostname=hostname, ca_ref=ca_ref, system_ca=system_ca)
             if reopening:
                 driver_utils.require_tcp_tls_termination(driver)
             if ((reopening or identity_changed) and
@@ -580,7 +605,8 @@ class PoolsController(base.BaseController):
                     driver, pool_dict['protocol'], pool_dict['tls_enabled'],
                     tcp_tls_termination=listener.tcp_tls_termination,
                     hostname=pool_dict.get('backend_tls_hostname'),
-                    ca_ref=pool_dict.get('ca_tls_certificate_id'))
+                    ca_ref=pool_dict.get('ca_tls_certificate_id'),
+                    system_ca=pool_dict.get('backend_tls_system_ca'))
                 listener.provisioning_status = constants.PENDING_UPDATE
 
             db_pool = self._validate_create_pool(
@@ -707,6 +733,23 @@ class PoolsController(base.BaseController):
             _validate_backend_tls_subject_alt_names(
                 driver, current.protocol, hostname,
                 enrolling=reopening or has_san_update)
+        system_ca = pool.backend_tls_system_ca
+        if system_ca is None:
+            raise exceptions.ValidationException(
+                detail=_('backend_tls_system_ca must be true or false.'))
+        if system_ca is wtypes.Unset:
+            system_ca = current.backend_tls_system_ca
+        if current.backend_tls_system_ca and not system_ca and (
+                current.enabled or reopening):
+            raise exceptions.ValidationException(detail=_(
+                'Disable the pool before removing backend TLS system CA.'))
+        ca_ref = (current.ca_tls_certificate_id
+                  if pool.ca_tls_container_ref is wtypes.Unset
+                  else pool.ca_tls_container_ref)
+        if system_ca:
+            _validate_backend_tls_system_ca(
+                driver, hostname, ca_ref, enrolling=(
+                    not current.backend_tls_system_ca or reopening))
         if hostname is None:
             if current.backend_tls_hostname and (current.enabled or reopening):
                 raise exceptions.ValidationException(detail=_(
@@ -714,14 +757,12 @@ class PoolsController(base.BaseController):
                     'authentication.'))
             return
 
-        ca_ref = (current.ca_tls_certificate_id
-                  if pool.ca_tls_container_ref is wtypes.Unset
-                  else pool.ca_tls_container_ref)
         enrolling_hostname = hostname != current.backend_tls_hostname
         tcp_trust_changed = (current.protocol == constants.PROTOCOL_TCP and
                              ca_ref != current.ca_tls_certificate_id)
         _validate_backend_tls_hostname(
             driver, current.protocol, hostname, tls, ca_ref,
+            system_ca=system_ca,
             enrolling=(enrolling_hostname or tcp_trust_changed or
                        reopening or enrolling_h2))
 
@@ -1002,6 +1043,14 @@ class PoolsController(base.BaseController):
             # Update the database to reflect what the driver just accepted
             pool.provisioning_status = constants.PENDING_UPDATE
             db_pool_dict = pool.to_dict(render_unsets=False)
+            if pool.backend_tls_system_ca is not wtypes.Unset or (
+                    current.backend_tls_system_ca and any(
+                        field in db_pool_dict for field in (
+                            'enabled', 'backend_tls_hostname',
+                            'backend_tls_subject_alt_names',
+                            'tls_enabled', 'tls_certificate_id'))):
+                db_pool_dict['backend_tls_system_ca_sha256'] = None
+                db_pool_dict['backend_tls_system_ca_peers'] = None
             persistence = db_pool_dict.get('session_persistence')
             if persistence:
                 persistence['http_cookie_name_enabled'] = (

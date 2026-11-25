@@ -736,6 +736,14 @@ backend {{ reject }}
 {% endmacro %}
 
 
+{% macro system_ca_file(pool) %}
+    {# HAProxy loads this CA file even if no member exists yet. #}
+    {% if pool.backend_tls_system_ca_sha256 is defined %}
+    default-server ca-file {{ pool.ca_cert }}
+    {% endif %}
+{% endmacro %}
+
+
 {% macro member_macro(constants, lib_consts, pool, member, persistence=True) %}
     {% if pool.health_monitor and pool.health_monitor.enabled %}
         {% if member.monitor_address %}
@@ -983,6 +991,7 @@ listen octavia-mirror-{{ pool.id }}
     balance {{ pool.lb_algorithm }}
     option allbackups
 {{ pool_health_monitor(constants, pool, state_file) -}}
+{{ system_ca_file(pool) -}}
     {% for member in pool.members %}
         {{- member_macro(constants, lib_consts, pool, member, persistence=False) -}}
     {% endfor %}
@@ -1214,6 +1223,7 @@ backend {{ pool.id }}:{{ listener.id }}
     {% if cookie.cookie_path_replacement is defined %}
 {{ http_cookie_path(cookie) -}}
     {% endif %}
+{{ system_ca_file(pool) -}}
     {% for member in pool.members %}
         {{- member_macro(constants, lib_consts, pool, member) -}}
     {% endfor %}

@@ -1121,6 +1121,37 @@ class PoolRepository(BaseRepository):
     model_class = models.Pool
     activation_parent = ('load_balancer',)
 
+    def set_backend_tls_system_ca_digests(self, session, topology, digests):
+        lb_id, expected_topology, expected_peers = topology
+        lb = LoadBalancerRepository().get_for_update(session, lb_id)
+        if lb is None:
+            return
+        amp = models.Amphora
+        current = session.execute(select(amp.id, amp.role, amp.status).where(
+            amp.load_balancer_id == lb_id,
+            amp.status != consts.DELETED).with_for_update()).all()
+        matches = (
+            lb.enabled and lb.topology == expected_topology and
+            all(status == consts.AMPHORA_ALLOCATED
+                for _, _, status in current) and
+            {amp_id: role for amp_id, role, _ in current} == expected_peers and
+            utils.amphora_roles_match_topology(
+                lb.topology, expected_peers.values()))
+        pool = self.model_class
+        rows = (session.query(pool).filter(
+            pool.id.in_(digests), pool.load_balancer_id == lb_id,
+            pool.backend_tls_system_ca.is_(True))
+            .options(lazyload('*')).populate_existing()
+            .order_by(pool.id).with_for_update())
+        for row in rows:
+            if (matches and row.enabled and row.provisioning_status not in
+                    (consts.PENDING_DELETE, consts.DELETED)):
+                row.backend_tls_system_ca_sha256 = digests[row.id]
+            else:
+                row.backend_tls_system_ca_sha256 = None
+            row.backend_tls_system_ca_peers = (
+                expected_peers if row.backend_tls_system_ca_sha256 else None)
+
     def set_backend_tls_pool_statuses(self, session, *, closed, recovered):
         guarded = {id for id in sorted(set(closed) | set(recovered))
                    if self.batch_owns_graph(session, id, tcp_only=True)}
@@ -1129,6 +1160,7 @@ class PoolRepository(BaseRepository):
         pool = self.model_class
         protected = session.query(pool).filter(
             or_(pool.backend_tls_hostname.is_not(None),
+                pool.backend_tls_system_ca.is_(True),
                 pool.backend_tls_require_h2.is_(True)), pool.enabled.is_(True))
         if closed:
             protected.filter(
@@ -1182,6 +1214,7 @@ class PoolRepository(BaseRepository):
             pool.id == id,
             or_(pool.tcp_member_batch_id.is_(None), ~failed),
             or_(and_(pool.backend_tls_hostname.is_(None),
+                     pool.backend_tls_system_ca.is_(False),
                      pool.backend_tls_require_h2.is_(False)),
                 pool.enabled.is_(False),
                 pool.provisioning_status != consts.ERROR)).update(
@@ -1212,6 +1245,7 @@ class PoolRepository(BaseRepository):
                              pool.backend_tls_hostname,
                              pool.backend_tls_require_h2,
                              pool.backend_tls_subject_alt_names,
+                             pool.backend_tls_system_ca,
                              pool.ca_tls_certificate_id,
                              pool.crl_container_id,
                              pool.alpn_protocols,
@@ -1256,7 +1290,8 @@ class PoolRepository(BaseRepository):
              subqueryload(models.L7PolicyMirror.l7policy).options(
                  subqueryload(models.L7Policy.l7rules),
                  subqueryload(models.L7Policy.listener))),
-            subqueryload(models.Pool.load_balancer),
+            subqueryload(models.Pool.load_balancer).subqueryload(
+                models.LoadBalancer.amphorae),
             subqueryload(models.Pool.members),
             subqueryload(models.Pool.session_persistence),
             subqueryload(models.Pool._tags),
@@ -2728,7 +2763,8 @@ class L7PolicyRepository(BaseRepository):
                     pool.protocol, pool.tls_enabled,
                     tcp_tls_termination=not passthrough,
                     hostname=pool.backend_tls_hostname,
-                    ca_ref=pool.ca_tls_certificate_id)
+                    ca_ref=pool.ca_tls_certificate_id,
+                    system_ca=pool.backend_tls_system_ca)
             else:
                 validate.validate_listener_pool_protocol(
                     listener.protocol, pool.protocol)

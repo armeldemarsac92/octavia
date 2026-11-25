@@ -53,6 +53,8 @@ LISTENER_REQUEST_FILTERS_PAYLOAD_AVAILABLE = hasattr(
 WEIGHTED_TARGET_PAYLOAD_AVAILABLE = hasattr(driver_dm.L7Policy(), 'targets')
 BACKEND_TLS_H2_ALPN_PAYLOAD_AVAILABLE = hasattr(
     driver_dm.Pool(), 'backend_tls_require_h2')
+BACKEND_TLS_SYSTEM_CA_PAYLOAD_AVAILABLE = hasattr(
+    driver_dm.Pool(), 'backend_tls_system_ca')
 BACKEND_TLS_SUBJECT_ALT_NAMES_PAYLOAD_AVAILABLE = hasattr(
     driver_dm.Pool(), 'backend_tls_subject_alt_names')
 FRONTEND_CLIENT_AUTH_INSECURE_FALLBACK_PAYLOAD_AVAILABLE = hasattr(
@@ -225,6 +227,13 @@ def gateway_capabilities(driver):
             getattr(driver, 'supports_backend_tls_hostname', False) is True):
         capabilities.append(
             constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME)
+    if (BACKEND_TLS_SYSTEM_CA_PAYLOAD_AVAILABLE and
+            constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME in
+            capabilities and validate.backend_tls_system_ca_profile(
+                driver.name) and
+            getattr(driver, 'supports_backend_tls_system_ca', False)
+            is True):
+        capabilities.append(constants.GATEWAY_CAPABILITY_BACKEND_TLS_SYSTEM_CA)
     h2_alpn_providers = api_settings.enabled_backend_tls_h2_alpn_providers
     if (BACKEND_TLS_H2_ALPN_PAYLOAD_AVAILABLE and
             driver.name in h2_alpn_providers and
@@ -646,13 +655,14 @@ def validate_tcp_tls_policy_mode(driver, mixed_mode, passthrough):
 
 def validate_tcp_pool_attachment(driver, protocol, tls_enabled, *,
                                  tcp_tls_termination=False, hostname=None,
-                                 ca_ref=None, tls_sni_policy=False):
+                                 ca_ref=None, system_ca=False,
+                                 tls_sni_policy=False):
     validate.validate_tcp_tls_backend_listener(
         tcp_tls_termination, protocol, hostname)
     if tcp_tls_termination or tls_sni_policy:
         validate.validate_tcp_redirect_pool_protocol(
             protocol, tls_enabled, tcp_tls_termination=tcp_tls_termination,
-            hostname=hostname, ca_ref=ca_ref)
+            hostname=hostname, ca_ref=ca_ref, system_ca=system_ca)
     if protocol == constants.PROTOCOL_TCP and hostname is not None:
         require_tcp_tls_backend_auth(driver)
 
@@ -667,7 +677,8 @@ def validate_existing_tcp_pool_attachment(
         driver, pool.protocol, pool.tls_enabled,
         tcp_tls_termination=listener.tcp_tls_termination and not passthrough,
         hostname=pool.backend_tls_hostname,
-        ca_ref=pool.ca_tls_certificate_id, tls_sni_policy=tls_sni_policy)
+        ca_ref=pool.ca_tls_certificate_id,
+        system_ca=pool.backend_tls_system_ca, tls_sni_policy=tls_sni_policy)
 
 
 def validate_tcp_policy_targets(
@@ -1216,6 +1227,12 @@ def pool_dict_to_provider_dict(pool_dict, for_delete=False, for_update=False):
     new_pool_dict.pop('tcp_connection_rejection', None)
     new_pool_dict.pop('tcp_member_batch_id', None)
     new_pool_dict.pop('udp_packet_drop', None)
+    new_pool_dict.pop('backend_tls_system_ca_sha256', None)
+    new_pool_dict.pop('backend_tls_system_ca_peers', None)
+    if (not BACKEND_TLS_SYSTEM_CA_PAYLOAD_AVAILABLE or
+            (new_pool_dict.get('backend_tls_system_ca') is not True and
+             not for_update)):
+        new_pool_dict.pop('backend_tls_system_ca', None)
     # A legacy DTO can carry the old pool for updates and deletes. The
     # persisted requirement still controls rendering and reactivation.
     supports_h2 = BACKEND_TLS_H2_ALPN_PAYLOAD_AVAILABLE

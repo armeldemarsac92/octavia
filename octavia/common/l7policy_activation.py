@@ -71,7 +71,8 @@ def _configuration(value):
     if isinstance(value, dict):
         return {key: sorted(item or []) if key == 'tags' else
                 _configuration(item) for key, item in value.items()
-                if key not in ('created_at', 'updated_at', 'operating_status')}
+                if key not in ('created_at', 'updated_at', 'operating_status',
+                               'backend_tls_system_ca_sha256')}
     if isinstance(value, list):
         if value and all(isinstance(item, dict) and set(item) == {'id'}
                          for item in value):

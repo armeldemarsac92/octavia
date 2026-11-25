@@ -3465,6 +3465,99 @@ class TestPool(base.BaseAPITest):
                          provider_delete.call_args.args[1].to_dict())
 
     @mock.patch.object(noop_driver.NoopProviderDriver,
+                       'supports_backend_tls_hostname', True)
+    @mock.patch.object(noop_driver.NoopProviderDriver,
+                       'supports_backend_tls_system_ca', True)
+    def test_backend_tls_system_ca_admission_and_withdrawal(self):
+        digest = 'a' * 64
+        args = (self.lb_id, constants.PROTOCOL_HTTP,
+                constants.LB_ALGORITHM_ROUND_ROBIN)
+        options = {'backend_tls_system_ca': True, 'tls_enabled': True,
+                   'backend_tls_hostname': 'backend.example.test'}
+        self.create_pool(*args, **options, status=501)
+        self.conf.config(
+            group='api_settings',
+            enabled_backend_tls_hostname_providers=['noop_driver'],
+            enabled_backend_tls_system_ca_providers=['noop_driver'])
+        self.create_pool(*args, **options, status=501)
+        self.conf.config(group='haproxy_amphora',
+                         backend_tls_system_ca_sha256=digest)
+
+        self.create_pool(*args, **dict(options, backend_tls_hostname=None),
+                         status=400)
+        self.create_pool(*args, **dict(options, tls_enabled=False), status=400)
+        self.create_pool(*args, **dict(
+            options, ca_tls_container_ref=uuidutils.generate_uuid()),
+            status=400)
+        self.create_pool(*args, **dict(
+            options, backend_tls_system_ca_sha256=digest), status=400)
+        pool = self.create_pool(*args, **options)['pool']
+        self.assertIs(True, pool['backend_tls_system_ca'])
+        self.assertIsNone(pool['ca_tls_container_ref'])
+        self.assertIsNone(pool['backend_tls_system_ca_sha256'])
+
+        path = self.POOL_PATH.format(pool_id=pool['id'])
+        self.set_lb_status(self.lb_id)
+        self.put(path, {'pool': {'backend_tls_system_ca': False}}, status=400)
+        self.put(path, {'pool': {'backend_tls_system_ca_sha256': digest}},
+                 status=400)
+
+        amphora_id = uuidutils.generate_uuid()
+        with self.session.begin():
+            self.create_amphora(amphora_id, self.lb_id,
+                                role=constants.ROLE_STANDALONE,
+                                status=constants.AMPHORA_ALLOCATED)
+        repository = repositories.PoolRepository()
+        with db_api.session().begin() as session:
+            repository.set_backend_tls_system_ca_digests(
+                session, (self.lb_id, constants.TOPOLOGY_SINGLE,
+                          {amphora_id: constants.ROLE_STANDALONE}),
+                {pool['id']: digest})
+        self.assertEqual(digest, self.get(path).json['pool'][
+            'backend_tls_system_ca_sha256'])
+        self.conf.config(group='haproxy_amphora',
+                         backend_tls_system_ca_sha256='b' * 64)
+        self.assertIsNone(
+            self.get(path).json['pool']['backend_tls_system_ca_sha256'])
+
+        self.conf.config(group='api_settings',
+                         enabled_backend_tls_system_ca_providers=[])
+        self.put(path, {'pool': {'admin_state_up': False}})
+        self.set_lb_status(self.lb_id)
+        self.put(path, {'pool': {'admin_state_up': True}}, status=501)
+        withdrawn = self.put(path, {'pool': {
+            'backend_tls_system_ca': False, 'backend_tls_hostname': None,
+            'tls_enabled': False}}).json['pool']
+        self.assertIs(False, withdrawn['backend_tls_system_ca'])
+        self.assertIsNone(withdrawn['backend_tls_system_ca_sha256'])
+
+    @mock.patch.object(noop_driver.NoopProviderDriver,
+                       'supports_backend_tls_hostname', True)
+    @mock.patch.object(noop_driver.NoopProviderDriver,
+                       'supports_backend_tls_system_ca', True)
+    def test_backend_tls_system_ca_nested_http_pool(self):
+        self.conf.config(
+            group='api_settings',
+            enabled_backend_tls_hostname_providers=['noop_driver'],
+            enabled_backend_tls_system_ca_providers=['noop_driver'])
+        self.conf.config(group='haproxy_amphora',
+                         backend_tls_system_ca_sha256='a' * 64)
+        pool = {'name': 'https-backend', 'protocol': constants.PROTOCOL_HTTP,
+                'lb_algorithm': constants.LB_ALGORITHM_ROUND_ROBIN,
+                'tls_enabled': True, 'backend_tls_system_ca': True,
+                'backend_tls_hostname': 'backend.example.test'}
+        body = {'loadbalancer': {
+            'vip_subnet_id': uuidutils.generate_uuid(),
+            'project_id': self.project_id,
+            'listeners': [{'name': 'http', 'protocol': constants.PROTOCOL_HTTP,
+                           'protocol_port': 80, 'default_pool': pool}]}}
+        result = self.post(self.LBS_PATH, body).json['loadbalancer']
+        selected, = result['pools']
+        self.assertIs(True, selected['backend_tls_system_ca'])
+        self.assertIsNone(selected['ca_tls_container_ref'])
+        self.assertIsNone(selected['backend_tls_system_ca_sha256'])
+
+    @mock.patch.object(noop_driver.NoopProviderDriver,
                        'supports_backend_tls_hostname', True, create=True)
     def test_backend_tls_hostname_enrollment_and_drain(self):
         hostname = 'backend.example.test'
