@@ -103,7 +103,10 @@ GATEWAY_CAPABILITY_HTTP_REQUEST_POLICY = 'http_request_policy_v1'
 GATEWAY_CAPABILITY_BACKEND_RETRY_BUDGET = 'backend_retry_budget_v1'
 GATEWAY_CAPABILITY_HTTP_REQUEST_MIRROR = 'http_request_mirror_v1'
 GATEWAY_CAPABILITY_LISTENER_OTLP_TRACING = 'listener_otlp_tracing_v1'
+GATEWAY_CAPABILITY_LISTENER_OTLP_SAMPLING = 'listener_otlp_sampling_v1'
 HAPROXY_OTLP_TRACING_SCRIPT = '/var/lib/octavia/octavia-telemetry.lua'
+HAPROXY_OTLP_SAMPLING_SCRIPT = (
+    '/var/lib/octavia/octavia-telemetry-sampling-v1.lua')
 HAPROXY_OTLP_TRACING_PROXY_PREFIX = 'octavia-otlp-'
 HAPROXY_OTLP_TRACING_SOCKET_DIR = '/run/octavia/telemetry'
 GATEWAY_CAPABILITY_LISTENER_REQUEST_FILTERS = 'listener_request_filters_v1'

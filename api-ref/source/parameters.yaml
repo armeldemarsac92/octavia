@@ -2129,7 +2129,9 @@ weight-optional:
 otlp_tracing:
   description: |
     Optional listener OTLP/HTTP tracing settings. The object requires
-    collector_pool_id, service_name, and span_name. Null clears tracing.
+    collector_pool_id, service_name, and span_name, and accepts sampling
+    when the provider advertises listener_otlp_sampling_v1. Null clears
+    tracing.
   in: body
   required: false
   type: object

@@ -851,7 +851,8 @@ class ListenersController(base.BaseController):
                             constants.PROTOCOL_TERMINATED_HTTPS):
             raise exceptions.ValidationException(detail=_(
                 'OTLP tracing requires an HTTP or TERMINATED_HTTPS listener.'))
-        driver_utils.require_listener_otlp_tracing(driver)
+        driver_utils.require_listener_otlp_tracing(
+            driver, sampling='sampling' in tracing)
         pool = self.repositories.pool.get_on_load_balancer_for_update(
             session, lb_id, project_id, tracing['collector_pool_id'])
         validate.validate_otlp_collector_transport(

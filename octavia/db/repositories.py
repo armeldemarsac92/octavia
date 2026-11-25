@@ -1546,14 +1546,14 @@ class ListenerRepository(BaseRepository):
                 (consts.PENDING_DELETE, consts.DELETED))).with_for_update())
         return any(sections for sections, in rows)
 
-    def has_enabled_otlp_tracing(self, session, lb_id):
+    def get_enabled_otlp_tracing(self, session, lb_id):
         listener = self.model_class
-        query = session.query(listener.id).filter(
+        query = session.query(listener.otlp_tracing).filter(
             listener.load_balancer_id == lb_id, listener.enabled.is_(True),
             listener.otlp_tracing.is_not(None),
             listener.provisioning_status.notin_(
                 (consts.PENDING_DELETE, consts.DELETED)))
-        return query.with_for_update().first() is not None
+        return [tracing for tracing, in query.with_for_update()]
 
     def has_enabled_frontend_client_auth_fallback(self, session, lb_id):
         model = self.model_class

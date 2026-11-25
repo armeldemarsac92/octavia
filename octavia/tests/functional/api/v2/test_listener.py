@@ -236,6 +236,100 @@ class TestListener(base.BaseAPITest):
         self.delete(pool_path)
 
     @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
+    def test_otlp_sampling_admission_and_withdrawal(self, rpc):
+        lb = self.create_load_balancer(
+            uuidutils.generate_uuid(), provider='amphora')['loadbalancer']
+        self.set_lb_status(lb['id'])
+        collector = self.create_pool(
+            lb['id'], 'HTTP', 'ROUND_ROBIN')['pool']
+        self.set_lb_status(lb['id'])
+        tracing = dict(
+            collector_pool_id=collector['id'], service_name='test.gateway',
+            span_name='Gateway HTTP',
+            sampling={'base': {'numerator': 0, 'denominator': 1},
+                      'parent': {'numerator': 1, 'denominator': 2147483647}})
+        cap = constants.GATEWAY_CAPABILITY_LISTENER_OTLP_SAMPLING
+        caps_path = self.PROVIDERS_PATH + '/amphora/gateway_capabilities'
+        self.conf.config(group='api_settings',
+                         enabled_listener_otlp_sampling_providers=['amphora'])
+        self.assertNotIn(cap, self.get(caps_path).json['gateway_capabilities'])
+        self.conf.config(group='api_settings',
+                         enabled_listener_otlp_sampling_providers=[],
+                         enabled_listener_otlp_tracing_providers=['amphora'])
+        args = ('HTTP', 8050, lb['id'])
+        self.create_listener(*args, status=501, otlp_tracing=tracing)
+        self.conf.config(group='api_settings',
+                         enabled_listener_otlp_sampling_providers=['amphora'])
+        self.assertIn(cap, self.get(caps_path).json['gateway_capabilities'])
+        for sampling in (
+                {},
+                {'base': {'numerator': True, 'denominator': 1}},
+                {'base': {'numerator': 2, 'denominator': 1}},
+                {'base': {'numerator': 1.0, 'denominator': 1}},
+                dict(tracing['sampling'],
+                     parent={'numerator': 1, 'denominator': 2147483648})):
+            self.create_listener(
+                *args, status=400,
+                otlp_tracing=dict(tracing, sampling=sampling))
+
+        listener = self.create_listener(*args, otlp_tracing=tracing)[
+            'listener']
+        path = self.LISTENER_PATH.format(listener_id=listener['id'])
+        self.assertEqual(tracing,
+                         self.get(path).json['listener']['otlp_tracing'])
+        self.assertEqual(tracing, rpc.return_value.cast.call_args.kwargs[
+            constants.LISTENER]['otlp_tracing'])
+
+        amphora_id = uuidutils.generate_uuid()
+        with db_api.session().begin() as session:
+            self.amphora_repo.create(
+                session, id=amphora_id, role=constants.ROLE_STANDALONE,
+                status=constants.ACTIVE, load_balancer_id=lb['id'],
+                lb_network_ip='192.0.2.1')
+        driver = rest_api_driver.HaproxyAmphoraLoadBalancerDriver()
+        driver.clients['base'] = mock.Mock()
+        driver.clients['base'].get_api_version.return_value = {
+            'api_version': '1.0'}
+        client = driver.clients['1.0'] = mock.Mock()
+        client.get_info.return_value = {'haproxy_version': '3.0.19'}
+        details = {constants.GATEWAY_CAPABILITY_LISTENER_OTLP_TRACING: True}
+        client.get_details.return_value = details
+
+        def render():
+            client.reload_listener.reset_mock()
+            with db_api.session().begin() as session:
+                lb_state = self.lb_repo.get(session, id=lb['id'])
+            driver.update(lb_state)
+            client.reload_listener.assert_called_once()
+            return client.upload_config.call_args.args[2]
+
+        self.assertNotIn('octavia-trace-', render())
+        self.assertEqual(constants.ERROR, self.get(path).json['listener'][
+            'otlp_tracing_status'])
+        details[cap] = True
+        self.assertIn('octavia-trace-start', render())
+        self.assertEqual(constants.ACTIVE, self.get(path).json['listener'][
+            'otlp_tracing_status'])
+
+        self.conf.config(group='api_settings',
+                         enabled_listener_otlp_sampling_providers=[])
+        self.assertNotIn('octavia-trace-', render())
+        self.assertEqual(constants.ERROR, self.get(path).json['listener'][
+            'otlp_tracing_status'])
+        self.assertEqual(tracing,
+                         self.get(path).json['listener']['otlp_tracing'])
+
+        self.set_lb_status(lb['id'])
+        lb_path = self.LB_PATH.format(lb_id=lb['id'])
+        self.put(lb_path, {'loadbalancer': {'admin_state_up': False}})
+        self.set_lb_status(lb['id'])
+        reopen = {'loadbalancer': {'admin_state_up': True}}
+        self.put(lb_path, reopen, status=501)
+        self.put(path, {'listener': {'otlp_tracing': None}})
+        self.set_lb_status(lb['id'])
+        self.put(lb_path, reopen)
+
+    @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
     def test_listener_request_filters_pool_scope_and_withdrawal(self, rpc):
         lb = self.create_load_balancer(
             uuidutils.generate_uuid(), provider='amphora')['loadbalancer']

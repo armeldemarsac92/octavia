@@ -160,6 +160,18 @@ CONF = cfg.CONF
 JINJA_ENV = None
 
 
+def otlp_sampling_supported(loadbalancer, amp_details):
+    settings = CONF.api_settings
+    provider = getattr(loadbalancer, 'provider', None) or 'amphora'
+    return (
+        provider in settings.enabled_listener_otlp_tracing_providers and
+        provider in settings.enabled_listener_otlp_sampling_providers and
+        (amp_details or {}).get(
+            constants.GATEWAY_CAPABILITY_LISTENER_OTLP_TRACING) is True and
+        (amp_details or {}).get(
+            constants.GATEWAY_CAPABILITY_LISTENER_OTLP_SAMPLING) is True)
+
+
 class JinjaTemplater:
 
     def __init__(self,
@@ -291,9 +303,14 @@ class JinjaTemplater:
         auth_capability = constants.GATEWAY_CAPABILITY_LISTENER_REQUEST_FILTERS
         fallback_capability = (
             constants.GATEWAY_CAPABILITY_FRONTEND_CLIENT_AUTH_INSECURE_FALLBACK)
+        sampling_capability = (
+            constants.GATEWAY_CAPABILITY_LISTENER_OTLP_SAMPLING)
+        if (amp_details or {}).get(sampling_capability) is True:
+            feature_compatibility[sampling_capability] = True
+        loadbalancer_obj = listeners[0].load_balancer
         loadbalancer = self._transform_loadbalancer(
             host_amphora,
-            listeners[0].load_balancer,
+            loadbalancer_obj,
             listeners,
             tls_certs,
             feature_compatibility, otlp_tls_certs=otlp_tls_certs)
@@ -339,10 +356,17 @@ class JinjaTemplater:
                         version=f'HAProxy {haproxy_version}; CORS requires 2.2')
         if loadbalancer['enabled']:
             supports_mirrors = (amp_details or {}).get(mirror_capability)
+            supports_sampling = otlp_sampling_supported(loadbalancer_obj,
+                                                        amp_details)
             for listener in loadbalancer['listeners']:
                 if not listener['enabled']:
                     continue
-                if (listener.get('otlp_tracing') and
+                tracing = listener.get('otlp_tracing')
+                if tracing and 'sampling' in tracing and not supports_sampling:
+                    # A v1-only Lua script would accept extra arguments and
+                    # sample every request. Keep serving without tracing.
+                    del listener['otlp_tracing']
+                elif (tracing and
                         (amp_details or {}).get(
                             constants.GATEWAY_CAPABILITY_LISTENER_OTLP_TRACING)
                         is not True):
@@ -1054,6 +1078,12 @@ class JinjaTemplater:
     def _transform_otlp_tracing(self, listener, loadbalancer,
                                 feature_compatibility, pool_certs):
         tracing = validate.otlp_tracing(listener.otlp_tracing)
+        sampling_capability = (
+            constants.GATEWAY_CAPABILITY_LISTENER_OTLP_SAMPLING)
+        tracing['script'] = (
+            constants.HAPROXY_OTLP_SAMPLING_SCRIPT
+            if feature_compatibility.get(sampling_capability)
+            else constants.HAPROXY_OTLP_TRACING_SCRIPT)
         tracing['socket'] = (
             f'{constants.HAPROXY_OTLP_TRACING_SOCKET_DIR}/{listener.id}.sock')
         pool = next((pool for pool in loadbalancer.pools if

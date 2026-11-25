@@ -828,9 +828,12 @@ class LoadBalancersController(base.BaseController):
                          not db_lb.enabled)
             if reopening:
                 listener_repo = self.repositories.listener
-                if listener_repo.has_enabled_otlp_tracing(
-                        context.session, id):
-                    driver_utils.require_listener_otlp_tracing(driver)
+                tracing = listener_repo.get_enabled_otlp_tracing(
+                    context.session, id)
+                if tracing:
+                    driver_utils.require_listener_otlp_tracing(
+                        driver, sampling=any('sampling' in spec
+                                             for spec in tracing))
                 if listener_repo.has_enabled_request_filters(
                         context.session, id):
                     driver_utils.require_listener_request_filters(driver)

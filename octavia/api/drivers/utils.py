@@ -155,6 +155,12 @@ def gateway_capabilities(driver):
             is True):
         capabilities.append(
             constants.GATEWAY_CAPABILITY_LISTENER_OTLP_TRACING)
+        if (driver.name in
+                api_settings.enabled_listener_otlp_sampling_providers and
+                getattr(driver, 'supports_listener_otlp_sampling', False)
+                is True):
+            capabilities.append(
+                constants.GATEWAY_CAPABILITY_LISTENER_OTLP_SAMPLING)
     if (LISTENER_REQUEST_FILTERS_PAYLOAD_AVAILABLE and driver.name in
             api_settings.enabled_listener_request_filter_providers and
             getattr(driver, 'supports_listener_request_filters',
@@ -284,12 +290,18 @@ def require_https_listener_isolation(driver):
                 'HTTPS listener isolation is unavailable for this provider.'))
 
 
-def require_listener_otlp_tracing(driver):
-    if (constants.GATEWAY_CAPABILITY_LISTENER_OTLP_TRACING not in
-            gateway_capabilities(driver)):
+def require_listener_otlp_tracing(driver, *, sampling=False):
+    capabilities = gateway_capabilities(driver)
+    if constants.GATEWAY_CAPABILITY_LISTENER_OTLP_TRACING not in capabilities:
         raise exceptions.ProviderUnsupportedOptionError(
             prov=driver.name, user_msg=_(
                 'Listener OTLP tracing is unavailable for this provider.'))
+    if (sampling and
+            constants.GATEWAY_CAPABILITY_LISTENER_OTLP_SAMPLING
+            not in capabilities):
+        raise exceptions.ProviderUnsupportedOptionError(
+            prov=driver.name, user_msg=_(
+                'Listener OTLP sampling is unavailable for this provider.'))
 
 
 def require_fixed_http_responses(driver):

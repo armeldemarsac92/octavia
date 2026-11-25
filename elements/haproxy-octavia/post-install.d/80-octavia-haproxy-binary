@@ -38,6 +38,8 @@ if [[ -f "$binary" ]]; then
         fi
         install -D -m 0644 /tmp/in_target.d/octavia-telemetry.lua \
             /var/lib/octavia/octavia-telemetry.lua
+        install -m 0644 /tmp/in_target.d/octavia-telemetry.lua \
+            /var/lib/octavia/octavia-telemetry-sampling-v1.lua
         printf 'd /run/octavia/telemetry 0755 root root -\n' > \
             /usr/lib/tmpfiles.d/octavia-haproxy-telemetry.conf
     fi

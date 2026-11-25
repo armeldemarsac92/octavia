@@ -463,6 +463,15 @@ provider name stops discovery and new enrollment. Existing settings remain
 readable and can be cleared with ``otlp_tracing: null``. Clear existing
 settings before rolling back the Amphora fleet.
 
+``listener_otlp_sampling_v1`` adds base and parent-based sampling to
+``listener_otlp_tracing_v1``. After upgrading the API, workers, and all
+eligible Amphora agents and installing their versioned Lua script, add the
+provider to ``[api_settings] enabled_listener_otlp_sampling_providers`` as
+well as the tracing allowlist. This adds no database schema requirement.
+Removing the provider from either list withdraws sampling discovery and
+admission. Clear sampled tracing with ``otlp_tracing: null`` and verify the
+affected listeners have reloaded before rolling back.
+
 ``http_header_exact_v1`` enables ``HTTP_HEADER_EXACT`` rules for HTTP and
 terminated HTTPS listeners. This capability requires the provider name in
 ``[api_settings] enabled_http_header_exact_providers`` after the regional

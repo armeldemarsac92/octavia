@@ -958,6 +958,39 @@ class TestHaproxyCfg(base.TestCase):
         self.assertNotIn('octavia-trace-', config)
         self.assertNotIn('octavia-otlp-', config)
 
+    def test_otlp_sampling_is_removed_without_both_capabilities(self):
+        fixture = sample_configs_combined.sample_listener_tuple()
+        loadbalancer = SimpleNamespace(
+            **fixture.load_balancer._asdict(), provider='amphora')
+        tracing = dict(
+            collector_pool_id='e7b5c88c-ac10-4ec1-8935-aba43987cf01',
+            service_name='test.gateway', span_name='Gateway HTTP',
+            sampling={'base': {'numerator': 0, 'denominator': 1},
+                      'parent': {'numerator': 1, 'denominator': 2}})
+        listener = SimpleNamespace(**dict(
+            fixture._asdict(), load_balancer=loadbalancer,
+            otlp_tracing=tracing))
+        amphora = sample_configs_combined.sample_amphora_tuple()
+        render = self.jinja_cfg.render_loadbalancer_obj
+        caps = {constants.GATEWAY_CAPABILITY_LISTENER_OTLP_TRACING: True}
+        conf = self.useFixture(oslo_fixture.Config(cfg.CONF))
+        conf.config(group='api_settings',
+                    enabled_listener_otlp_tracing_providers=['amphora'],
+                    enabled_listener_otlp_sampling_providers=['amphora'])
+        config = render(amphora, [listener], amp_details=caps)
+        self.assertIn(f'frontend {listener.id}', config)
+        self.assertNotIn('octavia-trace-', config)
+        caps[constants.GATEWAY_CAPABILITY_LISTENER_OTLP_SAMPLING] = True
+        config = render(amphora, [listener], amp_details=caps)
+        self.assertIn(constants.HAPROXY_OTLP_SAMPLING_SCRIPT, config)
+        self.assertIn('"Gateway HTTP" 0 1 1 2', config)
+        self.assertIn('octavia-trace-start', config)
+        conf.config(group='api_settings',
+                    enabled_listener_otlp_sampling_providers=[])
+        config = render(amphora, [listener], amp_details=caps)
+        self.assertIn(f'frontend {listener.id}', config)
+        self.assertNotIn('octavia-trace-', config)
+
     def test_required_h2_only_offers_h2_with_a_capable_amphora(self):
         listener = sample_configs_combined.sample_listener_tuple()
         pool = SimpleNamespace(**dict(

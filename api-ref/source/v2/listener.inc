@@ -42,25 +42,42 @@ export destination.
 
 ``service_name`` accepts 1–253 characters from ``A-Z a-z 0-9 _ . : / -``.
 ``span_name`` accepts the same characters and single internal spaces,
-up to 256 characters. Amphora creates a SERVER span for each HTTP request,
-uses a valid incoming W3C ``traceparent`` as its parent and propagates the new
-context. Exports use a bounded per-listener queue. A full queue or failed
-export drops that span.
+up to 256 characters. Amphora uses a valid incoming W3C ``traceparent``
+as the parent of its SERVER span and propagates the new context. By default
+it samples every request. Exports use a bounded per-listener queue. A full
+queue or failed export drops that span.
+
+With ``listener_otlp_sampling_v1``, the object can also include ``sampling``::
+
+    "sampling": {
+      "base": {"numerator": 1, "denominator": 10},
+      "parent": {"numerator": 1, "denominator": 1}
+    }
+
+``base`` is required when ``sampling`` is present. The numerator and
+denominator must be integers with
+``0 <= numerator <= denominator <= 2147483647`` and a positive denominator.
+With ``parent`` present, Amphora uses ``base`` when there is no valid parent,
+exports nothing for a valid unsampled parent, and applies the ``parent``
+rate for a valid sampled parent. Without ``parent``, Amphora uses ``base``
+for every request. A valid parent's trace ID is retained in either mode.
+Amphora makes one decision per request, sets the propagated sampled flag
+accordingly, and exports only sampled spans.
 
 Omitting the field on update preserves its value. Sending ``null`` clears
 the setting and releases the collector pool reference. Once cleared, a
 response may omit the field if regional opt-in is off. Deleting a referenced
 pool returns HTTP 409. An otherwise valid enrollment returns HTTP 501 when
-the provider lacks the capability. This contract has no sampling-ratio,
-export-header or additional-attribute options.
+the provider lacks the requested capability.
 
 Read the collector publication state in ``otlp_tracing_status``. It is
 PENDING_UPDATE while applying a tracing request, ACTIVE once Amphora has
-published the configuration, and ERROR when collector TLS setup failed.
-The application listener can keep serving while collector TLS is closed.
-Retry the same tracing object with PUT after a TLS error. A successful
-render on all current Amphorae restores ACTIVE. ACTIVE describes the
-configuration and TLS material applied by Octavia. Use collector health
+published the configuration, and ERROR when collector TLS setup failed or
+a requested sampling configuration could not be applied. If sampling is
+withdrawn or unavailable on an Amphora, its next successful render removes
+tracing for the affected listener and keeps serving application traffic.
+A successful render on all current Amphorae restores ACTIVE. Retry the
+same tracing object with PUT to request another render. Use collector health
 or telemetry to monitor live delivery.
 
 .. rest_status_code:: success ../http-status.yaml
