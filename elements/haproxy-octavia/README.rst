@@ -304,8 +304,23 @@ the ``gw-api-listener-auth-pool-v1`` tag. The DIB element creates
 mode-600 Unix listener per authorizer pool and uses the pool's members and
 health checks. It sends the request method and prefixed path with query
 parameters, the original Host and Authorization when present, selected extra
-request headers and Content-Length 0. HAProxy uses the response status and
-headers and stops reading at the end of the headers.
+request headers and Content-Length 0 by default. HAProxy uses the response
+status and headers and stops reading at the end of the headers.
+
+On an HTTP or TERMINATED_HTTPS listener, set ``forward_body_max_size`` on
+a filter's HTTP options to send the full request body up to that size.
+Qualify the fleet before opting in. For cleartext HTTP, enable
+``[api_settings] enabled_listener_external_auth_forward_body_providers``
+and verify ``listener_http_external_auth_forward_body_v1``. For terminated
+HTTPS, enable
+``[api_settings] enabled_https_listener_external_auth_forward_body_providers``
+and verify ``listener_https_external_auth_forward_body_v1``. SNI selects the
+filter chain on HTTPS. With HTTPS virtual host isolation, the HTTP authority
+must select the same section before the authorization chain runs.
+Both profiles use the same native HTTP body capability, regional maximum and
+HAProxy process budget as HTTP L7 policy checks.
+Each check that forwards the body applies its own limit and returns HTTP 413
+before contacting its authorizer if the body is too large.
 
 Only status 200 advances the chain. An authorization failure responds with 401
 or 403. Unavailable authorizers and exhausted checks respond with 503. Each

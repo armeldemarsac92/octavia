@@ -172,8 +172,11 @@ the operator for that provider in this region. An enabled provider without
 any available capabilities returns ``{"gateway_capabilities": []}``.
 
 ``l7policy_external_auth_forward_body_v1`` enables an L7 policy to forward
-the request body to its authorizer. With this capability, the response
-includes ``l7policy_external_auth_max_body_bytes``. It is the regional
+the request body to its authorizer.
+``listener_http_external_auth_forward_body_v1`` enables the same behavior
+for HTTP listener request filters and requires independent regional opt-in.
+Either capability includes ``l7policy_external_auth_max_body_bytes``
+in the response. It is the regional
 ``[haproxy_amphora] external_auth_body_buffer_bytes`` setting capped at
 2147483647 bytes. The setting defaults to 67108864 bytes (64 MiB) and sets
 the shared budget in each HAProxy process. A further gRPC limit of
