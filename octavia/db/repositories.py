@@ -1152,12 +1152,13 @@ class PoolRepository(BaseRepository):
         persistence = models.SessionPersistence
         pool = self.model_class
         for pool_id in sorted(failed | recovered):
-            name, timeout, scope = policies[pool_id]
+            name, timeout, scope, permanent = policies[pool_id]
             session.query(persistence).filter(
                 persistence.pool_id == pool_id,
                 persistence.cookie_name == name,
                 persistence.cookie_absolute_timeout_ms == timeout,
                 persistence.cookie_scope == scope,
+                persistence.cookie_permanent == permanent,
                 persistence.pool.has(and_(
                     pool.enabled.is_(True),
                     pool.provisioning_status.notin_(

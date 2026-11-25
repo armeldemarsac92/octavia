@@ -324,6 +324,11 @@ HTTP session cookies. Providers advertise it alongside ``http_cookie_name_v1``
 when operators opt in. See :ref:`session_persistence` for the timeout and
 scope fields.
 
+``http_cookie_permanent_v1`` enables ``session_persistence.cookie_permanent``
+on the same named HTTP pools. Providers advertise it alongside both named
+cookie and absolute timeout capabilities. See :ref:`session_persistence`
+for the lifetime and update rules.
+
 ``tcp_connection_rejection_v1`` enables a per-connection rejection fraction
 on Amphora TCP pools. Operators enable it by setting
 ``[api_settings] enabled_tcp_connection_rejection_providers`` after upgrading

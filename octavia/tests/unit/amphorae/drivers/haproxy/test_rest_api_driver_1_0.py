@@ -487,7 +487,7 @@ class TestHaproxyAmphoraLoadBalancerDriverTest(base.TestCase):
             id='pool', protocol=constants.PROTOCOL_HTTP, enabled=True,
             session_persistence=data_models.SessionPersistence(
                 cookie_name='gw', cookie_absolute_timeout_ms=1500,
-                cookie_scope=scope))
+                cookie_scope=scope, cookie_permanent=True))
         listener = data_models.Listener(
             id='http', protocol=constants.PROTOCOL_HTTP, enabled=True,
             pools=[pool])
@@ -496,7 +496,7 @@ class TestHaproxyAmphoraLoadBalancerDriverTest(base.TestCase):
             listeners=[listener], amphorae=[primary, secondary])
         client = self.driver.clients[API_VERSION]
         published_in = session().begin().__enter__()
-        policy = {pool.id: ('gw', 1500, scope)}
+        policy = {pool.id: ('gw', 1500, scope, True)}
         rendered_states = {primary.id: constants.ERROR,
                            secondary.id: constants.ACTIVE}
 

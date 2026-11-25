@@ -152,6 +152,14 @@ def _validate_http_cookie_absolute_timeout(persistence, protocol):
     return True
 
 
+def _validate_http_cookie_permanent(driver, has_absolute_timeout):
+    if not has_absolute_timeout:
+        raise exceptions.ValidationException(detail=_(
+            'cookie_permanent requires a named HTTP_COOKIE with an '
+            'absolute timeout and scope.'))
+    driver_utils.require_http_cookie_permanent(driver)
+
+
 class PoolsController(base.BaseController):
     RBAC_TYPE = constants.RBAC_POOL
 
@@ -282,6 +290,8 @@ class PoolsController(base.BaseController):
             persistence['http_cookie_name_enabled'] = True
         if absolute_cookie_timeout:
             driver_utils.require_http_cookie_absolute_timeout(driver)
+        if persistence and persistence.get('cookie_permanent') is True:
+            _validate_http_cookie_permanent(driver, absolute_cookie_timeout)
 
         # Make sure we have a client CA if they specify a CRL
         if (pool_dict.get('crl_container_id') and
@@ -755,6 +765,17 @@ class PoolsController(base.BaseController):
             driver_utils.require_http_cookie_name(driver, current.protocol)
         if enrolling_timeout:
             driver_utils.require_http_cookie_absolute_timeout(driver)
+        if changes.cookie_permanent is True:
+            _validate_http_cookie_permanent(
+                driver, enrolling_timeout or
+                (keep_name and
+                 changes.cookie_absolute_timeout_ms is wtypes.Unset and
+                 validate.is_valid_http_cookie_absolute_timeout(
+                     old.cookie_absolute_timeout_ms) and
+                 validate.is_valid_http_cookie_scope(old.cookie_scope)))
+        elif (old is not None and old.cookie_permanent and
+                changes.cookie_absolute_timeout_ms is None):
+            changes.cookie_permanent = False
 
     def _validate_pool_PUT(self, pool, current):
 

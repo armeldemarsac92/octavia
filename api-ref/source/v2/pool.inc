@@ -244,9 +244,10 @@ persistence.
 
 A provider advertising ``http_cookie_absolute_timeout_v1`` also accepts
 ``cookie_absolute_timeout_ms`` and ``cookie_scope`` together on a named
-``HTTP_COOKIE`` HTTP pool. The cookie is a browser-session cookie. The load
-balancer accepts it only if its age is nonnegative and below the configured
-timeout. A request that keeps its member keeps the original expiry.
+``HTTP_COOKIE`` HTTP pool. By default the cookie lasts for the browser
+session. The load balancer accepts it only if its age is nonnegative and
+below the configured timeout. A request that keeps its member keeps the
+original expiry.
 
 In a pool update, omitting both fields preserves a stored absolute timeout.
 When supplying or preserving a timeout, Octavia uses the enrolled name if
@@ -257,6 +258,21 @@ timeout. Pool GET includes both fields while configured and omits them after
 removal. Explicit removal remains available after regional discovery is
 disabled.
 
+A provider advertising ``http_cookie_permanent_v1`` accepts the boolean
+``cookie_permanent`` with that named cookie, timeout and scope. With
+``true``, a newly issued cookie has ``Path=/`` and ``Max-Age`` equal to
+the timeout rounded up to a whole second. A zero timeout uses
+``Max-Age=0``. The load balancer still checks the exact configured
+millisecond timeout. Reusing a valid cookie for the same member leaves
+its original expiry in place. Changing the mode causes existing cookies
+to be replaced on the next request.
+
+Omitting ``cookie_permanent`` in an update preserves the mode while the
+absolute timeout remains set. Set it to ``false`` to return to a browser
+session cookie, including after permanent cookie discovery is disabled.
+Clearing the timeout or removing session persistence clears this setting.
+Pool GET includes ``cookie_permanent`` only when it is ``true``.
+
 Pool Session Persistence Object
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -266,6 +282,7 @@ Pool Session Persistence Object
    - cookie_name: session_persistence_cookie
    - cookie_absolute_timeout_ms: session_persistence_cookie_absolute_timeout_ms
    - cookie_scope: session_persistence_cookie_scope
+   - cookie_permanent: session_persistence_cookie_permanent
    - persistence_timeout: session_persistence_timeout
    - persistence_granularity: session_persistence_granularity
 

@@ -134,6 +134,12 @@ def gateway_capabilities(driver):
                         False) is True):
             capabilities.append(
                 constants.GATEWAY_CAPABILITY_HTTP_COOKIE_ABSOLUTE_TIMEOUT)
+            if (driver.name in
+                    api_settings.enabled_http_cookie_permanent_providers and
+                    getattr(driver, 'supports_http_cookie_permanent',
+                            False) is True):
+                capabilities.append(
+                    constants.GATEWAY_CAPABILITY_HTTP_COOKIE_PERMANENT)
     budget_providers = api_settings.enabled_backend_retry_budget_providers
     if (BACKEND_RETRY_BUDGET_PAYLOAD_AVAILABLE and
             driver.name in budget_providers and
@@ -398,6 +404,15 @@ def require_http_cookie_absolute_timeout(driver):
         raise exceptions.ProviderUnsupportedOptionError(
             prov=driver.name, user_msg=_(
                 'Absolute HTTP_COOKIE timeouts are unavailable for this '
+                'provider.'))
+
+
+def require_http_cookie_permanent(driver):
+    if (constants.GATEWAY_CAPABILITY_HTTP_COOKIE_PERMANENT not in
+            gateway_capabilities(driver)):
+        raise exceptions.ProviderUnsupportedOptionError(
+            prov=driver.name, user_msg=_(
+                'Permanent HTTP_COOKIE persistence is unavailable for this '
                 'provider.'))
 
 
@@ -1158,6 +1173,8 @@ def pool_dict_to_provider_dict(pool_dict, for_delete=False, for_update=False):
         # nulls uses them to clear the timeout and scope.
         if not for_update:
             persistence = new_pool_dict['session_persistence']
+            if persistence.get('cookie_permanent') is not True:
+                persistence.pop('cookie_permanent', None)
             if persistence.get('cookie_absolute_timeout_ms') is None:
                 persistence.pop('cookie_absolute_timeout_ms', None)
                 persistence.pop('cookie_scope', None)

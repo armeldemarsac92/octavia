@@ -1728,6 +1728,15 @@ session_persistence_cookie_scope:
   in: body
   required: false
   type: string
+session_persistence_cookie_permanent:
+  description: |
+    Set to ``true`` to give the named HTTP affinity cookie a browser
+    ``Max-Age`` derived from its absolute timeout. Requires
+    ``http_cookie_permanent_v1``, an absolute timeout and its scope.
+    Set to ``false`` to use a browser session cookie.
+  in: body
+  required: false
+  type: boolean
 session_persistence_granularity:
   description: |
     The netmask used to determine SCTP or UDP session persistence. Currently

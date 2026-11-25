@@ -2501,7 +2501,8 @@ class TestPool(base.BaseAPITest):
         # affinity profile in ERROR until its Amphorae can enforce it again.
         pool_id = created['id']
         repo = repositories.PoolRepository()
-        persisted_policy = {pool_id: (name['cookie_name'], max_timeout, scope)}
+        persisted_policy = {
+            pool_id: (name['cookie_name'], max_timeout, scope, False)}
         with db_api.session().begin() as session:
             repo.set_http_cookie_pool_statuses(
                 session, persisted_policy, failed={pool_id}, recovered=set())
@@ -2596,6 +2597,91 @@ class TestPool(base.BaseAPITest):
         self.assertNotIn('cookie_absolute_timeout_ms', stored)
         self.assertNotIn('cookie_scope', stored)
         self.assertEqual(name['cookie_name'], stored['cookie_name'])
+
+    @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
+    def test_http_cookie_permanent_lifecycle(self, rpc):
+        lb = self.create_load_balancer(
+            uuidutils.generate_uuid(), provider='amphora')['loadbalancer']
+        lb_id = lb['id']
+        self.set_lb_status(lb_id)
+        args = (lb_id, 'HTTP', 'ROUND_ROBIN')
+        field = 'session_persistence'
+        mode = 'cookie_permanent'
+        capability = constants.GATEWAY_CAPABILITY_HTTP_COOKIE_PERMANENT
+        provider_path = self.PROVIDERS_PATH + '/amphora/gateway_capabilities'
+        named = {'type': 'HTTP_COOKIE', 'cookie_name': 'gw.session'}
+        timed = dict(named, cookie_absolute_timeout_ms=0,
+                     cookie_scope='a' * 64)
+        policy = dict(timed, cookie_permanent=True)
+        self.conf.config(group='api_settings',
+                         enabled_http_cookie_name_providers=['amphora'],
+                         enabled_http_cookie_permanent_providers=['amphora'])
+        self.assertNotIn(capability,
+                         self.get(provider_path).json['gateway_capabilities'])
+        self.conf.config(group='api_settings',
+                         enabled_http_cookie_absolute_timeout_providers=[
+                             'amphora'],
+                         enabled_http_cookie_permanent_providers=[])
+        self.create_pool(*args, session_persistence=policy, status=501)
+        self.conf.config(group='api_settings',
+                         enabled_http_cookie_permanent_providers=['amphora'])
+        self.assertIn(capability,
+                      self.get(provider_path).json['gateway_capabilities'])
+        self.create_pool(*args, session_persistence=dict(
+            named, cookie_permanent=True), status=400)
+        for invalid in ('true', 1, None):
+            with self.subTest(invalid=invalid):
+                self.create_pool(*args, session_persistence=dict(
+                    policy, cookie_permanent=invalid), status=400)
+
+        created = self.create_pool(*args, session_persistence=policy)['pool']
+        pool_id = created['id']
+        path = self.POOL_PATH.format(pool_id=pool_id)
+        cast = rpc.return_value.cast
+        self.assertIs(cast.call_args.kwargs['pool'][field][mode], True)
+        self.assertIs(self.get(path).json['pool'][field][mode], True)
+
+        def update(persistence):
+            self.set_lb_status(lb_id)
+            return self.put(path, self._build_body({
+                field: persistence})).json['pool'][field]
+
+        self.assertIs(update(named)[mode], True)
+        self.assertNotIn(mode, cast.call_args.kwargs['pool_updates'][field])
+
+        # A late result for Session must not change the Permanent policy.
+        with db_api.session().begin() as session:
+            repo = repositories.PoolRepository()
+            stale = {pool_id: (named['cookie_name'], 0,
+                               timed['cookie_scope'], False)}
+            repo.set_http_cookie_pool_statuses(
+                session, stale, failed={pool_id}, recovered=set())
+            self.assertFalse(repo.get(session, id=pool_id).session_persistence
+                             .cookie_absolute_timeout_error)
+
+        self.conf.config(group='api_settings',
+                         enabled_http_cookie_permanent_providers=[],
+                         enabled_http_cookie_absolute_timeout_providers=[],
+                         enabled_http_cookie_name_providers=[])
+        self.assertNotIn(mode, update({mode: False}))
+        self.assertFalse(cast.call_args.kwargs['pool_updates'][field][mode])
+        session = self.get(path).json['pool'][field]
+        self.assertEqual(timed, {key: session[key] for key in timed})
+
+        self.conf.config(group='api_settings',
+                         enabled_http_cookie_name_providers=['amphora'],
+                         enabled_http_cookie_absolute_timeout_providers=[
+                             'amphora'],
+                         enabled_http_cookie_permanent_providers=['amphora'])
+        self.assertIs(update({mode: True})[mode], True)
+        cleared = update({'cookie_absolute_timeout_ms': None,
+                          'cookie_scope': None})
+        self.assertNotIn(mode, cleared)
+        self.assertFalse(cast.call_args.kwargs['pool_updates'][field][mode])
+        self.assertNotIn(mode, update(timed))
+        self.assertIs(update({mode: True})[mode], True)
+        self.assertIsNone(update(None))
+        self.assertNotIn(mode, update(timed))
 
     @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
     @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.'

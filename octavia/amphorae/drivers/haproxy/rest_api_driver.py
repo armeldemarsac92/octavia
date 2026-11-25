@@ -200,7 +200,9 @@ class HaproxyAmphoraLoadBalancerDriver(
                                 consts.PENDING_DELETE, consts.DELETED)):
                         policies[pool.id] = (
                             persistence.cookie_name, timeout,
-                            persistence.cookie_scope)
+                            persistence.cookie_scope,
+                            getattr(persistence, 'cookie_permanent',
+                                    False) is True)
         if not policies:
             yield {}
             return
