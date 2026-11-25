@@ -227,8 +227,10 @@ Octavia currently support three session persistence methods:
 
 For an HTTP pool, a provider advertising ``http_cookie_name_v1`` accepts
 an optional ``cookie_name`` for ``HTTP_COOKIE``. Use 1 to 255 ASCII
-letters, digits, underscores, dots or hyphens. Choose distinct names for
-pools whose cookies share the same client cookie scope.
+letters, digits, underscores, dots or hyphens. In a shared client cookie
+scope, use distinct names for unrelated backends. Pools in the same
+project can share a name to preserve affinity to the same member address
+and port across routes. Member identifiers only affect load balancing.
 
 On Amphora, omitting the name or setting it to ``null`` in an
 ``HTTP_COOKIE`` object uses the default name ``SRV``. Omitting the

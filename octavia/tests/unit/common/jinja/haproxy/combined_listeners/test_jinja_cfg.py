@@ -2806,6 +2806,17 @@ class TestHaproxyCfg(base.TestCase):
         ret = self.jinja_cfg._transform_session_persistence(persistence, {})
         self.assertEqual('gateway_pool', ret['cookie_name'])
 
+    def test_named_http_cookie_member_token_uses_the_canonical_endpoint(self):
+        token = jinja_cfg._http_cookie_member_token(
+            'project', 'gateway_pool', '2001:db8::10', 8080)
+        equivalent = jinja_cfg._http_cookie_member_token(
+            'project', 'gateway_pool', '2001:0DB8:0:0:0:0:0:0010', 8080)
+        self.assertEqual(token, equivalent)
+        self.assertRegex(token, '^[0-9a-f]{32}$')
+        other_project = jinja_cfg._http_cookie_member_token(
+            'other-project', 'gateway_pool', '2001:db8::10', 8080)
+        self.assertNotEqual(token, other_project)
+
     def test_transform_health_monitor(self):
         in_persistence = sample_configs_combined.sample_health_monitor_tuple()
         ret = self.jinja_cfg._transform_health_monitor(in_persistence, {})

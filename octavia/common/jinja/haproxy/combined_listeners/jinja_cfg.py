@@ -12,6 +12,9 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import hashlib
+import ipaddress
+import json
 import os
 import re
 import typing as tp
@@ -58,6 +61,14 @@ ACTIVE_PENDING_STATUSES = constants.SUPPORTED_PROVISIONING_STATUSES + (
 
 # HAProxy's rand() reduces a 32-bit draw to the requested interval.
 HAPROXY_MAX_RANDOM_RANGE = 1 << 32
+
+
+def _http_cookie_member_token(project_id, cookie_name, address, port):
+    address = ipaddress.ip_address(address)
+    address = getattr(address, 'ipv4_mapped', None) or address
+    identity = json.dumps([project_id, cookie_name, str(address), port],
+                          separators=(',', ':'))
+    return hashlib.sha256(identity.encode('ascii')).hexdigest()[:32]
 
 
 def _quote_config_arg(value):
@@ -1087,9 +1098,16 @@ class JinjaTemplater:
             ret_value['health_monitor'] = self._transform_health_monitor(
                 health_mon, feature_compatibility)
         if pool.session_persistence:
-            ret_value[
-                'session_persistence'] = self._transform_session_persistence(
+            persistence = self._transform_session_persistence(
                 pool.session_persistence, feature_compatibility)
+            ret_value['session_persistence'] = persistence
+            name = persistence['cookie_name']
+            if (persistence['type'] ==
+                    constants.SESSION_PERSISTENCE_HTTP_COOKIE and name):
+                for member in members:
+                    member['persistence_cookie'] = _http_cookie_member_token(
+                        pool.project_id, name, member['address'],
+                        member['protocol_port'])
         if (pool.tls_certificate_id and pool_tls_certs and
                 pool_tls_certs.get('client_cert')):
             ret_value['client_cert'] = pool_tls_certs.get('client_cert')

@@ -697,7 +697,7 @@ backend {{ reject }}
     {% endif %}
     {% if persistence and (pool.session_persistence.type ==
            constants.SESSION_PERSISTENCE_HTTP_COOKIE) %}
-        {% set persistence_opt = " cookie %s"|format(member.id) %}
+        {% set persistence_opt = " cookie %s"|format(member.get('persistence_cookie', member.id)) %}
     {% else %}
         {% set persistence_opt = "" %}
     {% endif %}
