@@ -720,10 +720,11 @@ gateway-capabilities:
   type: array
 l7policy-external-auth-max-body-bytes:
   description: |
-    Regional maximum, in bytes, for the body limit requested by an L7
-    policy using ExternalAuth. Present when the provider advertises
-    ``l7policy_external_auth_forward_body_v1``. gRPC authorization has an
-    additional protocol maximum of 2146435071 bytes.
+    Regional maximum, in bytes, for the body limit requested by a listener
+    or L7 policy using ExternalAuth. Present when the provider advertises
+    ``listener_http_external_auth_forward_body_v1`` or
+    ``l7policy_external_auth_forward_body_v1``. gRPC route authorization
+    has an additional protocol maximum of 2146435071 bytes.
   in: body
   required: false
   type: integer
@@ -2298,6 +2299,9 @@ request_filter_sections:
     TERMINATED_HTTPS listener. Available with the regional
     listener_request_filters_v1 capability. Omit on update to retain the
     current value or send [] to clear it.
+    A positive forward_body_max_size in an ExternalAuth HTTP request
+    filter also requires listener_http_external_auth_forward_body_v1 and
+    an HTTP listener. The size must fit l7policy_external_auth_max_body_bytes.
   in: body
   required: false
   type: array

@@ -891,13 +891,15 @@ class ListenersController(base.BaseController):
                             if key not in removed})
 
     def _validate_listener_request_filters(
-            self, session, driver, protocol, sections, lb_id, project_id):
+            self, session, driver, protocol, sections, lb_id, project_id,
+            *, withdrawing=False):
         if sections is None:
             raise exceptions.ValidationException(detail=_(
                 'request_filter_sections must be an array.'))
         if sections:
-            driver_utils.require_listener_request_filters(driver)
             listener_request_filters.validate_listener(protocol, sections)
+            driver_utils.require_listener_request_filters(
+                driver, sections, validate_body=not withdrawing)
             self.repositories.listener.validate_request_filter_pools(
                 session, sections, lb_id, project_id)
 
@@ -1073,11 +1075,19 @@ class ListenersController(base.BaseController):
                     load_balancer_id, project_id)
             if ('request_filter_sections' in listener_dict or
                     (reopening and db_listener.request_filter_sections)):
+                current = db_listener.request_filter_sections
+                sections = listener_dict.get('request_filter_sections',
+                                             current)
+                # Permit a withdrawal while the listener is closed. Any
+                # remaining body authorizers are checked on reactivation.
+                withdrawing_filters = (
+                    not db_listener.enabled and
+                    listener_dict.keys() == {'request_filter_sections'} and
+                    listener_request_filters.is_withdrawal(current, sections))
                 self._validate_listener_request_filters(
-                    context.session, driver, db_listener.protocol,
-                    listener_dict.get('request_filter_sections',
-                                      db_listener.request_filter_sections),
-                    load_balancer_id, project_id)
+                    context.session, driver, db_listener.protocol, sections,
+                    load_balancer_id, project_id,
+                    withdrawing=withdrawing_filters)
             self._validate_frontend_client_auth_fallback_update(
                 db_listener, listener_dict, driver, reopening)
             self._validate_tcp_tls_update(context.session, db_listener,

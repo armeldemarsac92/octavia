@@ -727,12 +727,13 @@ class JinjaTemplater:
             ret_value['grpc_content_type_acl'] = _GRPC_CONTENT_TYPE_ACL
             ret_value['request_mirror_pools'] = [
                 mirror_pools[pool_id] for pool_id in sorted(mirror_pools)]
-        auth_pool_ids = {
-            auth['pool_id'] for listener in listener_transforms
+        listener_auth = [
+            auth for listener in listener_transforms
             if listener['enabled']
             for section in listener.get('request_filter_sections', ())
             for auth in section['requests'] if auth['available']
-        }
+        ]
+        auth_pool_ids = {auth['pool_id'] for auth in listener_auth}
         policy_auth = [
             policy['external_auth']
             for listener in listener_transforms if listener['enabled']
@@ -775,8 +776,9 @@ class JinjaTemplater:
             if ready:
                 ret_value['grpc_auth_pools'] = [
                     ready[pool_id] for pool_id in sorted(ready)]
-        if any(auth['available'] and 'forward_body_max_size' in auth
-               for auth in policy_auth):
+        if (any('forward_body_max_size' in auth for auth in listener_auth) or
+                any(auth['available'] and 'forward_body_max_size' in auth
+                    for auth in policy_auth)):
             ret_value['external_auth_body_buffer_bytes'] = (
                 CONF.haproxy_amphora.external_auth_body_buffer_bytes)
         # NOTE(sbalukoff): Global connection limit should be a sum of all
@@ -1028,7 +1030,8 @@ class JinjaTemplater:
                     listener.default_http_response))
         if active and getattr(listener, 'request_filter_sections', None):
             ret_value['request_filter_sections'] = (
-                self._transform_request_filters(listener, loadbalancer))
+                self._transform_request_filters(
+                    listener, loadbalancer, feature_compatibility))
         policy_gen = (policy for policy in listener.l7policies if
                       policy.provisioning_status != constants.PENDING_DELETE)
         if https_sections is None and not mixed_mode and listener.default_pool:
@@ -1139,13 +1142,7 @@ class JinjaTemplater:
                         pass
                     else:
                         grpc = auth.get('protocol') == 'GRPC'
-                        body_capability = (
-                            constants.AMPHORA_CAPABILITY_GRPC_AUTH_BODY if grpc
-                            else constants.AMPHORA_CAPABILITY_HTTP_AUTH_BODY)
-                        body_ready = (
-                            feature_compatibility.get(body_capability) and
-                            not validate.external_auth_body_over_limit(auth))
-                        if 'forward_body_max_size' not in auth or body_ready:
+                        if self._auth_body_ready(auth, feature_compatibility):
                             eligible = (grpc_auth_pool_ids if grpc else
                                         auth_pool_ids)
                             transformed['external_auth'] = self._encode_auth(
@@ -1331,7 +1328,8 @@ class JinjaTemplater:
                 if 'status_code' in target})
         return ret_value
 
-    def _transform_request_filters(self, listener, loadbalancer):
+    def _transform_request_filters(self, listener, loadbalancer,
+                                   feature_compatibility):
         sections = listener_request_filters.normalize(
             listener.request_filter_sections)
         listener_request_filters.validate_listener(listener.protocol, sections)
@@ -1347,9 +1345,22 @@ class JinjaTemplater:
         return [
             {'id': index, 'hostname': section['hostname'],
              'reject': section.get('reject', False),
-             'requests': [self._encode_auth(step['http'], available)
+             'requests': [self._encode_auth(
+                 step['http'], available if self._auth_body_ready(
+                     step['http'], feature_compatibility) else ())
                           for step in section.get('requests', ())]}
             for index, section in enumerate(ordered_sections, start=1)]
+
+    @staticmethod
+    def _auth_body_ready(auth, feature_compatibility):
+        if 'forward_body_max_size' not in auth:
+            return True
+        capability = (
+            constants.AMPHORA_CAPABILITY_GRPC_AUTH_BODY
+            if auth.get('protocol') == 'GRPC'
+            else constants.AMPHORA_CAPABILITY_HTTP_AUTH_BODY)
+        return (feature_compatibility.get(capability) and
+                not validate.external_auth_body_over_limit(auth))
 
     @staticmethod
     def _auth_pool_available(pool, listener, protocol=constants.PROTOCOL_HTTP):

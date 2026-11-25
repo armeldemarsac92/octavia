@@ -30,6 +30,10 @@ from octavia.common import data_models as dm
 from octavia.common.jinja.haproxy.combined_listeners import jinja_cfg
 
 
+LISTENER_BODY_LIMIT = 65536
+ROUTE_BODY_LIMIT = 32768
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = 'HTTP/1.1'
 
@@ -85,6 +89,7 @@ class TestListenerAuth(unittest.TestCase):
             vip=dm.Vip(ip_address='127.0.0.1'),
             topology=c.TOPOLOGY_SINGLE)
         cls.amp = dm.Amphora(id='test', status=c.AMPHORA_ALLOCATED)
+        cls.origin_requests = []
         cls.auth = cls.pool(stack, 'auth', auth=True)
         cls.fallback = cls.pool(stack, 'fallback')
         cls.selected = cls.pool(stack, 'selected')
@@ -111,7 +116,25 @@ class TestListenerAuth(unittest.TestCase):
              'requests': [step(cls.empty.id, '/empty')]},
         ]
         http = cls.listener('web', c.PROTOCOL_HTTP)
-        http.request_filter_sections = sections
+        upload = step(cls.auth.id, '/second')
+        upload['http']['forward_body_max_size'] = LISTENER_BODY_LIMIT
+        http.request_filter_sections = [
+            *sections, {'hostname': 'upload.example', 'requests': [upload]}]
+        upload_route = dm.L7Policy(
+            id='upload-route', project_id=cls.project, enabled=True,
+            action=c.L7POLICY_ACTION_REDIRECT_TO_POOL,
+            redirect_pool=cls.selected, redirect_pool_id=cls.selected.id,
+            l7rules=[
+                dm.L7Rule(id='upload-host', enabled=True, invert=False,
+                          type=c.L7RULE_TYPE_HOST_NAME,
+                          compare_type=c.L7RULE_COMPARE_TYPE_EQUAL_TO,
+                          value='upload.example'),
+                dm.L7Rule(id='upload-identity', enabled=True, invert=False,
+                          type=c.L7RULE_TYPE_HTTP_HEADER_EXACT,
+                          compare_type=c.L7RULE_COMPARE_TYPE_EQUAL_TO,
+                          key='x-identity', value='verified')],
+            external_auth={'pool_id': cls.auth.id, 'path_prefix': '/route',
+                           'forward_body_max_size': ROUTE_BODY_LIMIT})
         tls = cls.listener('tls', c.PROTOCOL_TERMINATED_HTTPS)
         tls.tls_certificate_id = 'test-cert'
         tls.request_filter_sections = [
@@ -138,6 +161,7 @@ class TestListenerAuth(unittest.TestCase):
                        group='haproxy_amphora')
         details = haproxy_compatibility.get_haproxy_capabilities()
         assert details.get(c.GATEWAY_CAPABILITY_LISTENER_REQUEST_FILTERS)
+        cls.body_supported = details.get(c.AMPHORA_CAPABILITY_HTTP_AUTH_BODY)
         try:
             templater.build_config(cls.amp, cls.lb.listeners,
                                    amp_details={}, **render)
@@ -148,8 +172,23 @@ class TestListenerAuth(unittest.TestCase):
             raise AssertionError(message)
         templater.build_config(cls.amp, [ordinary], amp_details={}, **render)
 
+        if cls.body_supported:
+            listener_only = templater.build_config(
+                cls.amp, [http], amp_details=details, **render)
+            assert 'tune.octavia-auth-body-max-memory' in listener_only
+
+        http.l7policies.insert(0, upload_route)
+        without_body = {**details, c.AMPHORA_CAPABILITY_HTTP_AUTH_BODY: False}
+        old_config = templater.build_config(
+            cls.amp, cls.lb.listeners, amp_details=without_body, **render)
+        assert 'http-request deny deny_status 503 if ' in old_config
+        assert 'tune.octavia-auth-body-max-memory' not in old_config
+        assert f' - {LISTENER_BODY_LIMIT} if ' not in old_config
+        assert f' - {ROUTE_BODY_LIMIT} if ' not in old_config
         exact = templater.build_config(
             cls.amp, cls.lb.listeners, amp_details=details, **render)
+        if cls.body_supported:
+            assert exact.count('tune.octavia-auth-body-max-memory') == 1
         cfg_path.write_text(exact)
         subprocess.run([HAPROXY, '-c', '-f', str(cfg_path)], check=True)
         cfg_path.write_text(exact.replace(
@@ -172,7 +211,7 @@ class TestListenerAuth(unittest.TestCase):
         if running:
             server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
             server.label = label
-            server.requests = []
+            server.requests = [] if auth else cls.origin_requests
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             stack.callback(server.server_close)
@@ -219,7 +258,8 @@ class TestListenerAuth(unittest.TestCase):
         combined.write_bytes(key.read_bytes() + cert.read_bytes())
         (cert_dir / 'tls.pem').write_text(str(combined) + '\n')
 
-    def request(self, host, path='/catalog?kind=1', port=None, tls=False):
+    def request(self, host, path='/catalog?kind=1', port=None, tls=False,
+                body=b'body'):
         port = port or self.web
         if tls:
             connection = http.client.HTTPSConnection(
@@ -232,7 +272,7 @@ class TestListenerAuth(unittest.TestCase):
             connection = http.client.HTTPConnection(
                 '127.0.0.1', port, timeout=6)
         with closing(connection):
-            connection.request('PATCH', path, body=b'body', headers={
+            connection.request('PATCH', path, body=body, headers={
                 'Host': host, 'Authorization': 'Bearer sample',
                 'X-Client': 'forward-me', 'X-Not-Allowed': 'not-forwarded'})
             response = connection.getresponse()
@@ -263,6 +303,40 @@ class TestListenerAuth(unittest.TestCase):
         self.assertEqual('forward-me', first['headers']['x-client'])
         self.assertEqual('first', second['headers']['x-identity'])
         self.assertNotIn('x-client', second['headers'])
+
+    def test_listener_and_route_authorize_the_complete_body_in_order(self):
+        if not self.body_supported:
+            self.skipTest('HAProxy lacks HTTP ExternalAuth body forwarding')
+        self.auth_requests.clear()
+        self.origin_requests.clear()
+        payload = b'abcdef0123456789' * (ROUTE_BODY_LIMIT // 16)
+        status, app = self.request('upload.example', '/upload', body=payload)
+        self.assertEqual(200, status)
+        self.assertEqual('selected', app['route'])
+        self.assertEqual(payload, app['body'].encode())
+        self.assertEqual(
+            [('/second/upload', payload), ('/route/upload', payload)],
+            [(req['path'], req['body'].encode())
+             for req in self.auth_requests])
+        self.assertEqual([app], self.origin_requests)
+
+        self.auth_requests.clear()
+        self.origin_requests.clear()
+        oversized = b'x' * (LISTENER_BODY_LIMIT + 1)
+        self.assertEqual(413, self.request('upload.example', '/upload',
+                                           body=oversized)[0])
+        self.assertEqual([], self.auth_requests)
+        route_overflow = b'x' * (ROUTE_BODY_LIMIT + 1)
+        self.assertEqual(413, self.request('upload.example', '/upload',
+                                           body=route_overflow)[0])
+        self.assertEqual([('/second/upload', route_overflow)], [
+            (req['path'], req['body'].encode()) for req in self.auth_requests])
+        self.assertEqual([], self.origin_requests)
+        self.assertEqual(200, self.request('public.example', '/upload',
+                                           body=oversized)[0])
+        self.assertEqual(1, len(self.auth_requests))
+        received = [req['body'].encode() for req in self.origin_requests]
+        self.assertEqual([oversized], received)
 
     def test_priority_and_unfiltered_sections(self):
         self.auth_requests.clear()

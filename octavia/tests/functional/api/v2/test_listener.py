@@ -668,6 +668,7 @@ class TestListener(base.BaseAPITest):
         pool_path = self.POOL_PATH.format(pool_id=auth['id'])
         field = 'request_filter_sections'
         cap = constants.GATEWAY_CAPABILITY_LISTENER_REQUEST_FILTERS
+        body_cap = constants.GATEWAY_CAPABILITY_LISTENER_AUTH_BODY
         caps_path = self.PROVIDERS_PATH + '/amphora/gateway_capabilities'
 
         def step(pool_id, prefix):
@@ -687,6 +688,15 @@ class TestListener(base.BaseAPITest):
         self.conf.config(group='api_settings',
                          enabled_listener_request_filter_providers=['amphora'])
         self.assertIn(cap, self.get(caps_path).json['gateway_capabilities'])
+        self.conf.config(
+            group='api_settings',
+            enabled_l7policy_http_external_auth_providers=['amphora'],
+            enabled_l7policy_external_auth_forward_body_providers=['amphora'])
+        capabilities = self.get(caps_path).json['gateway_capabilities']
+        self.assertIn(
+            constants.GATEWAY_CAPABILITY_L7POLICY_EXTERNAL_AUTH_FORWARD_BODY,
+            capabilities)
+        self.assertNotIn(body_cap, capabilities)
         for pool_id, expected in ((unmanaged['id'], 400), (self.pool_id, 404)):
             self.create_listener(*args, status=expected, **{field: [
                 {'hostname': '*', 'requests': [step(pool_id, '/auth')]}]})
@@ -707,15 +717,45 @@ class TestListener(base.BaseAPITest):
                                self.get(pool_path).json['pool']['listeners']])
 
         self.set_lb_status(lb['id'])
+        upload = copy.deepcopy(sections)
+        body = upload[0]['requests'][1]['http']
+        body['forward_body_max_size'] = 4096
+        update = {'listener': {field: upload}}
+        self.put(path, update, status=501)
+        self.conf.config(
+            group='api_settings',
+            enabled_l7policy_external_auth_forward_body_providers=[],
+            enabled_listener_external_auth_forward_body_providers=['amphora'])
+        self.conf.config(group='haproxy_amphora',
+                         external_auth_body_buffer_bytes=4096)
+        discovery = self.get(caps_path).json
+        self.assertIn(body_cap, discovery['gateway_capabilities'])
+        self.assertNotIn(
+            constants.GATEWAY_CAPABILITY_L7POLICY_EXTERNAL_AUTH_FORWARD_BODY,
+            discovery['gateway_capabilities'])
+        self.assertEqual(
+            4096, discovery['l7policy_external_auth_max_body_bytes'])
+        body['forward_body_max_size'] = 4097
+        self.put(path, update, status=400)
+        body['forward_body_max_size'] = 4096
+        self.put(path, update)
+        self.assertEqual(upload, self.get(path).json['listener'][field])
+
+        self.set_lb_status(lb['id'])
         self.delete(pool_path, status=409)
         self.put(pool_path, {'pool': {'tags': []}}, status=409)
         self.put(path, {'listener': {field: None}}, status=400)
         unchanged = self.put(path, {'listener': {'name': 'retained'}})
-        self.assertEqual(sections, unchanged.json['listener'][field])
+        self.assertEqual(upload, unchanged.json['listener'][field])
         self.set_lb_status(lb['id'])
         lb_path = self.LB_PATH.format(lb_id=lb['id'])
         self.put(lb_path, {'loadbalancer': {'admin_state_up': False}})
         self.set_lb_status(lb['id'])
+        self.conf.config(
+            group='api_settings',
+            enabled_listener_external_auth_forward_body_providers=[])
+        self.put(lb_path, {'loadbalancer': {'admin_state_up': True}},
+                 status=501)
         self.conf.config(group='api_settings',
                          enabled_listener_request_filter_providers=[])
         self.put(lb_path, {'loadbalancer': {'admin_state_up': True}},
@@ -727,6 +767,85 @@ class TestListener(base.BaseAPITest):
         self.assertEqual([], self.get(path).json['listener'][field])
         self.set_lb_status(lb['id'])
         self.delete(pool_path)
+
+    @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
+    def test_closed_listener_filters_can_withdraw_one_stale_section(self, rpc):
+        api_settings = 'api_settings'
+        self.conf.config(
+            group=api_settings,
+            enabled_listener_request_filter_providers=['amphora'],
+            enabled_listener_external_auth_forward_body_providers=['amphora'])
+        self.conf.config(group='haproxy_amphora',
+                         external_auth_body_buffer_bytes=4096)
+        lb = self.create_load_balancer(
+            uuidutils.generate_uuid(), provider='amphora')['loadbalancer']
+        self.set_lb_status(lb['id'])
+        auth = self.create_pool(
+            lb['id'], 'HTTP', 'ROUND_ROBIN',
+            tags=[constants.GATEWAY_LISTENER_AUTH_POOL_TAG])['pool']
+        self.set_lb_status(lb['id'])
+
+        field = 'request_filter_sections'
+        protected = {'hostname': 'upload.example', 'requests': [{
+            'type': 'ExternalAuth', 'http': {
+                'pool_id': auth['id'], 'forward_body_max_size': 4096}}]}
+        revoked = dict(protected, hostname='revoked.example')
+        public = {'hostname': 'public.example'}
+        original = [revoked, protected, public]
+        listener = self.create_listener(
+            'HTTP', 8050, lb['id'], **{field: original})['listener']
+        self.set_lb_status(lb['id'])
+        path = self.LISTENER_PATH.format(listener_id=listener['id'])
+        rejected = {'hostname': revoked['hostname'], 'reject': True}
+        reduced = [rejected, protected, public]
+
+        def update(sections, status=200, **fields):
+            return self.put(path, {'listener': {field: sections, **fields}},
+                            status=status)
+
+        self.conf.config(group='haproxy_amphora',
+                         external_auth_body_buffer_bytes=2048)
+        caps_path = self.PROVIDERS_PATH + '/amphora/gateway_capabilities'
+        caps = self.get(caps_path).json
+        self.assertIn(constants.GATEWAY_CAPABILITY_LISTENER_AUTH_BODY,
+                      caps['gateway_capabilities'])
+        self.assertEqual(2048, caps['l7policy_external_auth_max_body_bytes'])
+        update(reduced, status=400)
+        self.put(path, {'listener': {'admin_state_up': False}})
+        self.set_lb_status(lb['id'])
+        result = update(reduced).json['listener']
+        self.assertFalse(result['admin_state_up'])
+        self.assertEqual(reduced, result[field])
+        self.assertEqual(reduced, rpc.return_value.cast.call_args.kwargs[
+            'listener_updates'][field])
+        self.set_lb_status(lb['id'])
+        self.put(path, {'listener': {'admin_state_up': True}}, status=400)
+
+        self.conf.config(
+            group=api_settings,
+            enabled_listener_external_auth_forward_body_providers=[])
+        caps = self.get(caps_path).json
+        self.assertIn(constants.GATEWAY_CAPABILITY_LISTENER_REQUEST_FILTERS,
+                      caps['gateway_capabilities'])
+        self.assertNotIn(constants.GATEWAY_CAPABILITY_LISTENER_AUTH_BODY,
+                         caps['gateway_capabilities'])
+        self.assertNotIn('l7policy_external_auth_max_body_bytes', caps)
+        update([rejected, public, protected], status=501)
+        update([rejected, dict(protected, hostname='new.example'), public],
+               status=501)
+        edited = copy.deepcopy(protected)
+        edited['requests'][0]['http']['path_prefix'] = '/new'
+        update([rejected, edited, public], status=501)
+        update(reduced, status=501, admin_state_up=True)
+
+        reduced = [rejected, protected]
+        self.assertEqual(reduced, update(reduced).json['listener'][field])
+        self.set_lb_status(lb['id'])
+        final = [rejected, {'hostname': protected['hostname'], 'reject': True}]
+        update(final)
+        self.set_lb_status(lb['id'])
+        result = self.put(path, {'listener': {'admin_state_up': True}})
+        self.assertEqual(final, result.json['listener'][field])
 
     def test_get_all_admin(self):
         project_id = uuidutils.generate_uuid()

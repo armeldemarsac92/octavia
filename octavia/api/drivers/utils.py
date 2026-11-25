@@ -27,6 +27,7 @@ from octavia.api.drivers import driver_factory
 from octavia.common import constants
 from octavia.common import data_models
 from octavia.common import exceptions
+from octavia.common import listener_request_filters
 from octavia.common.tls_utils import cert_parser
 from octavia.common import validate
 from octavia.db import api as db_api
@@ -217,6 +218,13 @@ def gateway_capabilities(driver):
                     False) is True):
         capabilities.append(
             constants.GATEWAY_CAPABILITY_LISTENER_REQUEST_FILTERS)
+        body_providers = (
+            api_settings.enabled_listener_external_auth_forward_body_providers)
+        if (driver.name in body_providers and getattr(
+                driver, 'supports_listener_external_auth_forward_body',
+                False) is True):
+            capabilities.append(
+                constants.GATEWAY_CAPABILITY_LISTENER_AUTH_BODY)
     if (L7POLICY_EXTERNAL_AUTH_PAYLOAD_AVAILABLE and
             driver.name in
             api_settings.enabled_l7policy_http_external_auth_providers and
@@ -641,13 +649,25 @@ def _require_l7policy_external_auth(driver, protocol, capability, name):
                 'provider.') % {'name': name})
 
 
-def require_listener_request_filters(driver):
+def require_listener_request_filters(driver, sections, *, validate_body=True):
+    capabilities = gateway_capabilities(driver)
     if (constants.GATEWAY_CAPABILITY_LISTENER_REQUEST_FILTERS not in
-            gateway_capabilities(driver)):
+            capabilities):
         raise exceptions.ProviderUnsupportedOptionError(
             prov=driver.name, user_msg=_(
                 'HTTP listener request filters are unavailable for '
                 'this provider.'))
+    if not validate_body:
+        return
+    for auth in listener_request_filters.body_authorizers(sections):
+        if constants.GATEWAY_CAPABILITY_LISTENER_AUTH_BODY not in capabilities:
+            raise exceptions.ProviderUnsupportedOptionError(
+                prov=driver.name, user_msg=_(
+                    'HTTP listener ExternalAuth request body forwarding is '
+                    'unavailable for this provider.'))
+        if validate.external_auth_body_over_limit(auth):
+            _reject_l7policy_external_auth_body_limit(
+                driver, constants.PROTOCOL_HTTP)
 
 
 def require_http_request_mirror(driver, protocol):

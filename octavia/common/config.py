@@ -180,6 +180,12 @@ api_opts = [
                 help=_('Providers exposing ordered listener HTTP request '
                        'filters. Enable after updating the database, '
                        'provider library, workers and Amphora images.')),
+    cfg.ListOpt('enabled_listener_external_auth_forward_body_providers',
+                default=[],
+                help=_('Providers whose regional fleets support forwarding '
+                       'request bodies for HTTP listener authorization. '
+                       'Enable after qualifying all eligible Amphora agents '
+                       'and HAProxy builds.')),
     cfg.ListOpt('enabled_listener_otlp_tracing_providers', default=[],
                 help=_('Providers with listener OTLP/HTTP tracing. Enable '
                        'after upgrading the database, octavia-lib, and '
