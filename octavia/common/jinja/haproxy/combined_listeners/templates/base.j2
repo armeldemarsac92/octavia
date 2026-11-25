@@ -30,9 +30,9 @@ global
     maxconn {{ loadbalancer.global_connection_limit }}
     {% endif %}
     {% block buffer_tuning %}
-        {% if cors_buffer_tuning is defined %}
-    tune.bufsize {{ cors_buffer_tuning.size }}
-    tune.maxrewrite {{ cors_buffer_tuning.rewrite_reserve }}
+        {% if buffer_tuning is defined %}
+    tune.bufsize {{ buffer_tuning.size }}
+    tune.maxrewrite {{ buffer_tuning.rewrite_reserve }}
         {% endif %}
     {% endblock buffer_tuning %}
     {% if ssl_cache is defined %}

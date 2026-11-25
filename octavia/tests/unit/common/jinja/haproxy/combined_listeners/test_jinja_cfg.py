@@ -2946,6 +2946,50 @@ class TestHaproxyCfg(base.TestCase):
             'other-project', 'gateway_pool', '2001:db8::10', 8080)
         self.assertNotEqual(token, other_project)
 
+    def test_render_native_http_cookie_path(self):
+        listener = sample_configs_combined.sample_listener_tuple(monitor=False)
+        persistence = data_models.SessionPersistence(
+            type=constants.SESSION_PERSISTENCE_HTTP_COOKIE)
+        pool = listener.default_pool._replace(session_persistence=persistence)
+        listener = listener._replace(default_pool=pool, pools=[pool])
+        amphora = sample_configs_combined.sample_amphora_tuple()
+        original = self.jinja_cfg.render_loadbalancer_obj(amphora, [listener])
+        amp_details = {constants.GATEWAY_CAPABILITY_HTTP_COOKIE_PATH: True}
+
+        persistence.cookie_path = '/'
+        self.assertEqual(original, self.jinja_cfg.render_loadbalancer_obj(
+            amphora, [listener]))
+
+        persistence.cookie_path = ''
+        empty = self.jinja_cfg.render_loadbalancer_obj(
+            amphora, [listener], amp_details=amp_details)
+        rule = ("http-after-response replace-header Set-Cookie "
+                "'^(SRV=.*; [Pp]ath=)/(; Max-Age=[0-9]+)?$' ")
+        self.assertIn(rule + r"'\1\2'", empty)
+
+        persistence.cookie_path = '/reports,#(annual) "\'\\final'
+        encoded = base64.b64encode(b'/reports,#(annual) "\'\\\\final')
+        results = {}
+        rendered = self.jinja_cfg.render_loadbalancer_obj(
+            amphora, [listener], amp_details=amp_details,
+            haproxy_version='2.0.0', http_cookie_results=results)
+        self.assertEqual({pool.id: constants.ACTIVE}, results)
+        self.assertIn(rule + rf"'\1%[str({encoded.decode()}),b64dec]\2'",
+                      rendered)
+        self.assertNotIn(persistence.cookie_path, rendered)
+
+        unsupported = self.jinja_cfg.render_loadbalancer_obj(
+            amphora, [listener], haproxy_version='3.0.19',
+            http_cookie_results=results)
+        self.assertEqual({pool.id: constants.ERROR}, results)
+        self.assertNotIn('cookie SRV', unsupported)
+        self.assertNotRegex(unsupported, r'(?m)^    server .* cookie ')
+
+        persistence.cookie_path = '/reports; Secure'
+        self.assertRaises(exceptions.ValidationException,
+                          self.jinja_cfg.render_loadbalancer_obj, amphora,
+                          [listener])
+
     def test_render_managed_absolute_http_cookie(self):
         capability = constants.GATEWAY_CAPABILITY_HTTP_COOKIE_ABSOLUTE_TIMEOUT
         listener = sample_configs_combined.sample_listener_tuple(monitor=False)
@@ -3034,9 +3078,26 @@ class TestHaproxyCfg(base.TestCase):
                     self.assertTrue(
                         f' -m int lt {timeout * 1000}' in persistent_config)
 
+            persistence = pool.session_persistence
+            persistence.cookie_path = '/reports'
+            amp_details[constants.GATEWAY_CAPABILITY_HTTP_COOKIE_PATH] = True
+            for permanent_cookie in (False, True):
+                with self.subTest(permanent=permanent_cookie):
+                    persistence.cookie_permanent = permanent_cookie
+                    custom = self.jinja_cfg.render_loadbalancer_obj(
+                        amphora, [listener], amp_details=amp_details)
+                    issue = custom.find('replace-header Set-Cookie '
+                                        "'^gw[.]session=.*$'")
+                    rewrite = custom.find('replace-header Set-Cookie '
+                                          "'^(gw[.]session=.*; [Pp]ath=)")
+                    self.assertGreaterEqual(issue, 0)
+                    self.assertGreater(rewrite, issue)
+
         old_amphora = self.jinja_cfg.render_loadbalancer_obj(
-            amphora, [listener], amp_details={})
+            amphora, [listener], amp_details={}, http_cookie_results=results)
+        self.assertEqual({pool.id: constants.ERROR}, results)
         self.assertNotIn('octavia_cookie_signing_key', old_amphora)
+        self.assertNotIn('cookie gw.session', old_amphora)
         self.assertNotRegex(old_amphora, r'(?m)^    server .* cookie ')
 
     def test_transform_health_monitor(self):

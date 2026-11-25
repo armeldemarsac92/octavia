@@ -142,6 +142,8 @@ class SessionPersistence(base_models.BASE):
             name="fk_session_persistence_session_persistence_type_name"),
         nullable=False)
     cookie_name = sa.Column(sa.String(255), nullable=True)
+    cookie_path = sa.Column(sa.String(constants.HTTP_COOKIE_PATH_MAX_LENGTH),
+                            nullable=True)
     http_cookie_name_enabled = sa.Column(
         sa.Boolean(), nullable=False, server_default=sa.false())
     cookie_absolute_timeout_ms = sa.Column(sa.BigInteger(), nullable=True)
@@ -415,8 +417,14 @@ class Pool(base_models.BASE, base_models.IdMixin, base_models.ProjectMixin,
     @_api_provisioning_status.expression
     def _api_provisioning_status(cls):
         # Match the API response projection for filtering and pagination.
+        # Include length so collations that pad spaces distinguish '/ '.
         impaired = cls.session_persistence.has(sa.and_(
-            SessionPersistence.cookie_absolute_timeout_ms.is_not(None),
+            sa.or_(SessionPersistence.cookie_absolute_timeout_ms.is_not(None),
+                   sa.and_(SessionPersistence.cookie_path.is_not(None),
+                           sa.or_(sa.func.length(
+                               SessionPersistence.cookie_path) != 1,
+                               SessionPersistence.cookie_path !=
+                               constants.HTTP_COOKIE_DEFAULT_PATH))),
             SessionPersistence.cookie_absolute_timeout_error.is_(True)))
         return sa.case(
             (sa.and_(cls.enabled.is_(True),

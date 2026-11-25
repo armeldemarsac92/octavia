@@ -50,10 +50,25 @@ class HTTPCookieScope(wtypes.UserType):
         return value
 
 
+class HTTPCookiePath(wtypes.UserType):
+    basetype = object
+    name = 'cookie_path'
+
+    @staticmethod
+    def validate(value):
+        if not validate.is_valid_http_cookie_path(value):
+            raise ValueError(_(
+                'cookie_path must be a string of at most %d printable ASCII '
+                'characters without semicolons.')
+                % constants.HTTP_COOKIE_PATH_MAX_LENGTH)
+        return value
+
+
 class SessionPersistenceResponse(types.BaseType):
     """Defines which attributes are to be shown on any response."""
     type = wtypes.wsattr(wtypes.text)
     cookie_name = wtypes.wsattr(wtypes.text)
+    cookie_path = wtypes.wsattr(HTTPCookiePath())
     persistence_timeout = wtypes.wsattr(wtypes.IntegerType())
     persistence_granularity = wtypes.wsattr(types.IPAddressType())
     cookie_absolute_timeout_ms = wtypes.wsattr(HTTPAbsoluteCookieTimeout())
@@ -63,6 +78,8 @@ class SessionPersistenceResponse(types.BaseType):
     @classmethod
     def from_db_obj(cls, db_obj):
         result = super().from_db_obj(db_obj)
+        if result.cookie_path in (None, constants.HTTP_COOKIE_DEFAULT_PATH):
+            result.cookie_path = wtypes.Unset
         if result.cookie_absolute_timeout_ms is None:
             result.cookie_absolute_timeout_ms = wtypes.Unset
             result.cookie_scope = wtypes.Unset
@@ -80,6 +97,7 @@ class SessionPersistencePOST(types.BaseType):
     cookie_name = wtypes.wsattr(wtypes.StringType(
         max_length=255, pattern=r'^[^\s,;\\]+$'),
         default=None)
+    cookie_path = wtypes.wsattr(HTTPCookiePath())
     persistence_timeout = wtypes.wsattr(wtypes.IntegerType(), default=None)
     persistence_granularity = wtypes.wsattr(types.IPAddressType(),
                                             default=None)
@@ -95,6 +113,7 @@ class SessionPersistencePUT(types.BaseType):
     # https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Set-Cookie
     cookie_name = wtypes.wsattr(wtypes.StringType(
         max_length=255, pattern=r'^[^\s,;\\]+$'))
+    cookie_path = wtypes.wsattr(HTTPCookiePath())
     persistence_timeout = wtypes.wsattr(wtypes.IntegerType(), default=None)
     persistence_granularity = wtypes.wsattr(types.IPAddressType(),
                                             default=None)
