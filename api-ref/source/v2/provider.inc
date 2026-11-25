@@ -323,6 +323,11 @@ on HTTP pools with ``HTTP_COOKIE`` persistence. The load balancer generates
 the cookie and uses it to select a member after selecting the pool. See
 :ref:`session_persistence` for the name and update rules.
 
+``http_cookie_path_v1`` enables a custom ``session_persistence.cookie_path``
+on HTTP pools with ``HTTP_COOKIE`` persistence. The default root path
+remains available without regional opt-in. See :ref:`session_persistence`
+for the allowed values and update rules.
+
 ``http_cookie_absolute_timeout_v1`` enables an absolute lifetime for named
 HTTP session cookies. Providers advertise it alongside ``http_cookie_name_v1``
 when operators opt in. See :ref:`session_persistence` for the timeout and

@@ -13,6 +13,8 @@
 # under the License.
 from unittest import mock
 
+from oslo_config import fixture as oslo_fixture
+
 from octavia.amphorae.backends.agent.api_server import haproxy_compatibility
 from octavia.common import constants
 import octavia.tests.unit.base as base
@@ -22,6 +24,10 @@ from octavia.tests.unit.common.sample_configs import sample_configs_combined
 class HAProxyCompatTestCase(base.TestCase):
     def setUp(self):
         super().setUp()
+        probe = mock.patch.object(haproxy_compatibility.subprocess, 'run',
+                                  side_effect=FileNotFoundError)
+        self.mock_probe = probe.start()
+        self.addCleanup(probe.stop)
         self.old_haproxy_global = (
             "# Configuration for loadbalancer sample_loadbalancer_id_1\n"
             "global\n"
@@ -160,6 +166,33 @@ class HAProxyCompatTestCase(base.TestCase):
         self.assertTrue(features[sampling])
         self.assertTrue(
             features[constants.GATEWAY_CAPABILITY_BACKEND_RETRY_BUDGET])
+
+    @mock.patch.object(haproxy_compatibility.subprocess, 'check_output')
+    def test_cookie_path_checks_configured_binary(self, check_output):
+        haproxy_cmd = '/opt/octavia/bin/haproxy'
+        config = self.useFixture(oslo_fixture.Config(
+            haproxy_compatibility.CONF))
+        config.config(group='haproxy_amphora', haproxy_cmd=haproxy_cmd)
+        capability = constants.GATEWAY_CAPABILITY_HTTP_COOKIE_PATH
+        check_output.return_value = 'HAProxy version 2.8.19 custom'
+        self.mock_probe.side_effect = None
+
+        self.assertIs(haproxy_compatibility.get_haproxy_capabilities()[
+            capability], True)
+        self.assertEqual([haproxy_cmd, '-vv'],
+                         check_output.call_args.args[0])
+        self.assertEqual([haproxy_cmd, '-c', '-q', '-f', '/dev/stdin'],
+                         self.mock_probe.call_args.args[0])
+        self.assertTrue(self.mock_probe.call_args.kwargs['check'])
+        self.assertIn('http-after-response replace-header Set-Cookie',
+                      self.mock_probe.call_args.kwargs['input'])
+
+        check_output.return_value = 'HAProxy version 3.0.19 custom'
+        self.mock_probe.side_effect = (
+            haproxy_compatibility.subprocess.CalledProcessError(
+                1, self.mock_probe.call_args.args[0]))
+        self.assertNotIn(capability,
+                         haproxy_compatibility.get_haproxy_capabilities())
 
     @mock.patch.object(haproxy_compatibility.subprocess, 'check_output')
     def test_frontend_client_auth_fallback_capability(self, check_output):

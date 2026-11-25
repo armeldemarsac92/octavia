@@ -535,7 +535,7 @@ then includes ``http_cookie_name_v1``. HTTP pools can set
 Amphora generates these cookies without the ``Secure`` and ``HttpOnly``
 attributes. Names starting with ``__Host-`` (including ``__Host-Http-``),
 ``__Secure-`` or ``__Http-`` are rejected regardless of case.
-Named cookies use the same session lifetime and root path as the default
+Named cookies use the same session lifetime and default root path as the
 ``SRV`` cookie. Their opaque member identifier is derived from the project,
 cookie name, member IP address and port. Pools serving the same backend
 can share a name and recognize affinity to the same endpoint across routes.
@@ -547,6 +547,35 @@ keep serving it. For pools without an absolute timeout, send
 ``session_persistence: {"type": "HTTP_COOKIE"}`` in a pool update to return
 to the default. To remove persistence entirely, send
 ``session_persistence: null``.
+
+Load balancer-generated persistence cookie paths
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Apply database revision ``1c4fd3a0b279``, update the regional API,
+workers and Amphora agents, and qualify all eligible Amphora images.
+Then enable the provider.
+
+.. code-block:: ini
+
+   [api_settings]
+   enabled_http_cookie_path_providers = amphora
+
+The provider advertises ``http_cookie_path_v1``. An HTTP pool with
+``HTTP_COOKIE`` persistence can set ``session_persistence.cookie_path``.
+Octavia preserves the exact configured value, including the empty string.
+By default the cookie uses ``Path=/``. Regional discovery applies to new
+custom paths and changes to existing ones.
+
+Each agent advertises ``http_cookie_path_v1`` in its details only after
+the configured ``haproxy_cmd`` accepts a compatibility configuration.
+The worker checks this capability on every allocated Amphora, including
+both peers in active/standby. When a confirmation is missing, reachable
+peers balance traffic for pools with custom paths without affinity. A
+pool with a custom path reports ``ERROR`` until the full topology applies
+its affinity configuration. The previous configuration stays loaded on
+a peer that cannot be reached or reloaded. Withdrawal works even when a
+peer lacks support. Before rolling back services or images, set
+``cookie_path`` to ``null`` or ``/`` and let the affected pools provision.
 
 Absolute HTTP session cookie timeouts
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -636,7 +665,7 @@ three cookie capabilities.
 
 The provider advertises ``http_cookie_permanent_v1``. When
 ``session_persistence.cookie_permanent`` is ``true``, the load balancer
-issues ``Path=/`` and ``Max-Age``, rounded up from the configured
+issues the configured path and ``Max-Age``, rounded up from the configured
 millisecond timeout. A zero timeout gives ``Max-Age=0``. Server-side expiry
 uses the exact timeout. Use the same cookie mode across pools that
 share an affinity scope. Cookies signed for one mode are replaced when

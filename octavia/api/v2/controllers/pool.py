@@ -133,6 +133,21 @@ def _validate_session_persistence(persistence, protocol, *, for_update=False):
     validate.check_session_persistence(persistence)
 
 
+def _validate_http_cookie_path(persistence, protocol):
+    path = persistence.get('cookie_path')
+    if path is None:
+        return False
+    if persistence.get('type') != constants.SESSION_PERSISTENCE_HTTP_COOKIE:
+        raise exceptions.ValidationException(detail=_(
+            'cookie_path requires HTTP_COOKIE session persistence.'))
+    if path == constants.HTTP_COOKIE_DEFAULT_PATH:
+        return False
+    if protocol != constants.PROTOCOL_HTTP:
+        raise exceptions.ValidationException(detail=_(
+            'A custom HTTP_COOKIE path requires an HTTP pool.'))
+    return True
+
+
 def _validate_http_cookie_absolute_timeout(persistence, protocol):
     timeout = persistence.get('cookie_absolute_timeout_ms')
     scope = persistence.get('cookie_scope')
@@ -254,11 +269,15 @@ class PoolsController(base.BaseController):
         budget = pool_dict.get('backend_retry_budget')
         persistence = pool_dict.get('session_persistence')
         named_http_cookie = _has_named_http_cookie(persistence)
+        custom_cookie_path = (
+            persistence and _validate_http_cookie_path(
+                persistence, pool_dict['protocol']))
         absolute_cookie_timeout = (
             persistence and _validate_http_cookie_absolute_timeout(
                 persistence, pool_dict['protocol']))
         if (pool_dict.get('backend_h2c') or hostname is not None or
-                require_h2 or sans or budget is not None or named_http_cookie):
+                require_h2 or sans or budget is not None or
+                named_http_cookie or custom_cookie_path):
             if driver is None:
                 # Fully populated load balancer creation uses this path too.
                 provider = self._get_db_lb(
@@ -288,6 +307,10 @@ class PoolsController(base.BaseController):
             driver_utils.require_http_cookie_name(
                 driver, pool_dict['protocol'])
             persistence['http_cookie_name_enabled'] = True
+        if custom_cookie_path:
+            driver_utils.require_http_cookie_path(driver)
+        elif persistence:
+            persistence.pop('cookie_path', None)
         if absolute_cookie_timeout:
             driver_utils.require_http_cookie_absolute_timeout(driver)
         if persistence and persistence.get('cookie_permanent') is True:
@@ -740,6 +763,8 @@ class PoolsController(base.BaseController):
             old_timed = old is not None and (
                 old.cookie_absolute_timeout_ms is not None or
                 old.cookie_scope is not None)
+            path_update = (changes.type is wtypes.Unset and
+                           changes.cookie_path is not wtypes.Unset)
             if not changes.type and old is not None:
                 changes.type = old.type
             if changes.cookie_name is wtypes.Unset:
@@ -748,7 +773,7 @@ class PoolsController(base.BaseController):
                 preserve_name = (old is not None and
                                  changes.type == old.type and
                                  old.http_cookie_name_enabled and
-                                 (old_timed or setting_timeout))
+                                 (old_timed or setting_timeout or path_update))
                 changes.cookie_name = (
                     old.cookie_name if preserve_name else None)
 
@@ -761,11 +786,22 @@ class PoolsController(base.BaseController):
         persistence = changes.to_dict(render_unsets=False)
         _validate_session_persistence(persistence, current.protocol,
                                       for_update=True)
+        old_path = old.cookie_path if old is not None else None
+        if _validate_http_cookie_path(persistence, current.protocol):
+            if changes.cookie_path != old_path:
+                driver_utils.require_http_cookie_path(driver)
+        elif (changes.cookie_path is not wtypes.Unset or
+              (old is not None and old.type != changes.type)):
+            # Send an explicit null to withdraw an enrolled path.
+            changes.cookie_path = (
+                wtypes.Unset if old_path in
+                (None, constants.HTTP_COOKIE_DEFAULT_PATH) else None)
         enrolling_timeout = _validate_http_cookie_absolute_timeout(
             persistence, current.protocol)
-        keep_name = old_timed and old.type == changes.type and (
-            old.cookie_name == changes.cookie_name and
-            old.http_cookie_name_enabled)
+        keep_name = (old is not None and (old_timed or path_update) and
+                     old.type == changes.type and
+                     old.cookie_name == changes.cookie_name and
+                     old.http_cookie_name_enabled)
         if (old_timed and
                 changes.cookie_absolute_timeout_ms is wtypes.Unset and
                 not keep_name):

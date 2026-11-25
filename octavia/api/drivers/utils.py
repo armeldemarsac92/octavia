@@ -124,6 +124,9 @@ def gateway_capabilities(driver):
             driver.name in api_settings.enabled_request_cors_providers and
             getattr(driver, 'supports_request_cors', False) is True):
         capabilities.append(constants.GATEWAY_CAPABILITY_REQUEST_CORS)
+    if (driver.name in api_settings.enabled_http_cookie_path_providers and
+            getattr(driver, 'supports_http_cookie_path', False) is True):
+        capabilities.append(constants.GATEWAY_CAPABILITY_HTTP_COOKIE_PATH)
     if (driver.name in api_settings.enabled_http_cookie_name_providers and
             getattr(driver, 'supports_http_cookie_name', False) is True):
         capabilities.append(constants.GATEWAY_CAPABILITY_HTTP_COOKIE_NAME)
@@ -402,6 +405,14 @@ def require_http_cookie_name(driver, protocol):
         raise exceptions.ProviderUnsupportedOptionError(
             prov=driver.name, user_msg=_(
                 'Custom HTTP_COOKIE names are unavailable for this provider.'))
+
+
+def require_http_cookie_path(driver):
+    if (constants.GATEWAY_CAPABILITY_HTTP_COOKIE_PATH not in
+            gateway_capabilities(driver)):
+        raise exceptions.ProviderUnsupportedOptionError(
+            prov=driver.name, user_msg=_(
+                'Custom HTTP_COOKIE paths are unavailable for this provider.'))
 
 
 def require_http_cookie_absolute_timeout(driver):
@@ -1213,10 +1224,12 @@ def pool_dict_to_provider_dict(pool_dict, for_delete=False, for_update=False):
             'http_cookie_name_enabled', None)
         new_pool_dict['session_persistence'].pop(
             'cookie_absolute_timeout_error', None)
-        # Keep legacy provider payloads unchanged. An update carrying explicit
-        # nulls uses them to clear the timeout and scope.
+        # Explicit nulls in an update can clear the path, timeout and scope.
         if not for_update:
             persistence = new_pool_dict['session_persistence']
+            if persistence.get('cookie_path') in (
+                    None, constants.HTTP_COOKIE_DEFAULT_PATH):
+                persistence.pop('cookie_path', None)
             if persistence.get('cookie_permanent') is not True:
                 persistence.pop('cookie_permanent', None)
             if persistence.get('cookie_absolute_timeout_ms') is None:

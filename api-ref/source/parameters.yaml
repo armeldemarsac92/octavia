@@ -1710,6 +1710,16 @@ session_persistence_cookie:
   in: body
   required: false
   type: string
+session_persistence_cookie_path:
+  description: |
+    The Path attribute of the cookie generated for ``HTTP_COOKIE``.
+    Custom values on HTTP pools require ``http_cookie_path_v1``.
+    Accepts up to 1024 printable ASCII characters excluding semicolon
+    and preserves the supplied string, including an empty string.
+    Use ``null`` or ``/`` to select the default root path.
+  in: body
+  required: false
+  type: string
 session_persistence_cookie_absolute_timeout_ms:
   description: |
     The absolute age, in milliseconds, of an affinity cookie issued for a
