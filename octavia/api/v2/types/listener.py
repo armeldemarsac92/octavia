@@ -13,12 +13,30 @@
 #    under the License.
 
 from octavia_lib.common import constants as lib_constants
+from oslo_config import cfg
 from wsme import types as wtypes
 
 from octavia.api.common import types
 from octavia.api.v2.types import l7policy as l7policy_types
 from octavia.api.v2.types import pool as pool_types
 from octavia.common import constants
+from octavia.common import exceptions
+from octavia.common import listener_request_filters
+
+
+CONF = cfg.CONF
+
+
+class RequestFilterSections(wtypes.UserType):
+    basetype = object
+    name = 'request_filter_sections'
+
+    @staticmethod
+    def validate(value):
+        try:
+            return listener_request_filters.normalize(value)
+        except exceptions.ValidationException as exc:
+            raise ValueError(str(exc)) from exc
 
 
 class BaseListenerType(types.BaseType):
@@ -49,6 +67,7 @@ class ListenerResponse(BaseListenerType):
     project_id = wtypes.wsattr(wtypes.StringType())
     default_pool_id = wtypes.wsattr(wtypes.UuidType())
     default_http_response = wtypes.wsattr(types.FixedHTTPResponse)
+    request_filter_sections = wtypes.wsattr(RequestFilterSections())
     https_virtual_hosts = wtypes.wsattr(
         wtypes.ArrayType(wtypes.StringType(max_length=253)))
     l7policies = wtypes.wsattr([types.IdOnlyType])
@@ -76,6 +95,12 @@ class ListenerResponse(BaseListenerType):
     @classmethod
     def from_db_obj(cls, db_obj):
         result = super().from_db_obj(db_obj)
+        sections = db_obj.request_filter_sections
+        if (sections is not None or
+                CONF.api_settings.enabled_listener_request_filter_providers):
+            result.request_filter_sections = sections or []
+        else:
+            result.request_filter_sections = wtypes.Unset
         if db_obj.https_virtual_hosts is None:
             result.https_virtual_hosts = wtypes.Unset
         if result.tcp_tls_termination is not True:
@@ -156,6 +181,7 @@ class ListenerPOST(BaseListenerType):
     project_id = wtypes.wsattr(wtypes.StringType(max_length=36))
     default_pool_id = wtypes.wsattr(wtypes.UuidType())
     default_http_response = wtypes.wsattr(types.FixedHTTPResponse)
+    request_filter_sections = wtypes.wsattr(RequestFilterSections())
     https_virtual_hosts = wtypes.wsattr(
         wtypes.ArrayType(wtypes.StringType(max_length=253)))
     tcp_tls_termination = wtypes.wsattr(bool, default=False)
@@ -211,6 +237,7 @@ class ListenerPUT(BaseListenerType):
     sni_container_refs = [wtypes.StringType(max_length=255)]
     default_pool_id = wtypes.wsattr(wtypes.UuidType())
     default_http_response = wtypes.wsattr(types.FixedHTTPResponse)
+    request_filter_sections = wtypes.wsattr(RequestFilterSections())
     https_virtual_hosts = wtypes.wsattr(
         wtypes.ArrayType(wtypes.StringType(max_length=253)))
     tcp_tls_termination = wtypes.wsattr(bool)

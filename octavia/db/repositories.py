@@ -44,6 +44,7 @@ from sqlalchemy import update
 from octavia.common import constants as consts
 from octavia.common import data_models
 from octavia.common import exceptions
+from octavia.common import listener_request_filters
 from octavia.common import utils
 from octavia.common import validate
 from octavia.db import api as db_api
@@ -56,9 +57,9 @@ CONF = cfg.CONF
 LOG = logging.getLogger(__name__)
 
 
-def _pool_has_gateway_backend_tls_tag():
+def _pool_has_tag(value):
     # The renderer checks exact tag membership, independent of DB collation.
-    tag = consts.GATEWAY_BACKEND_TLS_POOL_TAG.encode('ascii').hex().upper()
+    tag = value.encode('ascii').hex().upper()
     tags = base_models.Tags
     return (select(tags.resource_id)
             .where(tags.resource_id == models.Pool.id,
@@ -66,6 +67,10 @@ def _pool_has_gateway_backend_tls_tag():
             .correlate(models.Pool)
             .with_for_update()
             .exists())
+
+
+def _pool_has_gateway_backend_tls_tag():
+    return _pool_has_tag(consts.GATEWAY_BACKEND_TLS_POOL_TAG)
 
 
 class BaseRepository:
@@ -1150,6 +1155,7 @@ class PoolRepository(BaseRepository):
         # no-load (blank) the tables we don't need
         query_options = (
             subqueryload(models.Pool._default_listeners),
+            subqueryload(models.Pool._request_filter_listeners),
             subqueryload(models.Pool.health_monitor),
             subqueryload(models.Pool.l7policies),
             (subqueryload(models.Pool.l7policies).
@@ -1243,6 +1249,46 @@ class MemberRepository(BaseRepository):
 class ListenerRepository(BaseRepository):
     model_class = models.Listener
     activation_parent = ('load_balancer',)
+
+    def validate_request_filter_pools(self, session, sections, lb_id,
+                                      project_id):
+        pool = models.Pool
+        for pool_id in sorted(listener_request_filters.pool_ids(sections)):
+            query = session.query(
+                pool.protocol, pool.tls_enabled, pool.backend_h2c,
+                _pool_has_tag(consts.GATEWAY_LISTENER_AUTH_POOL_TAG).label(
+                    'tagged'))
+            row = (query.filter_by(id=pool_id, load_balancer_id=lb_id,
+                                   project_id=project_id)
+                   .filter(pool.provisioning_status.notin_(
+                       (consts.PENDING_DELETE, consts.DELETED)))
+                   .with_for_update().one_or_none())
+            if row is None:
+                raise exceptions.NotFound(
+                    resource=data_models.Pool._name(), id=pool_id)
+            if (row.protocol != consts.PROTOCOL_HTTP or row.tls_enabled or
+                    row.backend_h2c or not row.tagged):
+                raise exceptions.ValidationException(detail=_(
+                    'Listener authorization requires a managed plain HTTP '
+                    'pool.'))
+
+    def get_request_filter_listener_using_pool(self, session, pool_id):
+        refs = models.ListenerRequestFilterPool
+        return (session.query(refs.listener_id).filter_by(pool_id=pool_id)
+                .with_for_update().limit(1).scalar())
+
+    @staticmethod
+    def _replace_request_filter_pool_refs(session, listener_id, sections):
+        ref = models.ListenerRequestFilterPool
+        requested = listener_request_filters.pool_ids(sections)
+        query = session.query(ref).filter_by(listener_id=listener_id)
+        existing = {row.pool_id for row in query.with_for_update()}
+        removed = existing - requested
+        if removed:
+            query.filter(ref.pool_id.in_(removed)).delete(
+                synchronize_session='fetch')
+        for pool_id in sorted(requested - existing):
+            session.add(ref(listener_id=listener_id, pool_id=pool_id))
 
     def get_active_tcp_tls_listeners(self, session, load_balancer_id):
         listener = self.model_class
@@ -1345,6 +1391,15 @@ class ListenerRepository(BaseRepository):
             model.https_virtual_hosts.isnot(None))
             .with_for_update().first() is not None)
 
+    def has_enabled_request_filters(self, session, lb_id):
+        listener = self.model_class
+        rows = (session.query(listener.request_filter_sections).filter(
+            listener.load_balancer_id == lb_id, listener.enabled.is_(True),
+            listener.request_filter_sections.is_not(None),
+            listener.provisioning_status.notin_(
+                (consts.PENDING_DELETE, consts.DELETED))).with_for_update())
+        return any(sections for sections, in rows)
+
     def has_enabled_frontend_client_auth_fallback(self, session, lb_id):
         model = self.model_class
         return (session.query(model.id).filter(
@@ -1435,6 +1490,9 @@ class ListenerRepository(BaseRepository):
                 listener_db.allowed_cidrs = [
                     models.ListenerCidr(listener_id=id, cidr=cidr)
                     for cidr in allowed_cidrs]
+        if 'request_filter_sections' in model_kwargs:
+            self._replace_request_filter_pool_refs(
+                session, id, model_kwargs['request_filter_sections'])
         if marks_error and listener_db.frontend_fallback_owns_error is True:
             listener_db.frontend_fallback_owns_error = False
         listener_db.update(model_kwargs)
@@ -1455,6 +1513,10 @@ class ListenerRepository(BaseRepository):
             model.peer_port = self._find_next_peer_port(
                 session, lb_id=model.load_balancer_id)
         session.add(model)
+        if model.request_filter_sections:
+            session.flush()
+            self._replace_request_filter_pool_refs(
+                session, listener_id, model.request_filter_sections)
         return model.to_data_model()
 
     def prov_status_active_if_not_error(self, session, listener_id):

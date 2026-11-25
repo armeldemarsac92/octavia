@@ -5,18 +5,24 @@ binary=/tmp/in_target.d/octavia-haproxy-strict
 if [[ -f "$binary" ]]; then
     version=$("$binary" -v)
     prefix="HAProxy version 3.0.19-ade9c1262-octavia-strict-dns-v1"
+    mirror="$prefix-h2-alpn-v1-backend-sans-v1-http-policy-v1-http-mirror-v1"
+    auth="$mirror-listener-auth-v1"
     if [[ "$version" != "$prefix "* &&
           "$version" != "$prefix-h2-alpn-v1 "* &&
           "$version" != "$prefix-h2-alpn-v1-backend-sans-v1 "* &&
           "$version" != "$prefix-h2-alpn-v1-backend-sans-v1-http-policy-v1 "* &&
-          "$version" != "$prefix-h2-alpn-v1-backend-sans-v1-http-policy-v1-http-mirror-v1 "* ]]; then
+          "$version" != "$mirror "* && "$version" != "$auth "* ]]; then
         echo "Expected the Octavia HAProxy strict DNS build" >&2
         exit 1
     fi
     install -m 0755 "$binary" /usr/sbin/haproxy
-    if [[ "$version" == "$prefix-h2-alpn-v1-backend-sans-v1-http-policy-v1-http-mirror-v1 "* ]]; then
+    if [[ "$version" == "$mirror "* || "$version" == "$auth "* ]]; then
         install -d -m 0755 /usr/lib/tmpfiles.d
         printf 'd /run/octavia/mirror 0755 root root -\n' > \
             /usr/lib/tmpfiles.d/octavia-haproxy-mirror.conf
+    fi
+    if [[ "$version" == "$auth "* ]]; then
+        printf 'd /run/octavia/listener-auth 0755 root root -\n' > \
+            /usr/lib/tmpfiles.d/octavia-haproxy-listener-auth.conf
     fi
 fi

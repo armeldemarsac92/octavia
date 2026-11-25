@@ -828,6 +828,9 @@ class LoadBalancersController(base.BaseController):
                          not db_lb.enabled)
             if reopening:
                 listener_repo = self.repositories.listener
+                if listener_repo.has_enabled_request_filters(
+                        context.session, id):
+                    driver_utils.require_listener_request_filters(driver)
                 if listener_repo.has_enabled_frontend_client_auth_fallback(
                         context.session, id):
                     driver_utils.require_frontend_client_auth_fallback(driver)

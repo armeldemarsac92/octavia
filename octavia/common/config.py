@@ -127,6 +127,10 @@ api_opts = [
                        'HTTP deadlines and retries. Enable after upgrading '
                        'the database, API, provider library and workers '
                        'and qualifying all eligible Amphora images.')),
+    cfg.ListOpt('enabled_listener_request_filter_providers', default=[],
+                help=_('Providers exposing ordered listener HTTP request '
+                       'filters. Enable after updating the database, '
+                       'provider library, workers and Amphora images.')),
     cfg.ListOpt('enabled_http_request_mirror_providers', default=[],
                 help=_('Providers whose regional fleets support HTTP request '
                        'mirroring. Enable after upgrading the database, '

@@ -52,6 +52,80 @@ class TestListener(base.BaseAPITest):
         self.pool_id = self.pool.get('pool').get('id')
         self.set_lb_status(self.lb_id)
 
+    @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
+    def test_listener_request_filters_pool_scope_and_withdrawal(self, rpc):
+        lb = self.create_load_balancer(
+            uuidutils.generate_uuid(), provider='amphora')['loadbalancer']
+        self.set_lb_status(lb['id'])
+        auth = self.create_pool(
+            lb['id'], 'HTTP', 'ROUND_ROBIN',
+            tags=[constants.GATEWAY_LISTENER_AUTH_POOL_TAG])['pool']
+        self.set_lb_status(lb['id'])
+        unmanaged = self.create_pool(lb['id'], 'HTTP', 'ROUND_ROBIN')['pool']
+        self.set_lb_status(lb['id'])
+        pool_path = self.POOL_PATH.format(pool_id=auth['id'])
+        field = 'request_filter_sections'
+        cap = constants.GATEWAY_CAPABILITY_LISTENER_REQUEST_FILTERS
+        caps_path = self.PROVIDERS_PATH + '/amphora/gateway_capabilities'
+
+        def step(pool_id, prefix):
+            return {'type': 'ExternalAuth', 'http': {
+                'pool_id': pool_id, 'path_prefix': prefix,
+                'allowed_response_headers': ['x-identity']}}
+
+        sections = [
+            {'hostname': '*', 'requests': [
+                step(auth['id'], '/first'), step(auth['id'], '/second')]},
+            {'hostname': 'public.example'},
+            {'hostname': '*.blocked.example', 'reject': True}]
+        options = {field: sections}
+        args = ('HTTP', 8050, lb['id'])
+        self.assertNotIn(cap, self.get(caps_path).json['gateway_capabilities'])
+        self.create_listener(*args, status=501, **options)
+        self.conf.config(group='api_settings',
+                         enabled_listener_request_filter_providers=['amphora'])
+        self.assertIn(cap, self.get(caps_path).json['gateway_capabilities'])
+        for pool_id, expected in ((unmanaged['id'], 400), (self.pool_id, 404)):
+            self.create_listener(*args, status=expected, **{field: [
+                {'hostname': '*', 'requests': [step(pool_id, '/auth')]}]})
+        self.create_listener('TCP', 8050, lb['id'], status=400, **options)
+        self.create_listener(*args, status=400, **{field: None})
+
+        listener = self.create_listener(*args, **options)['listener']
+        path = self.LISTENER_PATH.format(listener_id=listener['id'])
+        self.assertEqual(sections, listener[field])
+        self.assertEqual(sections, rpc.return_value.cast.call_args.kwargs[
+            constants.LISTENER][field])
+        self.assertEqual(sections, self.get(path).json['listener'][field])
+        with db_api.session().begin() as session:
+            lb_state = self.lb_repo.get(session, id=lb['id'])
+            self.assertEqual(sections, lb_state.listeners[0].to_dict()[field])
+        self.assertEqual(
+            [listener['id']], [item['id'] for item in
+                               self.get(pool_path).json['pool']['listeners']])
+
+        self.set_lb_status(lb['id'])
+        self.delete(pool_path, status=409)
+        self.put(pool_path, {'pool': {'tags': []}}, status=409)
+        self.put(path, {'listener': {field: None}}, status=400)
+        unchanged = self.put(path, {'listener': {'name': 'retained'}})
+        self.assertEqual(sections, unchanged.json['listener'][field])
+        self.set_lb_status(lb['id'])
+        lb_path = self.LB_PATH.format(lb_id=lb['id'])
+        self.put(lb_path, {'loadbalancer': {'admin_state_up': False}})
+        self.set_lb_status(lb['id'])
+        self.conf.config(group='api_settings',
+                         enabled_listener_request_filter_providers=[])
+        self.put(lb_path, {'loadbalancer': {'admin_state_up': True}},
+                 status=501)
+        self.assertEqual([], self.put(path, {'listener': {field: []}})
+                         .json['listener'][field])
+        self.assertEqual([], rpc.return_value.cast.call_args.kwargs[
+            'listener_updates'][field])
+        self.assertEqual([], self.get(path).json['listener'][field])
+        self.set_lb_status(lb['id'])
+        self.delete(pool_path)
+
     def test_get_all_admin(self):
         project_id = uuidutils.generate_uuid()
         lb1 = self.create_load_balancer(uuidutils.generate_uuid(),

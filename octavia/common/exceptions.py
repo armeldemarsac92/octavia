@@ -179,6 +179,12 @@ class DuplicatePoolEntry(APIException):
     code = 409
 
 
+class PoolInUseByListenerRequestFilter(APIException):
+    msg = _("Pool %(id)s is in use by a request filter on listener "
+            "%(listener_id)s")
+    code = 409
+
+
 class PoolInUseByL7Policy(APIException):
     msg = _("Pool %(id)s is in use by L7 policy %(l7policy_id)s")
     code = 409

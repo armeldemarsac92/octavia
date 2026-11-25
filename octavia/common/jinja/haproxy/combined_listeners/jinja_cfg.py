@@ -26,6 +26,7 @@ from octavia.amphorae.driver_exceptions import exceptions as driver_except
 from octavia.common.config import cfg
 from octavia.common import constants
 from octavia.common import exceptions
+from octavia.common import listener_request_filters
 from octavia.common import utils as octavia_utils
 from octavia.common import validate
 from octavia.db import models
@@ -231,6 +232,7 @@ class JinjaTemplater:
             constants.GATEWAY_CAPABILITY_BACKEND_TLS_SUBJECT_ALT_NAMES)
         policy_capability = constants.GATEWAY_CAPABILITY_HTTP_REQUEST_POLICY
         mirror_capability = constants.GATEWAY_CAPABILITY_HTTP_REQUEST_MIRROR
+        auth_capability = constants.GATEWAY_CAPABILITY_LISTENER_REQUEST_FILTERS
         fallback_capability = (
             constants.GATEWAY_CAPABILITY_FRONTEND_CLIENT_AUTH_INSECURE_FALLBACK)
         loadbalancer = self._transform_loadbalancer(
@@ -279,6 +281,10 @@ class JinjaTemplater:
                         is not True):
                     raise driver_except.AmpVersionUnsupported(
                         version='HAProxy lacks HTTP request policy support')
+                if (listener.get('request_filter_sections') and
+                        (amp_details or {}).get(auth_capability) is not True):
+                    raise driver_except.AmpVersionUnsupported(
+                        version='HAProxy lacks listener HTTP authorization')
                 if (listener.get('request_mirror_pools') and
                         supports_mirrors is not True):
                     raise driver_except.AmpVersionUnsupported(
@@ -475,6 +481,21 @@ class JinjaTemplater:
         if mirror_pools:
             ret_value['request_mirror_pools'] = [
                 mirror_pools[pool_id] for pool_id in sorted(mirror_pools)]
+        auth_pool_ids = {
+            auth['pool_id'] for listener in listener_transforms
+            if listener['enabled']
+            for section in listener.get('request_filter_sections', ())
+            for auth in section['requests'] if auth['available']
+        }
+        if auth_pool_ids:
+            auth_pools = {
+                pool.id: pool for pool in loadbalancer.pools
+                if pool.id in auth_pool_ids
+            }
+            ret_value['listener_auth_pools'] = [
+                self._transform_pool(auth_pools[pool_id],
+                                     feature_compatibility, False)
+                for pool_id in sorted(auth_pool_ids)]
         # NOTE(sbalukoff): Global connection limit should be a sum of all
         # listeners' connection limits.
         connection_limit_sum = 0
@@ -680,6 +701,9 @@ class JinjaTemplater:
             ret_value['default_http_status_code'] = (
                 validate.fixed_http_status_code(
                     listener.default_http_response))
+        if active and getattr(listener, 'request_filter_sections', None):
+            ret_value['request_filter_sections'] = (
+                self._transform_request_filters(listener, loadbalancer))
         policy_gen = (policy for policy in listener.l7policies if
                       policy.provisioning_status != constants.PENDING_DELETE)
         if https_sections is None and not mixed_mode and listener.default_pool:
@@ -889,6 +913,47 @@ class JinjaTemplater:
                 for target in policy['weighted_targets']
                 if 'status_code' in target})
         return ret_value
+
+    def _transform_request_filters(self, listener, loadbalancer):
+        sections = listener_request_filters.normalize(
+            listener.request_filter_sections)
+        listener_request_filters.validate_listener(listener.protocol, sections)
+        pool_ids = listener_request_filters.pool_ids(sections)
+        available = {
+            pool.id for pool in loadbalancer.pools
+            if pool.id in pool_ids and pool.enabled and
+            pool.project_id == listener.project_id and
+            pool.load_balancer_id == listener.load_balancer_id and
+            pool.provisioning_status not in (
+                constants.PENDING_DELETE, constants.DELETED) and
+            listener_request_filters.valid_pool(pool)
+        }
+
+        def encode(value):
+            # Config arguments contain only hex digits or the empty marker.
+            return value.encode('ascii').hex() or '-'
+
+        ordered_sections = sorted(
+            sections, key=lambda section: self._https_hostname_priority(
+                section['hostname']))
+        result = []
+        for index, section in enumerate(ordered_sections, start=1):
+            requests = []
+            for step in section.get('requests', ()):
+                auth = step['http']
+                requests.append({
+                    'pool_id': auth['pool_id'],
+                    'available': auth['pool_id'] in available,
+                    'prefix': encode(auth.get('path_prefix', '')),
+                    'request_headers': encode(','.join(
+                        auth.get('allowed_request_headers', ()))),
+                    'response_headers': encode(','.join(
+                        auth.get('allowed_response_headers', ()))),
+                })
+            result.append({'id': index, 'hostname': section['hostname'],
+                           'reject': section.get('reject', False),
+                           'requests': requests})
+        return result
 
     def _transform_pool(self, pool, feature_compatibility,
                         listener_tls_enabled, pool_tls_certs=None):

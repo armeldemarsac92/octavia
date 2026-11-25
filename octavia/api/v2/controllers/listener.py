@@ -32,6 +32,7 @@ from octavia.api.v2.types import listener as listener_types
 from octavia.common import constants
 from octavia.common import data_models
 from octavia.common import exceptions
+from octavia.common import listener_request_filters
 from octavia.common import stats
 from octavia.common import utils as common_utils
 from octavia.common import validate
@@ -544,6 +545,8 @@ class ListenersController(base.BaseController):
 
             listener_dict = db_prepare.create_listener(
                 listener.to_dict(render_unsets=True), None)
+            if listener.request_filter_sections is wtypes.Unset:
+                listener_dict.pop('request_filter_sections', None)
             validate_policy_options_on_create(driver, listener_dict)
 
             if listener_dict['default_pool_id']:
@@ -557,6 +560,12 @@ class ListenersController(base.BaseController):
 
             self._test_lb_and_listener_statuses(
                 context.session, lb_id=load_balancer_id)
+
+            if 'request_filter_sections' in listener_dict:
+                self._validate_listener_request_filters(
+                    context.session, driver, listener_dict['protocol'],
+                    listener_dict['request_filter_sections'], load_balancer_id,
+                    listener.project_id)
 
             db_listener = self._validate_create_listener(
                 context.session, listener_dict, driver)
@@ -812,6 +821,17 @@ class ListenersController(base.BaseController):
                     hostname=pool.backend_tls_hostname,
                     ca_ref=pool.ca_tls_certificate_id)
 
+    def _validate_listener_request_filters(
+            self, session, driver, protocol, sections, lb_id, project_id):
+        if sections is None:
+            raise exceptions.ValidationException(detail=_(
+                'request_filter_sections must be an array.'))
+        if sections:
+            driver_utils.require_listener_request_filters(driver)
+            listener_request_filters.validate_listener(protocol, sections)
+            self.repositories.listener.validate_request_filter_pools(
+                session, sections, lb_id, project_id)
+
     def _validate_https_listener_update(
             self, session, driver, db_listener, updates):
         old_hosts = db_listener.https_virtual_hosts
@@ -953,6 +973,13 @@ class ListenersController(base.BaseController):
                 'default_http_response', db_listener.default_http_response)
             reopening = (listener_dict.get('enabled') is True and
                          not db_listener.enabled)
+            if ('request_filter_sections' in listener_dict or
+                    (reopening and db_listener.request_filter_sections)):
+                self._validate_listener_request_filters(
+                    context.session, driver, db_listener.protocol,
+                    listener_dict.get('request_filter_sections',
+                                      db_listener.request_filter_sections),
+                    load_balancer_id, project_id)
             self._validate_frontend_client_auth_fallback_update(
                 db_listener, listener_dict, driver, reopening)
             self._validate_tcp_tls_update(context.session, db_listener,

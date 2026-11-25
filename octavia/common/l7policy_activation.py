@@ -24,6 +24,7 @@ from octavia.api.v2.types import listener as listener_types
 from octavia.api.v2.types import load_balancer
 from octavia.common import constants
 from octavia.common import exceptions
+from octavia.common import listener_request_filters
 from octavia.common import validate
 
 
@@ -83,7 +84,9 @@ def snapshot(session, repositories, lb, listener, *, pending=False):
     repo = repositories.l7policy
     policies = repo.get_listener_policies_for_update(session, listener.id)
     repo.load_activation_references(session, policies)
-    pool_ids = {listener.default_pool_id}
+    auth_pool_ids = listener_request_filters.pool_ids(
+        listener.request_filter_sections)
+    pool_ids = {listener.default_pool_id, *auth_pool_ids}
     snapshots = []
     for policy in policies:
         if (policy.project_id != lb.project_id or
@@ -103,7 +106,10 @@ def snapshot(session, repositories, lb, listener, *, pending=False):
     for pool_id in sorted(pool_ids):
         pool = pools.get(pool_id)
         if (pool is None or pool.project_id != lb.project_id or
-                pool.provisioning_status == constants.DELETED):
+                pool.provisioning_status == constants.DELETED or
+                (pool_id in auth_pool_ids and
+                 (pool.provisioning_status == constants.PENDING_DELETE or
+                  not listener_request_filters.valid_pool(pool)))):
             raise exceptions.L7PolicyActivationConflict()
         members = sorted(
             (m for m in pool.members if m.provisioning_status !=

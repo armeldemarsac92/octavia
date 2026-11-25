@@ -41,11 +41,12 @@ def get_haproxy_capabilities():
     strict_dns = 'HAProxy version 3.0.19-ade9c1262-octavia-strict-dns-v1'
     backend_sans = f'{strict_dns}-h2-alpn-v1-backend-sans-v1'
     http_request_policy = f'{backend_sans}-http-policy-v1'
-    http_request_mirror_build = f'{http_request_policy}-http-mirror-v1 '
+    http_request_mirror = f'{http_request_policy}-http-mirror-v1'
+    listener_auth_build = f'{http_request_mirror}-listener-auth-v1 '
     strict_dns_builds = (
         f'{strict_dns} ', f'{strict_dns}-h2-alpn-v1 ',
         f'{backend_sans} ', f'{http_request_policy} ',
-        http_request_mirror_build,
+        f'{http_request_mirror} ', listener_auth_build,
     )
     if not output.startswith(strict_dns_builds):
         return capabilities
@@ -58,8 +59,13 @@ def get_haproxy_capabilities():
             constants.GATEWAY_CAPABILITY_BACKEND_TLS_SUBJECT_ALT_NAMES] = True
     if output.startswith(strict_dns_builds[3:]):
         capabilities[constants.GATEWAY_CAPABILITY_HTTP_REQUEST_POLICY] = True
-    if output.startswith(http_request_mirror_build):
+    if output.startswith(strict_dns_builds[4:]):
         capabilities[constants.GATEWAY_CAPABILITY_HTTP_REQUEST_MIRROR] = True
+    if (output.startswith(listener_auth_build) and
+            re.search(r'^\s*\[OCTAVIA\] octavia-auth\s*$', output, re.M)):
+        capabilities[
+            constants.GATEWAY_CAPABILITY_LISTENER_REQUEST_FILTERS
+        ] = True
     return capabilities
 
 

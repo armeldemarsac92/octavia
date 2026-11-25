@@ -72,6 +72,7 @@ Response Parameters
    - protocol_port: protocol_port
    - tcp_tls_termination: tcp_tls_termination
    - tcp_tls_mixed_mode: tcp_tls_mixed_mode
+   - request_filter_sections: request_filter_sections
    - provisioning_status: provisioning_status
    - sni_container_refs: sni_container_refs
    - tags: tags
@@ -129,6 +130,28 @@ specifying the additional elements or attributes in the request.
 To create a listener, the parent load balancer must have an ``ACTIVE``
 provisioning status.
 
+Regions advertising ``listener_request_filters_v1`` support the
+``request_filter_sections`` field on HTTP and TERMINATED_HTTPS listeners.
+Each section has a ``hostname`` and can have ``reject: true`` for a local 403
+or a ``requests`` array executed in order. A section without requests or a
+reject bypasses the default section. The listener selects a section once
+using the original HTTP authority or TLS SNI. Exact names precede wildcard
+suffixes, longer suffixes precede shorter ones, and ``*`` is the default.
+If no section matches, the listener returns 404 for HTTP or 421 for
+terminated HTTPS before selecting a route.
+
+Each request filter has ``type: ExternalAuth`` and an ``http`` object with
+``pool_id``. The authorization pool must use plain HTTP, carry the tag
+``gw-api-listener-auth-pool-v1`` and be in the same load balancer and project.
+The ``http`` object can also contain ``path_prefix``,
+``allowed_request_headers`` and ``allowed_response_headers``. The authorizer
+receives the request method, path and query, Host, Authorization when present
+and Content-Length 0. The request header allow list adds to these defaults.
+An empty response header allow list copies all response headers that may be
+applied to the original request. Host, authority and HTTP framing are retained.
+Only a 200 response from every configured authorizer allows routing.
+
+
 .. rest_status_code:: success ../http-status.yaml
 
    - 201
@@ -173,6 +196,7 @@ Request
    - protocol_port: protocol_port
    - tcp_tls_termination: tcp_tls_termination
    - tcp_tls_mixed_mode: tcp_tls_mixed_mode
+   - request_filter_sections: request_filter_sections
    - sni_container_refs: sni_container_refs-optional
    - tags: tags-optional
    - timeout_client_data: timeout_client_data-optional
@@ -305,6 +329,7 @@ Response Parameters
    - protocol_port: protocol_port
    - tcp_tls_termination: tcp_tls_termination
    - tcp_tls_mixed_mode: tcp_tls_mixed_mode
+   - request_filter_sections: request_filter_sections
    - provisioning_status: provisioning_status
    - sni_container_refs: sni_container_refs
    - tags: tags
@@ -392,6 +417,7 @@ Response Parameters
    - protocol_port: protocol_port
    - tcp_tls_termination: tcp_tls_termination
    - tcp_tls_mixed_mode: tcp_tls_mixed_mode
+   - request_filter_sections: request_filter_sections
    - provisioning_status: provisioning_status
    - sni_container_refs: sni_container_refs
    - tags: tags
@@ -459,6 +485,7 @@ Request
    - insert_headers: insert_headers-optional
    - listener_id: path-listener-id
    - name: name-optional
+   - request_filter_sections: request_filter_sections
    - sni_container_refs: sni_container_refs-optional
    - tags: tags-optional
    - timeout_client_data: timeout_client_data-optional
@@ -512,6 +539,7 @@ Response Parameters
    - protocol_port: protocol_port
    - tcp_tls_termination: tcp_tls_termination
    - tcp_tls_mixed_mode: tcp_tls_mixed_mode
+   - request_filter_sections: request_filter_sections
    - provisioning_status: provisioning_status
    - sni_container_refs: sni_container_refs
    - tags: tags
