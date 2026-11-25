@@ -1120,6 +1120,19 @@ class PoolRepository(BaseRepository):
                 pool.provisioning_status != consts.ERROR)).update(
                     {'provisioning_status': consts.ACTIVE})
 
+    def get_on_load_balancer_for_update(self, session, lb_id, project_id,
+                                        pool_id):
+        pool = (session.query(self.model_class)
+                .filter_by(id=pool_id, project_id=project_id,
+                           load_balancer_id=lb_id)
+                .filter(self.model_class.provisioning_status.notin_(
+                    (consts.PENDING_DELETE, consts.DELETED)))
+                .populate_existing().with_for_update().first())
+        if pool is None:
+            raise exceptions.NotFound(
+                resource=data_models.Pool._name(), id=pool_id)
+        return pool
+
     def get_transport_for_update(self, session, pool_id):
         # Read current values after locking the load balancer. The initial
         # pool read may be from an older REPEATABLE READ snapshot.
@@ -1130,6 +1143,7 @@ class PoolRepository(BaseRepository):
                              pool.backend_tls_subject_alt_names,
                              pool.ca_tls_certificate_id,
                              pool.crl_container_id,
+                             pool.alpn_protocols,
                              _pool_has_gateway_backend_tls_tag().label(
                                  'gateway_backend_tls_tagged'))
                .filter(pool.id == pool_id,
@@ -1156,6 +1170,7 @@ class PoolRepository(BaseRepository):
         query_options = (
             subqueryload(models.Pool._default_listeners),
             subqueryload(models.Pool._request_filter_listeners),
+            subqueryload(models.Pool._otlp_tracing_listeners),
             subqueryload(models.Pool.health_monitor),
             subqueryload(models.Pool.l7policies),
             (subqueryload(models.Pool.l7policies).
@@ -1271,6 +1286,38 @@ class ListenerRepository(BaseRepository):
                 raise exceptions.ValidationException(detail=_(
                     'Listener authorization requires a managed plain HTTP '
                     'pool.'))
+
+    def get_otlp_tracing_listener_using_pool(self, session, pool_id):
+        refs = models.ListenerOtlpCollectorPool
+        return (session.query(refs.listener_id).filter_by(pool_id=pool_id)
+                .with_for_update().limit(1).scalar())
+
+    def set_otlp_tracing_statuses(self, session, statuses):
+        model = self.model_class
+        listeners = (session.query(model).filter(
+            model.id.in_(statuses),
+            model.provisioning_status.notin_(
+                (consts.PENDING_DELETE, consts.DELETED)))
+            .options(lazyload('*')).populate_existing()
+            .order_by(model.id).with_for_update())
+        for listener in listeners:
+            tracing, status = statuses[listener.id]
+            if tracing == listener.otlp_tracing:
+                listener.otlp_tracing_status = status
+
+    @staticmethod
+    def _set_otlp_collector_pool(session, listener_id, tracing):
+        ref = (session.query(models.ListenerOtlpCollectorPool)
+               .filter_by(listener_id=listener_id)
+               .with_for_update().one_or_none())
+        if tracing is None:
+            if ref is not None:
+                session.delete(ref)
+        elif ref is None:
+            session.add(models.ListenerOtlpCollectorPool(
+                listener_id=listener_id, pool_id=tracing['collector_pool_id']))
+        else:
+            ref.pool_id = tracing['collector_pool_id']
 
     def get_request_filter_listener_using_pool(self, session, pool_id):
         refs = models.ListenerRequestFilterPool
@@ -1400,6 +1447,15 @@ class ListenerRepository(BaseRepository):
                 (consts.PENDING_DELETE, consts.DELETED))).with_for_update())
         return any(sections for sections, in rows)
 
+    def has_enabled_otlp_tracing(self, session, lb_id):
+        listener = self.model_class
+        query = session.query(listener.id).filter(
+            listener.load_balancer_id == lb_id, listener.enabled.is_(True),
+            listener.otlp_tracing.is_not(None),
+            listener.provisioning_status.notin_(
+                (consts.PENDING_DELETE, consts.DELETED)))
+        return query.with_for_update().first() is not None
+
     def has_enabled_frontend_client_auth_fallback(self, session, lb_id):
         model = self.model_class
         return (session.query(model.id).filter(
@@ -1490,6 +1546,12 @@ class ListenerRepository(BaseRepository):
                 listener_db.allowed_cidrs = [
                     models.ListenerCidr(listener_id=id, cidr=cidr)
                     for cidr in allowed_cidrs]
+        if 'otlp_tracing' in model_kwargs:
+            self._set_otlp_collector_pool(session, id,
+                                          model_kwargs['otlp_tracing'])
+            model_kwargs['otlp_tracing_status'] = (
+                consts.PENDING_UPDATE if model_kwargs['otlp_tracing'] else
+                None)
         if 'request_filter_sections' in model_kwargs:
             self._replace_request_filter_pool_refs(
                 session, id, model_kwargs['request_filter_sections'])
@@ -1505,6 +1567,8 @@ class ListenerRepository(BaseRepository):
             models.ListenerCidr(listener_id=listener_id, cidr=cidr)
             for cidr in allowed_cidrs]
         model = self.model_class(**model_kwargs)
+        if model.otlp_tracing:
+            model.otlp_tracing_status = consts.PENDING_UPDATE
         if model.default_pool_id:
             model.default_pool = self._pool_check(
                 session, model.default_pool_id,
@@ -1513,8 +1577,12 @@ class ListenerRepository(BaseRepository):
             model.peer_port = self._find_next_peer_port(
                 session, lb_id=model.load_balancer_id)
         session.add(model)
-        if model.request_filter_sections:
+        if model.request_filter_sections or model.otlp_tracing:
             session.flush()
+        if model.otlp_tracing:
+            self._set_otlp_collector_pool(session, listener_id,
+                                          model.otlp_tracing)
+        if model.request_filter_sections:
             self._replace_request_filter_pool_refs(
                 session, listener_id, model.request_filter_sections)
         return model.to_data_model()
@@ -2248,16 +2316,8 @@ class L7PolicyRepository(BaseRepository):
                 resource=data_models.Pool._name(), id=pool_id)
 
     def get_redirect_pool_for_update(self, session, listener, pool_id):
-        pool = (session.query(models.Pool)
-                .filter_by(id=pool_id, project_id=listener.project_id,
-                           load_balancer_id=listener.load_balancer_id)
-                .filter(models.Pool.provisioning_status.notin_(
-                    (consts.PENDING_DELETE, consts.DELETED)))
-                .populate_existing().with_for_update().first())
-        if pool is None:
-            raise exceptions.NotFound(
-                resource=data_models.Pool._name(), id=pool_id)
-        return pool
+        return PoolRepository().get_on_load_balancer_for_update(
+            session, listener.load_balancer_id, listener.project_id, pool_id)
 
     def get_active_protected_tcp_policy_pools(self, session, listener_id):
         policy = self.model_class

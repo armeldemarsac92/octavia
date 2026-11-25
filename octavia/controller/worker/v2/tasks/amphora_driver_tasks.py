@@ -51,6 +51,18 @@ def _retry_render(operation, *args):
     return wait_for_render(operation, *args)
 
 
+def _serialize_render(operation, loadbalancer_id, *args):
+    """Hold the per-LB lock from the fresh graph read through publication."""
+    def publish():
+        with db_apis.listener_render_lock(loadbalancer_id) as acquired:
+            if not acquired:
+                raise driver_except.ListenerRenderLockBusy()
+            return operation(loadbalancer_id, *args)
+
+    if loadbalancer_id:
+        return _retry_render(publish)
+
+
 class BaseAmphoraTask(task.Task):
     """Base task to load drivers common to the tasks."""
 
@@ -91,11 +103,16 @@ class AmpListenersUpdate(BaseAmphoraTask):
     """Task to update the listeners on one amphora."""
 
     def execute(self, loadbalancer, amphora, timeout_dict=None):
+        lb_id = loadbalancer[constants.LOADBALANCER_ID]
+        _serialize_render(self._update, lb_id, amphora, timeout_dict)
+
+    def _update(self, loadbalancer_id, amphora, timeout_dict):
         # Note, we don't want this to cause a revert as it may be used
         # in a failover flow with both amps failing. Skip it and let
         # health manager fix it.
         # TODO(johnsom) Optimize this to use the dicts and not need the
         #               DB lookups
+        db_amp = None
         try:
             session = db_apis.get_session()
             with session.begin():
@@ -103,16 +120,17 @@ class AmpListenersUpdate(BaseAmphoraTask):
                                                id=amphora[constants.ID])
                 db_lb = self.loadbalancer_repo.get(
                     session,
-                    id=loadbalancer[constants.LOADBALANCER_ID])
+                    id=loadbalancer_id)
             self.amphora_driver.update_amphora_listeners(
                 db_lb, db_amp, timeout_dict)
         except Exception as e:
             LOG.error('Failed to update listeners on amphora %s. Skipping '
                       'this amphora as it is failing to update due to: %s',
-                      db_amp.id, str(e))
-            with session.begin():
-                self.amphora_repo.update(session, db_amp.id,
-                                         status=constants.ERROR)
+                      amphora[constants.ID], str(e))
+            if db_amp is not None:
+                with session.begin():
+                    self.amphora_repo.update(session, db_amp.id,
+                                             status=constants.ERROR)
 
 
 class AmphoraIndexListenerUpdate(BaseAmphoraTask):
@@ -120,10 +138,17 @@ class AmphoraIndexListenerUpdate(BaseAmphoraTask):
 
     def execute(self, loadbalancer, amphora_index, amphorae,
                 amphorae_status: dict, new_amphora_id: str, timeout_dict=()):
+        lb_id = loadbalancer[constants.LOADBALANCER_ID]
+        _serialize_render(self._update, lb_id, amphora_index, amphorae,
+                          amphorae_status,
+                          new_amphora_id, timeout_dict)
+
+    def _update(self, loadbalancer_id, amphora_index, amphorae,
+                amphorae_status, new_amphora_id, timeout_dict):
         session = db_apis.get_session()
         with session.begin():
             db_lb = self.loadbalancer_repo.get(
-                session, id=loadbalancer[constants.LOADBALANCER_ID])
+                session, id=loadbalancer_id)
         try:
             if self.amphora_driver.update_failover_listeners(
                     db_lb, amphora_index, amphorae_status,
@@ -174,23 +199,15 @@ class ListenersUpdate(BaseAmphoraTask):
 
     def execute(self, loadbalancer_id):
         """Execute updates per listener for an amphora."""
-        if not CONF.api_settings.enabled_l7policy_batch_activation_providers:
-            self._update(loadbalancer_id, guard_batch=False)
-            return
+        _serialize_render(self._update, loadbalancer_id)
 
-        _retry_render(self._locked_update, loadbalancer_id)
-
-    def _locked_update(self, loadbalancer_id):
-        with db_apis.listener_render_lock(loadbalancer_id) as lock:
-            if not lock:
-                raise driver_except.ListenerRenderLockBusy()
-            self._update(loadbalancer_id, guard_batch=True)
-
-    def _update(self, loadbalancer_id, *, guard_batch):
+    def _update(self, loadbalancer_id):
         session = db_apis.get_session()
         with session.begin():
-            if (guard_batch and self.loadbalancer_repo.batch_owns_graph(
-                    session, loadbalancer_id)):
+            guard_batch = (
+                CONF.api_settings.enabled_l7policy_batch_activation_providers)
+            if guard_batch and self.loadbalancer_repo.batch_owns_graph(
+                    session, loadbalancer_id):
                 return
             loadbalancer = self.loadbalancer_repo.get(session,
                                                       id=loadbalancer_id)
@@ -222,7 +239,10 @@ class ApplyL7PolicyWithInitialRules(BaseAmphoraTask):
         self.l7rule_repo = repo.L7RuleRepository()
 
     def execute(self, l7policy):
-        lb_id = l7policy[constants.LOADBALANCER_ID]
+        _serialize_render(self._apply, l7policy[constants.LOADBALANCER_ID],
+                          l7policy)
+
+    def _apply(self, lb_id, l7policy):
         policy_id = l7policy[constants.L7POLICY_ID]
         expected_ids = {rule[constants.L7RULE_ID]
                         for rule in l7policy['rules']}
@@ -434,10 +454,14 @@ class ListenersStart(BaseAmphoraTask):
 
     def execute(self, loadbalancer, amphora=None):
         """Execute listener start routines for listeners on an amphora."""
+        _serialize_render(self._start, loadbalancer[constants.LOADBALANCER_ID],
+                          amphora)
+
+    def _start(self, loadbalancer_id, amphora):
         session = db_apis.get_session()
         with session.begin():
             db_lb = self.loadbalancer_repo.get(
-                session, id=loadbalancer[constants.LOADBALANCER_ID])
+                session, id=loadbalancer_id)
         if db_lb.listeners:
             if amphora is not None:
                 with session.begin():
@@ -468,7 +492,13 @@ class AmphoraIndexListenersReload(BaseAmphoraTask):
         """Execute listener reload routines for listeners on an amphora."""
         if amphorae is None:
             return
+        lb_id = loadbalancer[constants.LOADBALANCER_ID]
+        _serialize_render(self._reload, lb_id, amphora_index, amphorae,
+                          amphorae_status,
+                          new_amphora_id, timeout_dict)
 
+    def _reload(self, loadbalancer_id, amphora_index, amphorae,
+                amphorae_status, new_amphora_id, timeout_dict):
         amphora_id = amphorae[amphora_index].get(constants.ID)
         amphora_status = amphorae_status.get(amphora_id, {})
         if amphora_status.get(constants.UNREACHABLE):
@@ -484,7 +514,7 @@ class AmphoraIndexListenersReload(BaseAmphoraTask):
                 session, id=amphorae[amphora_index][constants.ID])
             db_lb = self.loadbalancer_repo.get(
                 session,
-                id=loadbalancer[constants.LOADBALANCER_ID])
+                id=loadbalancer_id)
         if db_lb.listeners:
             try:
                 self.amphora_driver.reload(db_lb, db_amp, timeout_dict)
@@ -505,10 +535,16 @@ class ListenerDelete(BaseAmphoraTask):
 
     def execute(self, listener):
         """Execute listener delete routines for an amphora."""
+        _serialize_render(self._delete, listener[constants.LOADBALANCER_ID],
+                          listener[constants.LISTENER_ID])
+
+    def _delete(self, loadbalancer_id, listener_id):
         session = db_apis.get_session()
         with session.begin():
             db_listener = self.listener_repo.get(
-                session, id=listener[constants.LISTENER_ID])
+                session, id=listener_id)
+        if db_listener is None:
+            return
         self.amphora_driver.delete(db_listener)
         LOG.debug("Deleted the listener on the vip")
 

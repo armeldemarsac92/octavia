@@ -17,7 +17,7 @@
 
 
 {% from 'macros.j2' import frontend_macro, mixed_tls_frontend_macro, backend_macro, closed_backend_macro, fixed_response_backend_macro, request_redirect_backend_macro %}
-{% from 'macros.j2' import listener_auth_delivery_macro, mirror_delivery_macro, peers_macro %}
+{% from 'macros.j2' import listener_auth_delivery_macro, mirror_delivery_macro, otlp_tracing_delivery_macro, peers_macro %}
 
 
 {% set loadbalancer_id = loadbalancer.id %}
@@ -57,6 +57,9 @@ backend prometheus-exporter-internal
              {% else %}
              {{- frontend_macro(constants, lib_consts, listener, loadbalancer.vip_address,
                                 loadbalancer.additional_vips) }}
+             {% endif %}
+             {% if listener.otlp_tracing is defined %}
+               {{- otlp_tracing_delivery_macro(constants, lib_consts, listener, state_file) }}
              {% endif %}
              {% if listener.default_http_status_code is defined %}
                {{- fixed_response_backend_macro(constants, listener, 'default',

@@ -795,6 +795,23 @@ class PoolsController(base.BaseController):
                 if filter_listener_id:
                     raise exceptions.PoolInUseByListenerRequestFilter(
                         id=id, listener_id=filter_listener_id)
+            pool_dict = pool.to_dict(render_unsets=False)
+            transport_fields = {
+                'backend_h2c', 'backend_tls_require_h2', 'tls_enabled',
+                'alpn_protocols'}
+            if transport_fields.intersection(pool_dict):
+                tracing_listener_id = (
+                    listener_repo.get_otlp_tracing_listener_using_pool(
+                        context.session, id))
+                if tracing_listener_id:
+                    validate.validate_otlp_collector_transport(
+                        current.protocol,
+                        pool_dict.get('backend_h2c', current.backend_h2c),
+                        pool_dict.get('backend_tls_require_h2',
+                                      current.backend_tls_require_h2),
+                        pool_dict.get('tls_enabled', current.tls_enabled),
+                        pool_dict.get('alpn_protocols',
+                                      current.alpn_protocols))
             self._validate_pool_PUT(pool, current)
             self._validate_tcp_listener_pool_update(
                 context.session, id, current, pool, driver)
@@ -803,7 +820,6 @@ class PoolsController(base.BaseController):
                 db_pool.load_balancer_id)
 
             # Prepare the data for the driver data model
-            pool_dict = pool.to_dict(render_unsets=False)
             pool_dict['id'] = id
             pool_dict['project_id'] = project_id
             provider_pool_dict = driver_utils.pool_dict_to_provider_dict(
@@ -870,6 +886,12 @@ class PoolsController(base.BaseController):
             if filter_listener_id:
                 raise exceptions.PoolInUseByListenerRequestFilter(
                     id=id, listener_id=filter_listener_id)
+            tracing_listener_id = (
+                listener_repo.get_otlp_tracing_listener_using_pool(
+                    context.session, db_pool.id))
+            if tracing_listener_id:
+                raise exceptions.PoolInUseByListenerOtlpTracing(
+                    id=id, listener_id=tracing_listener_id)
             policy_repo = self.repositories.l7policy
             policy_id = (policy_repo.get_weighted_policy_using_pool(
                 context.session, db_pool.id) or

@@ -16,6 +16,53 @@ to list listeners for other projects.
 
 The list might be empty.
 
+OTLP tracing
+------------
+
+HTTP and TERMINATED_HTTPS listeners on a provider advertising
+``listener_otlp_tracing_v1`` can enable tracing with ``otlp_tracing``. Supply
+all three fields in a standalone listener create or update request::
+
+    {
+      "listener": {
+        "otlp_tracing": {
+          "collector_pool_id": "37a4d256-440f-4b10-9db4-f180927fe5c6",
+          "service_name": "team/gateway",
+          "span_name": "Gateway HTTP"
+        }
+      }
+    }
+
+The collector pool must already exist in the listener's project and load
+balancer. Use an HTTP pool with HTTP/1.1 transport. Amphora uses its members,
+load-balancing algorithm, health monitor and TLS configuration. Plain HTTP
+and TLS use the same OTLP/HTTP JSON endpoint, ``POST /v1/traces``. The request
+authority is ``otlp.internal``. Client-supplied headers cannot configure the
+export destination.
+
+``service_name`` accepts 1–253 characters from ``A-Z a-z 0-9 _ . : / -``.
+``span_name`` accepts the same characters and single internal spaces,
+up to 256 characters. Amphora creates a SERVER span for each HTTP request,
+uses a valid incoming W3C ``traceparent`` as its parent and propagates the new
+context. Exports use a bounded per-listener queue. A full queue or failed
+export drops that span.
+
+Omitting the field on update preserves its value. Sending ``null`` clears
+the setting and releases the collector pool reference. Once cleared, a
+response may omit the field if regional opt-in is off. Deleting a referenced
+pool returns HTTP 409. An otherwise valid enrollment returns HTTP 501 when
+the provider lacks the capability. This contract has no sampling-ratio,
+export-header or additional-attribute options.
+
+Read the collector publication state in ``otlp_tracing_status``. It is
+PENDING_UPDATE while applying a tracing request, ACTIVE once Amphora has
+published the configuration, and ERROR when collector TLS setup failed.
+The application listener can keep serving while collector TLS is closed.
+Retry the same tracing object with PUT after a TLS error. A successful
+render on all current Amphorae restores ACTIVE. ACTIVE describes the
+configuration and TLS material applied by Octavia. Use collector health
+or telemetry to monitor live delivery.
+
 .. rest_status_code:: success ../http-status.yaml
 
    - 200
@@ -73,6 +120,8 @@ Response Parameters
    - tcp_tls_termination: tcp_tls_termination
    - tcp_tls_mixed_mode: tcp_tls_mixed_mode
    - request_filter_sections: request_filter_sections
+   - otlp_tracing: otlp_tracing
+   - otlp_tracing_status: otlp_tracing_status
    - provisioning_status: provisioning_status
    - sni_container_refs: sni_container_refs
    - tags: tags
@@ -197,6 +246,7 @@ Request
    - tcp_tls_termination: tcp_tls_termination
    - tcp_tls_mixed_mode: tcp_tls_mixed_mode
    - request_filter_sections: request_filter_sections
+   - otlp_tracing: otlp_tracing
    - sni_container_refs: sni_container_refs-optional
    - tags: tags-optional
    - timeout_client_data: timeout_client_data-optional
@@ -330,6 +380,8 @@ Response Parameters
    - tcp_tls_termination: tcp_tls_termination
    - tcp_tls_mixed_mode: tcp_tls_mixed_mode
    - request_filter_sections: request_filter_sections
+   - otlp_tracing: otlp_tracing
+   - otlp_tracing_status: otlp_tracing_status
    - provisioning_status: provisioning_status
    - sni_container_refs: sni_container_refs
    - tags: tags
@@ -418,6 +470,8 @@ Response Parameters
    - tcp_tls_termination: tcp_tls_termination
    - tcp_tls_mixed_mode: tcp_tls_mixed_mode
    - request_filter_sections: request_filter_sections
+   - otlp_tracing: otlp_tracing
+   - otlp_tracing_status: otlp_tracing_status
    - provisioning_status: provisioning_status
    - sni_container_refs: sni_container_refs
    - tags: tags
@@ -486,6 +540,7 @@ Request
    - listener_id: path-listener-id
    - name: name-optional
    - request_filter_sections: request_filter_sections
+   - otlp_tracing: otlp_tracing
    - sni_container_refs: sni_container_refs-optional
    - tags: tags-optional
    - timeout_client_data: timeout_client_data-optional
@@ -540,6 +595,8 @@ Response Parameters
    - tcp_tls_termination: tcp_tls_termination
    - tcp_tls_mixed_mode: tcp_tls_mixed_mode
    - request_filter_sections: request_filter_sections
+   - otlp_tracing: otlp_tracing
+   - otlp_tracing_status: otlp_tracing_status
    - provisioning_status: provisioning_status
    - sni_container_refs: sni_container_refs
    - tags: tags

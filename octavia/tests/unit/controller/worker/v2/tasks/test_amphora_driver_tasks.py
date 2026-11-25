@@ -89,6 +89,10 @@ class TestAmphoraDriverTasks(base.TestCase):
                              constants.CONN_MAX_RETRIES: 3,
                              constants.CONN_RETRY_INTERVAL: 4}
         super().setUp()
+        render_lock = mock.patch('octavia.db.api.listener_render_lock')
+        self.render_lock = render_lock.start()
+        self.render_lock.return_value.__enter__.return_value = True
+        self.addCleanup(render_lock.stop)
 
     @mock.patch('octavia.db.repositories.LoadBalancerRepository.get')
     def test_amp_listeners_update(self,
@@ -218,11 +222,13 @@ class TestAmphoraDriverTasks(base.TestCase):
                               mock_amphora_repo_update):
         listeners_update_obj = amphora_driver_tasks.ListenersUpdate()
         LB_ID = 'lb1'
-        listeners = [data_models.Listener(id='listener1'),
-                     data_models.Listener(id='listener2')]
+        listeners = [
+            data_models.Listener(id='listener1', otlp_tracing={
+                'collector_pool_id': 'former-collector'}),
+            data_models.Listener(id='listener2')]
         vip = data_models.Vip(ip_address='10.0.0.1')
         lb = data_models.LoadBalancer(id=LB_ID, listeners=listeners, vip=vip)
-        mock_lb_get.side_effect = [lb, None, lb]
+        mock_lb_get.side_effect = [lb, lb]
         listeners_update_obj.execute(lb.id)
         mock_driver.update.assert_called_once_with(lb)
         self.assertEqual(1, mock_driver.update.call_count)
@@ -247,24 +253,42 @@ class TestAmphoraDriverTasks(base.TestCase):
         self.assertIsNone(amp)
 
         conf = self.useFixture(oslo_fixture.Config(cfg.CONF))
-        conf.config(group='api_settings',
-                    enabled_l7policy_batch_activation_providers=['amphora'])
         conf.config(group='haproxy_amphora', connection_max_retries=2,
                     connection_retry_interval=0)
         mock_lb_get.side_effect = None
         mock_lb_get.return_value = lb
-        with (mock.patch('octavia.db.api.listener_render_lock') as lock,
-              mock.patch.object(repo.LoadBalancerRepository,
-                                'batch_owns_graph', return_value=False)):
-            lock.return_value.__enter__.side_effect = [False, True]
+        with mock.patch.object(repo.LoadBalancerRepository,
+                               'batch_owns_graph') as owns_graph:
+            self.render_lock.reset_mock()
+            lock_context = self.render_lock.return_value
+            lock_context.__enter__.side_effect = [False, True]
+            listeners[0].otlp_tracing = None
+            calls = mock.Mock()
+            calls.attach_mock(lock_context.__enter__, 'lock')
+            calls.attach_mock(lock_context.__exit__, 'unlock')
+            calls.attach_mock(mock_lb_get, 'read')
+            calls.attach_mock(mock_driver.update, 'publish')
             listeners_update_obj.execute(lb.id)
-            self.assertEqual(2, lock.call_count)
+            self.assertEqual(
+                ['lock', 'unlock', 'lock', 'read', 'publish', 'unlock'],
+                [call[0] for call in calls.mock_calls])
             mock_driver.update.assert_called_once_with(lb)
+            published_lb = mock_driver.update.call_args.args[0]
+            self.assertIsNone(published_lb.listeners[0].otlp_tracing)
+            owns_graph.assert_not_called()
 
             mock_driver.update.reset_mock()
-            lock.return_value.__enter__.side_effect = [False, False]
+            lock_context.__enter__.side_effect = [False, False]
             self.assertRaises(driver_except.ListenerRenderLockBusy,
                               listeners_update_obj.execute, lb.id)
+            mock_driver.update.assert_not_called()
+
+            conf.config(
+                group='api_settings',
+                enabled_l7policy_batch_activation_providers=['amphora'])
+            lock_context.__enter__.side_effect = None
+            owns_graph.return_value = True
+            listeners_update_obj.execute(lb.id)
             mock_driver.update.assert_not_called()
 
     @mock.patch('octavia.db.repositories.LoadBalancerRepository.get')
@@ -278,6 +302,7 @@ class TestAmphoraDriverTasks(base.TestCase):
         listeners_reload_obj = (
             amphora_driver_tasks.AmphoraIndexListenersReload())
         mock_lb = mock.MagicMock()
+        mock_lb.__getitem__.return_value = LB_ID
         mock_listener = mock.MagicMock()
         mock_listener.id = '12345'
         mock_amphora_repo_get.return_value = _amphora_mock
@@ -386,7 +411,8 @@ class TestAmphoraDriverTasks(base.TestCase):
                              mock_amphora_repo_get,
                              mock_amphora_repo_update):
 
-        listener_dict = {constants.LISTENER_ID: LISTENER_ID}
+        listener_dict = {constants.LISTENER_ID: LISTENER_ID,
+                         constants.LOADBALANCER_ID: LB_ID}
         listener_delete_obj = amphora_driver_tasks.ListenerDelete()
         listener_delete_obj.execute(listener_dict)
 

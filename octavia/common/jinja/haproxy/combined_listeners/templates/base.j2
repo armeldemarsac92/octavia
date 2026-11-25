@@ -39,7 +39,20 @@ global
     nbthread {{ cpu_count - 1 }}
     cpu-map auto:1/1-{{ cpu_count - 1 }} 1-{{ cpu_count - 1 }}
     {% endif %}
+    {% for listener in loadbalancer.listeners if listener.otlp_tracing is defined %}
+    lua-load {{ constants.HAPROXY_OTLP_TRACING_SCRIPT }} {{ listener.id }} {{ listener.otlp_tracing.socket }} {{ listener.otlp_tracing.service_name }} "{{ listener.otlp_tracing.span_name }}"
+    {% endfor %}
     {% set found_ns = namespace(found=false) %}
+    {% for listener in loadbalancer.listeners if listener.get('otlp_tracing', {}).get('pool') %}
+        {% set monitor = listener.otlp_tracing.pool.health_monitor %}
+        {% if monitor and monitor.enabled and monitor.type == constants.HEALTH_MONITOR_PING and not found_ns.found %}
+            {% set found_ns.found = true %}
+    external-check
+            {% if require_insecure_fork %}
+    insecure-fork-wanted
+            {% endif %}
+        {% endif %}
+    {% endfor %}
     {% for pool in loadbalancer.get('listener_auth_pools', []) %}
         {% if pool.health_monitor and pool.health_monitor.enabled and
               pool.health_monitor.type == constants.HEALTH_MONITOR_PING and

@@ -136,6 +136,24 @@ class HAProxyCompatTestCase(base.TestCase):
                 self.assertEqual(expected, result)
 
     @mock.patch.object(haproxy_compatibility.subprocess, 'check_output')
+    @mock.patch.object(haproxy_compatibility.os.path, 'isfile')
+    def test_listener_otlp_tracing_capability(self, isfile, check_output):
+        check_output.return_value = (
+            'HAProxy version 3.0.19-ade9c1262-octavia-strict-dns-v1'
+            '-h2-alpn-v1-backend-sans-v1-http-policy-v1-http-mirror-v1'
+            '-listener-auth-v1-backend-retry-budget-v1-listener-otlp-v1 '
+            '2026/03/19\nFeature list : +OPENSSL +LUA')
+        tracing = constants.GATEWAY_CAPABILITY_LISTENER_OTLP_TRACING
+        isfile.return_value = False
+        self.assertNotIn(tracing,
+                         haproxy_compatibility.get_haproxy_capabilities())
+        isfile.return_value = True
+        features = haproxy_compatibility.get_haproxy_capabilities()
+        self.assertTrue(features[tracing])
+        self.assertTrue(
+            features[constants.GATEWAY_CAPABILITY_BACKEND_RETRY_BUDGET])
+
+    @mock.patch.object(haproxy_compatibility.subprocess, 'check_output')
     def test_frontend_client_auth_fallback_capability(self, check_output):
         capability = (
             constants.GATEWAY_CAPABILITY_FRONTEND_CLIENT_AUTH_INSECURE_FALLBACK)

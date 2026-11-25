@@ -1465,9 +1465,10 @@ class UpdateListenerInDB(BaseDatabaseTask):
         """
 
         # The API stores these along with their pool FKs before the
-        # render. A retried worker must not restore an older filter chain.
+        # render. A retried worker must not restore older pool references.
         update_dict = {key: value for key, value in update_dict.items()
-                       if key != 'request_filter_sections'}
+                       if key not in ('request_filter_sections',
+                                      'otlp_tracing')}
         LOG.debug("Update DB for listener id: %s ",
                   listener[constants.LISTENER_ID])
         with db_apis.session().begin() as session:

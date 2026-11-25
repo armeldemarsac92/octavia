@@ -108,7 +108,8 @@ class HAProxyQuery:
                 not (stat['svname'] == 'FRONTEND' and
                      stat['pxname'].startswith(
                          (consts.HAPROXY_MIRROR_PROXY_PREFIX,
-                          consts.HAPROXY_LISTENER_AUTH_PROXY_PREFIX)))]
+                          consts.HAPROXY_LISTENER_AUTH_PROXY_PREFIX,
+                          consts.HAPROXY_OTLP_TRACING_PROXY_PREFIX)))]
 
     def get_pool_status(self):
         """Get status for each server and the pool as a whole.
@@ -126,9 +127,17 @@ class HAProxyQuery:
                     consts.HAPROXY_LISTENER_AUTH_PROXY_PREFIX)
         for line in results:
             proxy = line['pxname']
-            pool_id, _, listener_id = proxy.partition(':')
+            tracing_proxy = proxy.startswith(
+                consts.HAPROXY_OTLP_TRACING_PROXY_PREFIX)
+            pool_id, _, listener_id = proxy.removeprefix(
+                consts.HAPROXY_OTLP_TRACING_PROXY_PREFIX).partition(':')
             prefix = next((p for p in prefixes if proxy.startswith(p)), None)
-            if prefix:
+            if tracing_proxy:
+                if pool_id in public_pools:
+                    continue
+                key = pool_id
+                listener_id = ''
+            elif prefix:
                 pool_id = proxy.removeprefix(prefix)
                 if pool_id in public_pools:
                     continue

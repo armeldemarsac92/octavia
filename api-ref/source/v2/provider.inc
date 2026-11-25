@@ -418,6 +418,14 @@ the provider name stops advertisement and admission of new h2c settings.
 Existing pools keep their stored setting. Set it to false or drain those
 pools before rolling back the fleet.
 
+``listener_otlp_tracing_v1`` enables listener OTLP/HTTP tracing with Amphora.
+Upgrade regional API services, workers, the database, octavia-lib, and the
+Amphora fleet before adding the provider name to
+``[api_settings] enabled_listener_otlp_tracing_providers``. Removing the
+provider name stops discovery and new enrollment. Existing settings remain
+readable and can be cleared with ``otlp_tracing: null``. Clear existing
+settings before rolling back the Amphora fleet.
+
 ``http_header_exact_v1`` enables ``HTTP_HEADER_EXACT`` rules for HTTP and
 terminated HTTPS listeners. This capability requires the provider name in
 ``[api_settings] enabled_http_header_exact_providers`` after the regional
