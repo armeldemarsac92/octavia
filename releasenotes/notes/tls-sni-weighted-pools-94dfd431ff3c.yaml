@@ -1,0 +1,11 @@
+---
+features:
+  - |
+    Amphora can select weighted TCP pools per connection on terminating TLS
+    SNI routes using ``WEIGHTED_TARGETS``. Unavailable pools retain their
+    configured share and close those connections. Pools can independently
+    use plaintext or authenticated backend TLS. After qualifying HAProxy
+    2.2 or newer in the region, enroll the provider in
+    ``[api_settings] enabled_tls_sni_weighted_pool_providers`` to advertise
+    ``tls_sni_weighted_pools_v1``. Mixed-mode listeners require HAProxy 3.0
+    or newer.

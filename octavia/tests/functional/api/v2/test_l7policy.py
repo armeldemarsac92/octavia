@@ -4497,6 +4497,209 @@ class TestL7Policy(base.BaseAPITest):
 
     @mock.patch('octavia.common.tls_utils.cert_parser.load_certificates_data')
     @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
+    def test_tls_sni_weighted_pool_admission_and_withdrawal(self, rpc, certs):
+        certs.return_value = {
+            'tls_cert': data_models.TLSContainer(certificate='test')}
+        self.conf.config(
+            group='api_settings',
+            enabled_tcp_tls_termination_providers=['amphora'],
+            enabled_l7policy_initial_rules_providers=['amphora'])
+        lb = self.create_load_balancer(
+            uuidutils.generate_uuid(), provider='amphora')['loadbalancer']
+        lb_id = lb['id']
+        listener_args = {
+            'tcp_tls_termination': True,
+            'default_tls_container_ref': uuidutils.generate_uuid(),
+        }
+        self.set_lb_status(lb_id)
+        listener = self.create_listener(
+            'TCP', 443, lb_id, **listener_args)['listener']
+        self.set_lb_status(lb_id)
+        first = self.create_pool(lb_id, 'TCP', 'ROUND_ROBIN')['pool']
+        self.set_lb_status(lb_id)
+        second = self.create_pool(
+            lb_id, 'TCP', 'ROUND_ROBIN', admin_state_up=False)['pool']
+        self.set_lb_status(lb_id)
+        action = 'WEIGHTED_TARGETS'
+        listener_id = listener['id']
+        targets = [{'pool_id': first['id'], 'weight': 4},
+                   {'pool_id': second['id'], 'weight': 1},
+                   {'pool_id': second['id'], 'weight': 0}]
+        rule = {'type': 'TLS_SNI', 'compare_type': 'EQUAL_TO',
+                'value': 'a.example.test'}
+        capability = 'tls_sni_weighted_pools_v1'
+        capability_path = self.PROVIDERS_PATH + '/{}/gateway_capabilities'
+        self.assertNotIn(capability, self.get(capability_path.format(
+            'amphora')).json['gateway_capabilities'])
+        self.create_l7policy(listener_id, action, targets=targets, status=501)
+
+        self.conf.config(group='api_settings',
+                         enabled_tls_sni_weighted_pool_providers=[
+                             'amphora', 'noop_driver'])
+        self.assertIn(capability, self.get(capability_path.format(
+            'amphora')).json['gateway_capabilities'])
+        self.assertNotIn(capability, self.get(capability_path.format(
+            'noop_driver')).json['gateway_capabilities'])
+        self.create_l7policy(listener_id, action, targets=[
+            {'fixed_response': {'status_code': 503}, 'weight': 1}], status=400)
+        self.create_l7policy(listener_id, action, targets=[
+            {'pool_id': self.pool_id, 'weight': 1}], status=404)
+        self.create_l7policy(listener_id, action, targets=targets,
+                             tcp_tls_passthrough=True, status=400)
+        self.create_l7policy(
+            listener_id, action, targets=targets, admin_state_up=False,
+            rules=[dict(rule, type='HOST_NAME')], status=400)
+        policy = self.create_l7policy(
+            listener_id, action, targets=targets, admin_state_up=False,
+            rules=[rule])['l7policy']
+        self.assertEqual(targets, policy['targets'])
+        self.assertEqual(targets, rpc.return_value.cast.call_args.kwargs[
+            'l7policy']['targets'])
+        path = self.L7POLICY_PATH.format(l7policy_id=policy['id'])
+        pool_path = self.POOL_PATH.format(pool_id=second['id'])
+        self.set_lb_status(lb_id)
+        self.put(path, {'l7policy': {'admin_state_up': True}})
+        self.set_lb_status(lb_id)
+        self.delete(pool_path, status=409)
+        self.put(pool_path, {'pool': {'tls_enabled': True}}, status=400)
+        with mock.patch(
+                'octavia.api.drivers.amphora_driver.v2.driver.'
+                'AmphoraProviderDriver.create_vip_port') as create_vip:
+            self.post(self.LBS_PATH, {'loadbalancer': dict(
+                vip_subnet_id=uuidutils.generate_uuid(),
+                project_id=lb['project_id'], provider='amphora',
+                listeners=[dict(listener_args, protocol='TCP',
+                                protocol_port=443, l7policies=[{
+                                    'action': action, 'targets': targets,
+                                    'rules': [rule],
+                                }])])}, status=400)
+            create_vip.assert_not_called()
+
+        self.conf.config(group='api_settings',
+                         enabled_tls_sni_weighted_pool_providers=[])
+        self.put(pool_path, {'pool': {'admin_state_up': True}}, status=501)
+        self.put(path, {'l7policy': {'targets': targets[:1]}}, status=501)
+        self.put(path, {'l7policy': {'redirect_pool_id': first['id']}},
+                 status=501)
+        self.put(path, {'l7policy': {'targets': targets[:2]}})
+        self.set_lb_status(lb_id)
+        listener_path = self.LISTENER_PATH.format(listener_id=listener_id)
+        self.put(listener_path, {'listener': {'admin_state_up': False}})
+        self.set_lb_status(lb_id)
+        self.put(listener_path, {'listener': {'admin_state_up': True}},
+                 status=501)
+        self.put(path, {'l7policy': {'admin_state_up': False}})
+        self.set_lb_status(lb_id)
+        self.put(path, {'l7policy': {'admin_state_up': True}}, status=501)
+        self.put(listener_path, {'listener': {'admin_state_up': True}})
+        self.set_lb_status(lb_id)
+        self.delete(path)
+
+    @mock.patch('octavia.common.tls_utils.cert_parser.load_certificates_data')
+    @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
+    def test_weighted_tls_sni_rule_removal_checks_serving_pools(
+            self, _rpc, certs):
+        certs.return_value = {
+            'tls_cert': data_models.TLSContainer(certificate='test')}
+        self.cert_manager_mock().get_secret.return_value = (
+            sample_certs.X509_CA_CERT)
+        self.conf.config(
+            group='api_settings',
+            enabled_tcp_tls_termination_providers=['amphora'],
+            enabled_tls_sni_weighted_pool_providers=['amphora'],
+            enabled_backend_tls_hostname_providers=['amphora'],
+            enabled_tcp_tls_backend_auth_providers=['amphora'])
+        lb = self.create_load_balancer(
+            uuidutils.generate_uuid(), provider='amphora')['loadbalancer']
+        lb_id = lb['id']
+        self.set_lb_status(lb_id)
+        listener = self.create_listener(
+            'TCP', 443, lb_id, tcp_tls_termination=True,
+            default_tls_container_ref=uuidutils.generate_uuid())['listener']
+        self.set_lb_status(lb_id)
+        plain = self.create_pool(lb_id, 'TCP', 'ROUND_ROBIN')['pool']
+        self.set_lb_status(lb_id)
+        secure = self.create_pool(
+            lb_id, 'TCP', 'ROUND_ROBIN', tls_enabled=True,
+            backend_tls_hostname='backend.example.test',
+            ca_tls_container_ref=uuidutils.generate_uuid())['pool']
+        self.set_lb_status(lb_id)
+        targets = [{'pool_id': plain['id'], 'weight': 3},
+                   {'pool_id': secure['id'], 'weight': 1}]
+        policy = self.create_l7policy(
+            listener['id'], 'WEIGHTED_TARGETS', targets=targets)['l7policy']
+        self.set_lb_status(lb_id)
+        exact = self.create_l7rule(
+            policy['id'], 'TLS_SNI', 'EQUAL_TO', 'a.example.test')['rule']
+        self.set_lb_status(lb_id)
+        suffix = self.create_l7rule(
+            policy['id'], 'TLS_SNI', 'ENDS_WITH', '*.example.test')['rule']
+        self.set_lb_status(lb_id)
+        policy_path = self.L7POLICY_PATH.format(l7policy_id=policy['id'])
+        exact_path = self.L7RULE_PATH.format(
+            l7policy_id=policy['id'], l7rule_id=exact['id'])
+        suffix_path = self.L7RULE_PATH.format(
+            l7policy_id=policy['id'], l7rule_id=suffix['id'])
+        listener_path = self.LISTENER_PATH.format(listener_id=listener['id'])
+        pool_path = self.POOL_PATH.format(pool_id=secure['id'])
+
+        new_ca_ref = uuidutils.generate_uuid()
+        ca_update = {'pool': {'ca_tls_container_ref': new_ca_ref}}
+        self.conf.config(group='api_settings',
+                         enabled_tls_sni_weighted_pool_providers=[])
+        self.put(pool_path, ca_update, status=501)
+        self.conf.config(group='api_settings',
+                         enabled_tls_sni_weighted_pool_providers=['amphora'])
+        self.put(pool_path, ca_update)
+        self.set_lb_status(lb_id)
+
+        self.conf.config(group='api_settings',
+                         enabled_tcp_tls_backend_auth_providers=[])
+        self.delete(exact_path, status=501)
+        self.put(exact_path, {'rule': {'admin_state_up': False}}, status=501)
+        self.put(policy_path, {'l7policy': {'admin_state_up': False}})
+        self.set_lb_status(lb_id)
+        self.put(policy_path, {'l7policy': {'admin_state_up': True}},
+                 status=501)
+
+        self.conf.config(group='api_settings',
+                         enabled_tcp_tls_backend_auth_providers=['amphora'])
+        self.put(policy_path, {'l7policy': {'admin_state_up': True}})
+        self.set_lb_status(lb_id)
+        self.put(exact_path, {'rule': {'admin_state_up': False}})
+        self.set_lb_status(lb_id)
+        self.put(exact_path, {'rule': {'admin_state_up': True}})
+        self.set_lb_status(lb_id)
+        targets[1]['weight'] = 0
+        self.put(policy_path, {'l7policy': {'targets': targets}})
+        self.set_lb_status(lb_id)
+
+        self.conf.config(group='api_settings',
+                         enabled_tcp_tls_backend_auth_providers=[])
+        self.put(policy_path, {'l7policy': {'admin_state_up': False}})
+        self.set_lb_status(lb_id)
+        self.put(policy_path, {'l7policy': {
+            'admin_state_up': True,
+            'targets': [targets[0], {'pool_id': self.pool_id, 'weight': 0}],
+        }}, status=404)
+        self.put(policy_path, {'l7policy': {'admin_state_up': True}})
+        self.set_lb_status(lb_id)
+        self.put(listener_path, {'listener': {'admin_state_up': False}})
+        self.set_lb_status(lb_id)
+        self.put(listener_path, {'listener': {'admin_state_up': True}})
+        self.set_lb_status(lb_id)
+        self.put(exact_path, {'rule': {'admin_state_up': False}})
+        self.set_lb_status(lb_id)
+        self.put(exact_path, {'rule': {'admin_state_up': True}})
+        self.set_lb_status(lb_id)
+        self.delete(exact_path)
+        database_tasks.DeleteL7RuleInDB().execute(
+            {constants.L7RULE_ID: exact['id']})
+        self.set_lb_status(lb_id)
+        self.delete(suffix_path)
+
+    @mock.patch('octavia.common.tls_utils.cert_parser.load_certificates_data')
+    @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
     def test_tcp_tls_mixed_mode(self, rpc, certs):
         certs.return_value = {
             'tls_cert': data_models.TLSContainer(certificate='test')}
@@ -4772,10 +4975,19 @@ class TestL7Policy(base.BaseAPITest):
         ca_ref = protected['ca_tls_container_ref']
         self.put(pool_path, {'pool': {'ca_tls_container_ref': ca_ref}})
         self.set_lb_status(lb_id)
-        self.put(pool_path, {'pool': {
-            'ca_tls_container_ref': uuidutils.generate_uuid()}}, status=501)
+        new_ca_ref = uuidutils.generate_uuid()
+        ca_update = {'pool': {'ca_tls_container_ref': new_ca_ref}}
+        self.put(pool_path, ca_update, status=501)
         self.assertEqual(ca_ref, self.get(pool_path).json['pool'][
             'ca_tls_container_ref'])
+        self.conf.config(group='api_settings',
+                         enabled_tcp_tls_backend_auth_providers=['amphora'])
+        self.put(pool_path, ca_update)
+        self.set_lb_status(lb_id)
+        self.assertEqual(new_ca_ref, self.get(pool_path).json['pool'][
+            'ca_tls_container_ref'])
+        self.conf.config(group='api_settings',
+                         enabled_tcp_tls_backend_auth_providers=[])
         self.create_member(pool_id, '192.0.2.11', 8443, status=501)
         members_path = self.MEMBERS_PATH.format(pool_id=pool_id)
         member_path = self.MEMBER_PATH.format(

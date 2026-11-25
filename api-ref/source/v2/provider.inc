@@ -204,7 +204,9 @@ list to clear the response operations.
 
 ``l7policy_initial_rules_v1`` allows creating a disabled L7 policy and its
 initial rules in one POST to ``/v2/lbaas/l7policies`` on an existing HTTP or
-terminated HTTPS listener. Enable a compatible provider in
+terminated HTTPS listener. Providers with weighted TLS SNI support can
+also create a disabled weighted TLS SNI policy with its initial rules.
+Enable a compatible provider in
 ``[api_settings] enabled_l7policy_initial_rules_providers`` after upgrading
 the API and all workers in the region. Removing a provider from that list
 disables admission of new policy posts with rules. Existing policies and rules
@@ -575,6 +577,26 @@ Both ``tcp_tls_termination_v1`` and ``backend_tls_hostname_v1`` are required.
 Enroll the provider in
 ``[api_settings] enabled_tcp_tls_backend_auth_providers`` after qualifying
 the regional API, workers and Amphora fleet.
+
+``tls_sni_weighted_pools_v1`` enables ``WEIGHTED_TARGETS`` for
+``TLS_SNI`` policies on terminating TCP listeners, including the terminating
+side of a mixed-mode listener. Enroll a compatible provider in
+``[api_settings] enabled_tls_sni_weighted_pool_providers`` after qualifying
+the API, workers and Amphora fleet. This capability requires
+``tcp_tls_termination_v1`` and HAProxy 2.2 or newer. Mixed mode keeps its own
+HAProxy 3.0 minimum. The capability is independent of HTTP weighting and
+passthrough.
+
+Use 1 to 16 entries with an existing TCP pool UUID on the same load balancer
+and an integer weight from 0 to 1,000,000. At least one weight must be
+positive. Each TCP pool can use plaintext, or its own DNS hostname and CA
+when ``tcp_tls_backend_auth_v1`` is available. Each positive weight retains
+its share when its pool is disabled, empty or unavailable.
+
+Withdrawing regional enrollment leaves admitted selectors in service and
+blocks new selectors and changes that expand them. Operators can disable or
+delete policies and remove zero-weight targets. Disable an admitted policy
+before changing it to a scalar redirect while weighted enrollment is off.
 
 .. rest_status_code:: success ../http-status.yaml
 
