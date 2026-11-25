@@ -67,6 +67,62 @@ class TestPool(base.BaseAPITest):
         self.udp_listener_id = self.udp_listener.get('id')
         self.set_lb_status(self.udp_lb_id)
 
+    @mock.patch.object(noop_driver.NoopProviderDriver,
+                       'supports_backend_retry_budget', True, create=True)
+    @mock.patch.object(noop_driver.NoopProviderDriver, 'pool_update',
+                       autospec=True)
+    def test_backend_retry_budget_round_trip(self, provider_update):
+        field = 'backend_retry_budget'
+        capability = constants.GATEWAY_CAPABILITY_BACKEND_RETRY_BUDGET
+        caps_path = (self.PROVIDERS_PATH +
+                     '/noop_driver/gateway_capabilities')
+        budget = dict(service_uid='service-uid', budget_percent=20,
+                      budget_interval_ms=10000, min_retry_count=10,
+                      min_retry_interval_ms=1000)
+        args = (self.lb_id, 'HTTP', 'ROUND_ROBIN')
+        self.assertNotIn(
+            capability, self.get(caps_path).json['gateway_capabilities'])
+        self.create_pool(*args, backend_retry_budget=budget, status=501)
+        self.conf.config(
+            group='api_settings',
+            enabled_backend_retry_budget_providers=['noop_driver'])
+        self.assertIn(
+            capability, self.get(caps_path).json['gateway_capabilities'])
+        with mock.patch.object(driver_utils,
+                               'BACKEND_RETRY_BUDGET_PAYLOAD_AVAILABLE',
+                               False):
+            self.assertNotIn(
+                capability, self.get(caps_path).json['gateway_capabilities'])
+        self.create_pool(self.lb_id, 'TCP', 'ROUND_ROBIN',
+                         backend_retry_budget=budget, status=400)
+        self.create_pool(
+            *args, status=400,
+            backend_retry_budget=dict(budget, budget_percent=True))
+        pool = self.create_pool(*args, backend_retry_budget=budget)['pool']
+        self.assertEqual(budget, pool[field])
+        path = self.POOL_PATH.format(pool_id=pool['id'])
+        self.assertEqual(budget, self.get(path).json['pool'][field])
+
+        self.set_lb_status(self.lb_id)
+        replacement = dict(budget, min_retry_interval_ms=250)
+        updated = self.put(path, {'pool': {field: replacement}}).json['pool']
+        self.assertEqual(replacement, updated[field])
+        self.assertEqual(replacement,
+                         provider_update.call_args.args[2].to_dict()[field])
+
+        self.set_lb_status(self.lb_id)
+        preserved = self.put(path, {'pool': {'name': 'renamed'}}).json['pool']
+        self.assertEqual(replacement, preserved[field])
+        self.assertNotIn(field, provider_update.call_args.args[2].to_dict())
+
+        self.set_lb_status(self.lb_id)
+        self.conf.config(group='api_settings',
+                         enabled_backend_retry_budget_providers=[])
+        cleared = self.put(path, {'pool': {field: None}}).json['pool']
+        self.assertNotIn(field, cleared)
+        self.assertIsNone(provider_update.call_args.args[2].to_dict()[field])
+        self.assertNotIn(field, self.get(path).json['pool'])
+
     def test_get(self):
         api_pool = self.create_pool(
             self.lb_id,

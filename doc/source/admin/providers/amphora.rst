@@ -497,3 +497,23 @@ changes and reopening. Changing a pool's trusted CA or opening a member
 on an active protected pool also requires regional enrollment. Existing
 protected pools can keep serving, drain or be removed. Disable and detach a pool before clearing its hostname
 requirement.
+
+Backend Service retry budgets
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Apply the pool database migration and update the API, provider library,
+workers, and every eligible Amphora image with the Octavia HAProxy
+``backend-retry-budget-v1`` build before enabling discovery.
+
+.. code-block:: ini
+
+   [api_settings]
+   enabled_backend_retry_budget_providers = amphora
+
+Use the Kubernetes Service UID in the ``service_uid`` of every HTTP pool
+that serves that Service. All participating listeners and pools in a
+single HAProxy process share the original-request and retry history.
+Each separate Amphora process, including a process started by reload or
+failover, starts with its own history. Regional discovery applies to
+new writes. Clear a persisted budget with ``backend_retry_budget: null``
+even when discovery is disabled.

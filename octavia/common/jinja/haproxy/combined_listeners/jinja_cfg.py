@@ -231,6 +231,8 @@ class JinjaTemplater:
         san_capability = (
             constants.GATEWAY_CAPABILITY_BACKEND_TLS_SUBJECT_ALT_NAMES)
         policy_capability = constants.GATEWAY_CAPABILITY_HTTP_REQUEST_POLICY
+        retry_budget_capability = (
+            constants.GATEWAY_CAPABILITY_BACKEND_RETRY_BUDGET)
         mirror_capability = constants.GATEWAY_CAPABILITY_HTTP_REQUEST_MIRROR
         auth_capability = constants.GATEWAY_CAPABILITY_LISTENER_REQUEST_FILTERS
         fallback_capability = (
@@ -314,6 +316,16 @@ class JinjaTemplater:
                 for pool in listener['pools']:
                     if pool['id'] in inactive_mirrors:
                         continue
+                    if (pool['enabled'] and
+                            pool.get('backend_retry_budget') and
+                            listener['protocol'] in (
+                                constants.PROTOCOL_HTTP,
+                                constants.PROTOCOL_TERMINATED_HTTPS) and
+                            (amp_details or {}).get(retry_budget_capability)
+                            is not True):
+                        raise driver_except.AmpVersionUnsupported(
+                            version='HAProxy lacks backend retry budget '
+                                    'support')
                     hostname = pool.get('backend_tls_hostname')
                     require_h2 = pool.get('backend_tls_require_h2')
                     sans = pool.get('backend_tls_subject_alt_names')
@@ -997,6 +1009,10 @@ class JinjaTemplater:
             ret_value['closed'] = True
             ret_value['enabled'] = False
             return ret_value
+        budget = getattr(pool, 'backend_retry_budget', None)
+        if budget is not None:
+            ret_value['backend_retry_budget'] = (
+                validate.backend_retry_budget(budget))
         members_gen = (mem for mem in pool.members if
                        mem.provisioning_status != constants.PENDING_DELETE)
         members = [self._transform_member(x, feature_compatibility)

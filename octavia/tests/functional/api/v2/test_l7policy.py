@@ -816,6 +816,34 @@ class TestInitialL7Rules(base.BaseAPITest):
         self.assertNotIn(field, self.get(path).json['l7policy'])
 
     @mock.patch.object(amphora_noop.NoopAmphoraLoadBalancerDriver, 'update')
+    def test_backend_retry_budget_pool_worker_lifecycle(self, update):
+        self.conf.config(group='api_settings',
+                         enabled_backend_retry_budget_providers=['amphora'])
+        self.rpc.cast.reset_mock()
+        field = 'backend_retry_budget'
+        budget = dict(service_uid='service-uid', budget_percent=20,
+                      budget_interval_ms=10000, min_retry_count=10,
+                      min_retry_interval_ms=1000)
+        pool = self.create_pool(
+            self.lb_id, 'HTTP', 'ROUND_ROBIN', listener_id=self.listener_id,
+            backend_retry_budget=budget)['pool']
+        self.assertEqual(budget, self.rpc.cast.call_args.kwargs[
+            constants.POOL][field])
+        self._dispatch('create_pool')
+        snapshot, = update.call_args.args
+        default_pool = snapshot.listeners[0].default_pool
+        self.assertEqual(budget, default_pool.backend_retry_budget)
+
+        path = self.POOL_PATH.format(pool_id=pool['id'])
+        self.put(path, {'pool': {field: None}})
+        self.assertIsNone(self.rpc.cast.call_args.kwargs[
+            constants.POOL_UPDATES][field])
+        self._dispatch('update_pool')
+        snapshot, = update.call_args.args
+        self.assertIsNone(
+            snapshot.listeners[0].default_pool.backend_retry_budget)
+
+    @mock.patch.object(amphora_noop.NoopAmphoraLoadBalancerDriver, 'update')
     def test_http_request_policy_round_trip_and_withdrawal(self, update):
         field = 'http_request_policy'
         provider_caps = self.PROVIDERS_PATH + '/amphora/gateway_capabilities'
