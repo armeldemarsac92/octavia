@@ -144,6 +144,42 @@ Use ``--attributes`` in the local wire check to capture typed spans in a
 real Collector and verify that HTTP traffic continues when the Amphora
 does not report the capability.
 
+Listener OTLP collector request headers
+======================================
+
+The image installs ``/var/lib/octavia/octavia-telemetry-export-headers-v1.lua``
+with the Lua-enabled HAProxy build. The agent verifies that its configured
+binary loads the script and accepts the private HTTP forwarding rules before
+reporting ``listener_otlp_export_headers_v1``. Upgrade regional API processes,
+workers and Amphora agents and images before adding the provider to
+``[api_settings] enabled_listener_otlp_export_headers_providers``. Enable
+``enabled_listener_otlp_tracing_providers`` alongside it.
+
+The exporter adds the configured fields to OTLP/HTTP collector requests
+before sending them through its private Unix-socket relay. Incoming
+requests, application backends and span attributes have their existing
+behavior. OTLP publication reaches ``ACTIVE``
+when all active HA peers acknowledge the rendered profile. A peer lacking the
+required profile loads the application listener without the exporter.
+Replacing a profile with an empty or omitted header list withdraws the
+collector headers while retaining tracing. Setting ``otlp_tracing`` to null
+withdraws the exporter.
+
+Treat the Octavia database and Amphora's local HAProxy configuration files
+as confidential. Header values are persisted in the desired profile and the
+private HAProxy configuration. API readback exposes only
+``otlp_tracing.headers_sha256`` for a nonempty list. For confidential header
+values, use authenticated TLS from the Amphora to the collector.
+
+The relay streams the serialized request using TCP and retains the collector
+pool's configured transport and health checks. Header-bearing exporters use
+a distinct socket for each tracing revision so an older exporter cannot
+connect to the newly published relay using a previous header configuration.
+The Amphora agent removes retired sockets for that load balancer once they
+are no longer bound, including when the final exporter is removed.
+The relay supports up to 16 fields with names of 256 bytes and values of
+4096 bytes using the usual HAProxy buffer configuration.
+
 HTTP request budgets and retries
 ================================
 

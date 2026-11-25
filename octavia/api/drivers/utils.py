@@ -192,6 +192,13 @@ def gateway_capabilities(driver):
                         False) is True):
             capabilities.append(
                 constants.GATEWAY_CAPABILITY_LISTENER_OTLP_SPAN_ATTRIBUTES)
+        header_providers = (
+            api_settings.enabled_listener_otlp_export_headers_providers)
+        if (driver.name in header_providers and
+                getattr(driver, 'supports_listener_otlp_export_headers',
+                        False) is True):
+            capabilities.append(
+                constants.GATEWAY_CAPABILITY_LISTENER_OTLP_EXPORT_HEADERS)
     if (LISTENER_REQUEST_FILTERS_PAYLOAD_AVAILABLE and driver.name in
             api_settings.enabled_listener_request_filter_providers and
             getattr(driver, 'supports_listener_request_filters',
@@ -349,7 +356,8 @@ def require_https_listener_isolation(driver):
                 'HTTPS listener isolation is unavailable for this provider.'))
 
 
-def require_listener_otlp_tracing(driver, *, sampling=False, attributes=False):
+def require_listener_otlp_tracing(driver, *, sampling=False, attributes=False,
+                                  headers=False):
     capabilities = gateway_capabilities(driver)
     if constants.GATEWAY_CAPABILITY_LISTENER_OTLP_TRACING not in capabilities:
         raise exceptions.ProviderUnsupportedOptionError(
@@ -367,6 +375,13 @@ def require_listener_otlp_tracing(driver, *, sampling=False, attributes=False):
         raise exceptions.ProviderUnsupportedOptionError(
             prov=driver.name, user_msg=_(
                 'Listener OTLP span attributes are unavailable for this '
+                'provider.'))
+    if (headers and
+            constants.GATEWAY_CAPABILITY_LISTENER_OTLP_EXPORT_HEADERS
+            not in capabilities):
+        raise exceptions.ProviderUnsupportedOptionError(
+            prov=driver.name, user_msg=_(
+                'Listener OTLP export headers are unavailable for this '
                 'provider.'))
 
 
@@ -1031,9 +1046,23 @@ def db_listeners_to_provider_dicts_list_of_dicts(db_listeners,
     return [listener.to_dict() for listener in listeners]
 
 
+def remove_otlp_export_headers(listener_dict):
+    tracing = listener_dict.get('otlp_tracing')
+    if isinstance(tracing, dict) and 'headers' in tracing:
+        listener_dict['otlp_tracing'] = {
+            key: value for key, value in tracing.items() if key != 'headers'}
+
+
 def db_listener_to_provider_listener(db_listener, for_delete=False):
     new_listener_dict = listener_dict_to_provider_dict(
         db_listener.to_dict(recurse=True), for_delete=for_delete)
+    tracing = new_listener_dict.get('otlp_tracing')
+    if (tracing and 'headers' in tracing and
+            db_listener.load_balancer.provider in
+            constants.AMPHORA_API_PROVIDER_NAMES):
+        # Amphora's render reads the committed DB profile. Keep its
+        # credential values out of provider notifications and worker stores.
+        remove_otlp_export_headers(new_listener_dict)
     for attribute in ('default_http_response', 'https_virtual_hosts',
                       'request_filter_sections', 'otlp_tracing'):
         if new_listener_dict.get(attribute) is None:

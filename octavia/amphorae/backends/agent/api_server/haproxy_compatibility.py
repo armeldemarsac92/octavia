@@ -95,6 +95,28 @@ backend out
 """)
 
 
+_OTLP_EXPORT_HEADERS_PROBE = (
+    """global
+    lua-load """
+    f"{constants.HAPROXY_OTLP_EXPORT_HEADERS_SCRIPT} "
+    "00000000-0000-0000-0000-000000000001 /tmp/octavia-otlp-probe.sock "
+    """octavia-probe probe export_headers=617574686f72697a6174696f6e:70726f6265
+defaults
+    timeout client 1s
+    timeout connect 1s
+    timeout server 1s
+frontend app
+    mode http
+    bind 127.0.0.1:1
+    http-request lua.octavia-trace-export-headers-start """
+    """00000000-0000-0000-0000-000000000001
+listen private-otlp-collector
+    mode tcp
+    bind /tmp/octavia-otlp-probe.sock
+    server collector 127.0.0.1:2
+""")
+
+
 def _valid_haproxy_config(haproxy_cmd, config):
     try:
         subprocess.run(
@@ -223,6 +245,12 @@ def get_haproxy_capabilities():
         if os.path.isfile(constants.HAPROXY_OTLP_SPAN_ATTRIBUTES_SCRIPT):
             capabilities[
                 constants.GATEWAY_CAPABILITY_LISTENER_OTLP_SPAN_ATTRIBUTES
+            ] = True
+        if (os.path.isfile(constants.HAPROXY_OTLP_EXPORT_HEADERS_SCRIPT) and
+                _valid_haproxy_config(haproxy_cmd,
+                                      _OTLP_EXPORT_HEADERS_PROBE)):
+            capabilities[
+                constants.GATEWAY_CAPABILITY_LISTENER_OTLP_EXPORT_HEADERS
             ] = True
     return capabilities
 

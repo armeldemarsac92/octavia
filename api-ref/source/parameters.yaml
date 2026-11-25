@@ -2208,13 +2208,32 @@ otlp_tracing:
     Readback sorts attributes by name and returns lowercase header names.
     Omit ``attributes`` or send ``[]`` in a replacement tracing object to
     remove all custom span attributes. Null clears tracing.
+
+    When the provider advertises ``listener_otlp_export_headers_v1``, the
+    listener accepts ``headers`` for outgoing OTLP/HTTP collector requests.
+    Provide up to 16 entries, each with ``name`` and ``value``. Names must
+    be HTTP tokens of 1 to 256 ASCII characters and distinct regardless of
+    case. Values must be 1 to 4096 ASCII characters and contain printable
+    non-whitespace characters, optionally separated by a single space or
+    tab. ``Authorization`` and custom fields are allowed. The collector
+    transport controls ``Host``, ``Connection``, ``Content-Length``,
+    ``Content-Type``, ``Content-Encoding``, ``Transfer-Encoding``, ``TE``,
+    ``Trailer``, ``Upgrade``, ``Proxy-Connection``, ``Keep-Alive`` and
+    ``Expect``.
+
+    ``headers`` is write-only. When the list is nonempty, readback returns
+    ``headers_sha256``, the lowercase hexadecimal SHA-256 of the concatenated
+    ASCII name, NUL, value, NUL sequences, sorted by lowercase name. Requests
+    cannot supply this digest. Omit ``headers`` or send ``[]`` in a
+    replacement tracing object to remove the collector headers. To preserve
+    them during a tracing update, send the desired header values again.
   in: body
   required: false
   type: object
 otlp_tracing_status:
   description: |
     Listener tracing configuration publication state, including any span
-    attributes. PENDING_UPDATE, ACTIVE, or ERROR.
+    attributes and export headers. PENDING_UPDATE, ACTIVE, or ERROR.
   in: body
   required: false
   type: string

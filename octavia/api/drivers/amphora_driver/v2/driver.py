@@ -83,6 +83,7 @@ class AmphoraProviderDriver(driver_base.ProviderDriver):
     supports_listener_otlp_tracing = True
     supports_listener_otlp_sampling = True
     supports_listener_otlp_span_attributes = True
+    supports_listener_otlp_export_headers = True
     supports_listener_request_filters = True
     supports_l7policy_initial_rules = True
     supports_l7policy_batch_activation = True
@@ -261,12 +262,14 @@ class AmphoraProviderDriver(driver_base.ProviderDriver):
         self._validate_listener_protocol(listener)
         self._validate_alpn_protocols(listener)
         payload = {consts.LISTENER: listener.to_dict()}
+        driver_utils.remove_otlp_export_headers(payload[consts.LISTENER])
         self._encrypt_listener_dict(payload[consts.LISTENER])
 
         self.client.cast({}, 'create_listener', **payload)
 
     def listener_delete(self, listener):
         payload = {consts.LISTENER: listener.to_dict()}
+        driver_utils.remove_otlp_export_headers(payload[consts.LISTENER])
         self.client.cast({}, 'delete_listener', **payload)
 
     def listener_update(self, old_listener, new_listener):
@@ -274,6 +277,8 @@ class AmphoraProviderDriver(driver_base.ProviderDriver):
         original_listener = old_listener.to_dict()
         listener_updates = new_listener.to_dict()
 
+        driver_utils.remove_otlp_export_headers(original_listener)
+        driver_utils.remove_otlp_export_headers(listener_updates)
         self._encrypt_listener_dict(original_listener)
         self._encrypt_listener_dict(listener_updates)
 
