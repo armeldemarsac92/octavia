@@ -39,6 +39,8 @@ HTTP_REQUEST_REDIRECT_PAYLOAD_AVAILABLE = hasattr(
 REQUEST_URL_REWRITE_PAYLOAD_AVAILABLE = hasattr(
     driver_dm.L7Policy(), 'request_url_rewrite')
 REQUEST_CORS_PAYLOAD_AVAILABLE = hasattr(driver_dm.L7Policy(), 'request_cors')
+HTTP_REQUEST_POLICY_PAYLOAD_AVAILABLE = hasattr(
+    driver_dm.L7Policy(), 'http_request_policy')
 WEIGHTED_TARGET_PAYLOAD_AVAILABLE = hasattr(driver_dm.L7Policy(), 'targets')
 BACKEND_TLS_H2_ALPN_PAYLOAD_AVAILABLE = hasattr(
     driver_dm.Pool(), 'backend_tls_require_h2')
@@ -106,6 +108,11 @@ def gateway_capabilities(driver):
             driver.name in api_settings.enabled_request_cors_providers and
             getattr(driver, 'supports_request_cors', False) is True):
         capabilities.append(constants.GATEWAY_CAPABILITY_REQUEST_CORS)
+    policy_providers = api_settings.enabled_http_request_policy_providers
+    if (HTTP_REQUEST_POLICY_PAYLOAD_AVAILABLE and
+            driver.name in policy_providers and
+            getattr(driver, 'supports_http_request_policy', False) is True):
+        capabilities.append(constants.GATEWAY_CAPABILITY_HTTP_REQUEST_POLICY)
     initial_rules_providers = (
         api_settings.enabled_l7policy_initial_rules_providers)
     if (driver.name in initial_rules_providers and
@@ -286,6 +293,15 @@ def require_request_cors(driver, protocol):
                 'L7 policy CORS is unavailable for this provider.'))
 
 
+def require_http_request_policy(driver, protocol):
+    validate.validate_http_request_policy_protocol(protocol)
+    if (constants.GATEWAY_CAPABILITY_HTTP_REQUEST_POLICY not in
+            gateway_capabilities(driver)):
+        raise exceptions.ProviderUnsupportedOptionError(
+            prov=driver.name, user_msg=_(
+                'L7 HTTP request policies are unavailable for this provider.'))
+
+
 def require_weighted_target_request_filters(driver, protocol):
     validate.validate_weighted_l7policy_protocol(protocol)
     if (constants.GATEWAY_CAPABILITY_WEIGHTED_TARGET_FILTERS not in
@@ -305,6 +321,8 @@ def _withdrawn_request_transforms(driver):
         yield 'target_filters', require_weighted_target_request_filters
     if constants.GATEWAY_CAPABILITY_REQUEST_CORS not in capabilities:
         yield 'request_cors', require_request_cors
+    if constants.GATEWAY_CAPABILITY_HTTP_REQUEST_POLICY not in capabilities:
+        yield 'http_request_policy', require_http_request_policy
 
 
 def require_no_exposed_request_transforms(driver, policy_repo, session,
@@ -498,7 +516,10 @@ def require_gateway_policy_action(driver, action, protocol, *,
                                   tcp_tls_termination=False,
                                   response_header_operations=None,
                                   request_url_rewrite=None, targets=None,
-                                  request_cors=None):
+                                  request_cors=None,
+                                  http_request_policy=None):
+    if http_request_policy is not None:
+        require_http_request_policy(driver, protocol)
     if request_cors is not None:
         require_request_cors(driver, protocol)
     if request_url_rewrite:
@@ -1074,7 +1095,7 @@ def db_l7policy_to_provider_l7policy(db_l7policy):
         if not new_l7policy_dict.get(field):
             new_l7policy_dict.pop(field, None)
     for field in ('fixed_response', 'redirect_request', 'request_url_rewrite',
-                  'request_cors'):
+                  'request_cors', 'http_request_policy'):
         if new_l7policy_dict.get(field) is None:
             new_l7policy_dict.pop(field, None)
     return driver_dm.L7Policy.from_dict(new_l7policy_dict)
@@ -1089,6 +1110,8 @@ def l7policy_dict_to_provider_dict(l7policy_dict):
         new_l7policy_dict.pop('request_url_rewrite', None)
     if not REQUEST_CORS_PAYLOAD_AVAILABLE:
         new_l7policy_dict.pop('request_cors', None)
+    if not HTTP_REQUEST_POLICY_PAYLOAD_AVAILABLE:
+        new_l7policy_dict.pop('http_request_policy', None)
     if (not TCP_TLS_MIXED_MODE_PAYLOAD_AVAILABLE or
             not new_l7policy_dict.get('tcp_tls_passthrough')):
         new_l7policy_dict.pop('tcp_tls_passthrough', None)

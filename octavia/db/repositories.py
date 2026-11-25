@@ -2318,10 +2318,14 @@ class L7PolicyRepository(BaseRepository):
     def _validate_l7policy_pool_data(self, session, l7policy, old_policy=None):
         """Does validations on a given L7 policy."""
         if (l7policy.request_cors is not None or
+                l7policy.http_request_policy is not None or
                 l7policy.request_url_rewrite is not None):
             listener = session.get(models.Listener, l7policy.listener_id)
             if l7policy.request_cors is not None:
                 validate.validate_http_request_cors_protocol(listener.protocol)
+            if l7policy.http_request_policy is not None:
+                validate.validate_http_request_policy_protocol(
+                    listener.protocol)
             if l7policy.request_url_rewrite is not None:
                 validate.validate_http_request_url_rewrite_protocol(
                     listener.protocol)

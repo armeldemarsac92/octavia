@@ -278,6 +278,42 @@ semantics:
 An empty object applies CORS with no allowed origins. Omission in an
 update preserves the settings. Send ``request_cors: null`` to clear them.
 
+``http_request_policy_v1`` enables ``http_request_policy`` on
+``REDIRECT_TO_POOL`` and ``WEIGHTED_TARGETS`` policies on HTTP and
+``TERMINATED_HTTPS`` listeners. It applies to requests forwarded by
+the winning policy to a pool, including a weighted pool target. Existing
+listener and pool timeout settings still apply.
+
+* ``request_timeout_ms`` is the overall deadline in milliseconds from
+  forwarding policy processing through completion, including all attempts.
+* ``backend_request_timeout_ms`` is the deadline in milliseconds for each
+  backend attempt, through receipt of its complete response.
+* Both deadlines accept integers in the range 0 to 9223372036854775807.
+  An omitted value leaves the provider default. Zero disables that
+  deadline. A finite overall deadline must be at least as large as a
+  finite per-attempt deadline.
+* Omit ``retry`` to leave the provider's default retry behavior. When present,
+  ``retry.attempts`` defaults to 1 and accepts up to 2147483647 additional
+  attempts. Set it to zero to disable retries. ``retry.codes`` defaults to
+  an empty array, allowing only eligible connection failures before
+  processing. The array can also contain distinct codes from 500, 502,
+  503 and 504. Retries after sending a request require HAProxy to retain
+  a replayable request, and a response that has begun reaching the client
+  cannot be retried. The API does not accept a backoff setting.
+
+A policy can combine both deadlines with status-based retries.
+
+.. code-block:: json
+
+   {
+     "request_timeout_ms": 15000,
+     "backend_request_timeout_ms": 500,
+     "retry": {"attempts": 3, "codes": [500]}
+   }
+
+Omission in an update preserves the object. Send
+``http_request_policy: null`` to clear it.
+
 ``weighted_http_target_request_filters_v1`` adds optional
 ``request_header_operations`` and ``request_url_rewrite`` to each
 ``WEIGHTED_TARGETS.targets`` item with a ``pool_id``. Both fields have

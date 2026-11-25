@@ -7,7 +7,8 @@ if [[ -f "$binary" ]]; then
     prefix="HAProxy version 3.0.19-ade9c1262-octavia-strict-dns-v1"
     if [[ "$version" != "$prefix "* &&
           "$version" != "$prefix-h2-alpn-v1 "* &&
-          "$version" != "$prefix-h2-alpn-v1-backend-sans-v1 "* ]]; then
+          "$version" != "$prefix-h2-alpn-v1-backend-sans-v1 "* &&
+          "$version" != "$prefix-h2-alpn-v1-backend-sans-v1-http-policy-v1 "* ]]; then
         echo "Expected the Octavia HAProxy strict DNS build" >&2
         exit 1
     fi

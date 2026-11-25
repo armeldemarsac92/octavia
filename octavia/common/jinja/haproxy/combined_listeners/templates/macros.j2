@@ -472,6 +472,7 @@ frontend {{ listener.id }}
                            listener.request_header_operations_by_pool is defined or
                            listener.response_header_operations_by_backend is defined or
                            listener.request_url_rewrites_by_pool is defined or
+                           listener.http_request_policies_by_pool is defined or
                            listener.cors_by_backend is defined %}
     {% if select_policy or structured %}
         {% for l7policy in policies %}
@@ -758,6 +759,9 @@ backend {{ pool.id }}:{{ listener.id }}
 {{ cors_request(cors) -}}
 {{ policy_response_headers(listener, 'pool', pool.id) -}}
 {{ cors_response(cors) -}}
+    {% for policy_id, args in listener.get('http_request_policies_by_pool', {}).get(pool.id, []) %}
+    http-request octavia-http-policy {{ args|join(' ') }} if {{ selected_policy_match_macro(policy_id) }}
+    {% endfor %}
     {% for policy_id, operations in listener.get('request_header_operations_by_pool', {}).get(pool.id, []) %}
         {% for operation in operations %}
     http-request {{ operation|safe }} if {{ selected_policy_match_macro(policy_id) }}

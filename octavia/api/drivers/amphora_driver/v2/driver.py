@@ -71,6 +71,7 @@ class AmphoraProviderDriver(driver_base.ProviderDriver):
     supports_http_request_redirect = True
     supports_request_url_rewrite = True
     supports_request_cors = True
+    supports_http_request_policy = True
     supports_l7policy_initial_rules = True
     supports_l7policy_batch_activation = True
     supports_http_header_exact = True
