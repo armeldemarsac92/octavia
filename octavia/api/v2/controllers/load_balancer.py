@@ -834,7 +834,9 @@ class LoadBalancersController(base.BaseController):
                 if tracing:
                     driver_utils.require_listener_otlp_tracing(
                         driver, sampling=any('sampling' in spec
-                                             for spec in tracing))
+                                             for spec in tracing),
+                        attributes=any('attributes' in spec
+                                       for spec in tracing))
                 if listener_repo.has_enabled_request_filters(
                         context.session, id):
                     driver_utils.require_listener_request_filters(driver)

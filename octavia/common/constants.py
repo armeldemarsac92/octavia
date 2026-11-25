@@ -112,9 +112,22 @@ GATEWAY_CAPABILITY_BACKEND_RETRY_BUDGET = 'backend_retry_budget_v1'
 GATEWAY_CAPABILITY_HTTP_REQUEST_MIRROR = 'http_request_mirror_v1'
 GATEWAY_CAPABILITY_LISTENER_OTLP_TRACING = 'listener_otlp_tracing_v1'
 GATEWAY_CAPABILITY_LISTENER_OTLP_SAMPLING = 'listener_otlp_sampling_v1'
+GATEWAY_CAPABILITY_LISTENER_OTLP_SPAN_ATTRIBUTES = (
+    'listener_otlp_span_attributes_v1')
 HAPROXY_OTLP_TRACING_SCRIPT = '/var/lib/octavia/octavia-telemetry.lua'
 HAPROXY_OTLP_SAMPLING_SCRIPT = (
     '/var/lib/octavia/octavia-telemetry-sampling-v1.lua')
+HAPROXY_OTLP_SPAN_ATTRIBUTES_SCRIPT = (
+    '/var/lib/octavia/octavia-telemetry-span-attributes-v1.lua')
+OTLP_HTTP_STATUS_ATTRIBUTE = 'http.response.status_code'
+OTLP_BUILTIN_SPAN_ATTRIBUTES = frozenset((
+    OTLP_HTTP_STATUS_ATTRIBUTE, 'http.request.method',
+    'url.path', 'url.scheme',
+))
+OTLP_SPAN_ATTRIBUTE_SOURCE_FIELDS = {
+    'Literal': 'literal_value', 'Header': 'header_name',
+    'Attribute': 'attribute_key',
+}
 HAPROXY_OTLP_PUBLICATION_HEADER = 'X-Octavia-OTLP-Publication'
 HAPROXY_CONFIG_PUBLICATION_HEADER = 'X-Octavia-Config-Publication'
 HAPROXY_SYSTEM_CA_DIRECTORY = 'backend-system-ca'

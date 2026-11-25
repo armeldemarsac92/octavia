@@ -177,15 +177,20 @@ def otlp_tracing_supported(loadbalancer, tracing, amp_details):
     if details.get(
             constants.GATEWAY_CAPABILITY_LISTENER_OTLP_TRACING) is not True:
         return False
-    if 'sampling' not in tracing:
-        return True
     settings = CONF.api_settings
     provider = getattr(loadbalancer, 'provider', None) or 'amphora'
-    return (
-        provider in settings.enabled_listener_otlp_tracing_providers and
-        provider in settings.enabled_listener_otlp_sampling_providers and
-        details.get(
-            constants.GATEWAY_CAPABILITY_LISTENER_OTLP_SAMPLING) is True)
+    profiles = (
+        ('sampling', settings.enabled_listener_otlp_sampling_providers,
+         constants.GATEWAY_CAPABILITY_LISTENER_OTLP_SAMPLING),
+        ('attributes',
+         settings.enabled_listener_otlp_span_attributes_providers,
+         constants.GATEWAY_CAPABILITY_LISTENER_OTLP_SPAN_ATTRIBUTES),
+    )
+    return all(
+        profile not in tracing or (
+            provider in settings.enabled_listener_otlp_tracing_providers and
+            provider in providers and details.get(capability) is True)
+        for profile, providers, capability in profiles)
 
 
 class JinjaTemplater:
@@ -1242,6 +1247,20 @@ class JinjaTemplater:
             constants.HAPROXY_OTLP_SAMPLING_SCRIPT
             if feature_compatibility.get(sampling_capability)
             else constants.HAPROXY_OTLP_TRACING_SCRIPT)
+        tracing['action_prefix'] = 'octavia-trace'
+        if 'attributes' in tracing:
+            tracing['script'] = constants.HAPROXY_OTLP_SPAN_ATTRIBUTES_SCRIPT
+            tracing['action_prefix'] = 'octavia-trace-attributes'
+            # One parser-safe argument keeps all user data out of Lua code
+            # and avoids HAProxy's limit on the number of config arguments.
+            encoded = []
+            for entry in tracing['attributes']:
+                source = entry['source_type']
+                field = constants.OTLP_SPAN_ATTRIBUTE_SOURCE_FIELDS[source]
+                key = entry['name'].encode('ascii').hex()
+                value = entry[field].encode('utf-8').hex()
+                encoded.append(f'{source}:{key}:{value}')
+            tracing['attributes_arg'] = ' attributes=' + ','.join(encoded)
         tracing['socket'] = (
             f'{constants.HAPROXY_OTLP_TRACING_SOCKET_DIR}/{listener.id}.sock')
         pool = next((pool for pool in loadbalancer.pools if

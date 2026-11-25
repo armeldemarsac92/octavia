@@ -861,12 +861,23 @@ class ListenersController(base.BaseController):
             raise exceptions.ValidationException(detail=_(
                 'OTLP tracing requires an HTTP or TERMINATED_HTTPS listener.'))
         driver_utils.require_listener_otlp_tracing(
-            driver, sampling='sampling' in tracing)
+            driver, sampling='sampling' in tracing,
+            attributes='attributes' in tracing)
         pool = self.repositories.pool.get_on_load_balancer_for_update(
             session, lb_id, project_id, tracing['collector_pool_id'])
         validate.validate_otlp_collector_transport(
             pool.protocol, pool.backend_h2c, pool.backend_tls_require_h2,
             pool.tls_enabled, pool.alpn_protocols)
+
+    @staticmethod
+    def _is_otlp_withdrawal(listener, tracing):
+        current = listener.otlp_tracing
+        if tracing is None:
+            return (current is not None or listener.otlp_tracing_status in (
+                constants.PENDING_UPDATE, constants.ERROR))
+        return (current is not None and 'attributes' in current and
+                tracing == {key: value for key, value in current.items()
+                            if key != 'attributes'})
 
     def _validate_listener_request_filters(
             self, session, driver, protocol, sections, lb_id, project_id):
@@ -1010,14 +1021,19 @@ class ListenersController(base.BaseController):
 
             listener_dict = listener.to_dict(render_unsets=False)
             withdrawing = (
-                listener_dict == {'otlp_tracing': None} and
-                (db_listener.otlp_tracing is not None or
-                 db_listener.otlp_tracing_status in (
-                     constants.PENDING_UPDATE, constants.ERROR)))
+                listener_dict.keys() == {'otlp_tracing'} and
+                self._is_otlp_withdrawal(db_listener,
+                                         listener_dict['otlp_tracing']))
             self._test_lb_and_listener_statuses(
                 context.session, load_balancer_id, allow_error=withdrawing)
             db_listener = self.repositories.listener.get_for_update(
                 context.session, id, show_deleted=False)
+            if (withdrawing and listener_dict['otlp_tracing'] is not None and
+                    not self._is_otlp_withdrawal(
+                        db_listener, listener_dict['otlp_tracing'])):
+                # Only a withdrawal of the current profile may bypass ERROR.
+                raise exceptions.ImmutableObject(
+                    resource=data_models.Listener._name(), id=id)
 
             new_pool_id = listener_dict.get('default_pool_id',
                                             db_listener.default_pool_id)

@@ -2187,15 +2187,34 @@ otlp_tracing:
   description: |
     Optional listener OTLP/HTTP tracing settings. The object requires
     collector_pool_id, service_name, and span_name, and accepts sampling
-    when the provider advertises listener_otlp_sampling_v1. Null clears
-    tracing.
+    when the provider advertises ``listener_otlp_sampling_v1``. When the
+    provider advertises ``listener_otlp_span_attributes_v1``, this object
+    also accepts ``attributes``. Each entry has a unique ``name`` and
+    ``source_type`` with exactly one corresponding value field.
+
+    * ``Literal`` uses ``literal_value``, a string of 1 to 1024 Unicode
+      characters.
+    * ``Header`` uses ``header_name``. When present, the first matching
+      request field is used, followed by the first matching response
+      field as a fallback. Missing fields and values that cannot be decoded
+      as UTF-8 are omitted. Matches are case-insensitive.
+    * ``Attribute`` uses ``attribute_key``. Supported inputs are
+      ``http.request.method``, ``url.path`` (excluding the query) and
+      ``url.scheme`` (frontend TLS determines the scheme), as strings, and
+      ``http.response.status_code`` as an integer. The latter is also
+      emitted by default. That exact output name is reserved for the
+      status code and appears only once.
+
+    Readback sorts attributes by name and returns lowercase header names.
+    Omit ``attributes`` or send ``[]`` in a replacement tracing object to
+    remove all custom span attributes. Null clears tracing.
   in: body
   required: false
   type: object
 otlp_tracing_status:
   description: |
-    Collector configuration publication state when listener tracing is set.
-    PENDING_UPDATE, ACTIVE, or ERROR.
+    Listener tracing configuration publication state, including any span
+    attributes. PENDING_UPDATE, ACTIVE, or ERROR.
   in: body
   required: false
   type: string
