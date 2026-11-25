@@ -178,10 +178,17 @@ bind {% if local_socket %}{{ local_socket }} accept-proxy{% else %}{{ lb_vip_add
 {%- endmacro %}
 
 
-{% macro policy_response_headers(listener, backend_kind, backend_id) %}
+{% macro policy_response_headers(listener, backend_kind, backend_id, reserved_cookie=None) %}
     {% for policy_id, operations in listener.get('response_header_operations_by_backend', {}).get((backend_kind, backend_id), []) %}
         {% for operation in operations %}
+            {% set parts = operation.split(' ', 2) %}
+            {# The renderer quotes literal operation values. Ignore
+               modifiers targeting the reserved cookie, including SET
+               which would otherwise delete unrelated cookies. #}
+            {% set targets_reserved = reserved_cookie and parts|length == 3 and parts[1]|lower == '"set-cookie"' and parts[2].split('=', 1)[0][1:].strip() == reserved_cookie %}
+            {% if not targets_reserved %}
     http-after-response {{ operation|safe }} if {{ selected_policy_match_macro(policy_id) }}
+            {% endif %}
         {% endfor %}
     {% endfor %}
 {% endmacro %}
@@ -930,15 +937,21 @@ listen octavia-mirror-{{ pool.id }}
     http-request set-var(txn.octavia_cookie_tag) var(txn.octavia_cookie),word(4,.) if octavia_cookie_age_valid octavia_cookie_age_below_limit
     http-request set-var-fmt(txn.octavia_cookie_payload) "v1.%[var(txn.octavia_cookie),word(2,.)].%[var(txn.octavia_cookie_issued)]" if octavia_cookie_age_valid octavia_cookie_age_below_limit
     http-request set-var(txn.octavia_cookie_member) var(txn.octavia_cookie),word(2,.) if octavia_cookie_age_valid octavia_cookie_age_below_limit octavia_cookie_authenticated
+    http-response set-var(txn.octavia_cookie_served_by) srv_name
     acl octavia_cookie_marker res.fhdr(Set-Cookie) -m beg {{ name }}=
-    {# Native insert/indirect strips the reserved cookie and inserts a marker
-       on a miss. Replace only that header with a signed session cookie. #}
+    {# Issue from the authenticated request and the actual responding member.
+       The native cookie stage removes the reserved name, then may insert a
+       removal marker. Rewrite that marker if present. #}
     {% for member in pool.members %}
     use-server {{ member.id }} if { var(txn.octavia_cookie_member) -m str {{ member.persistence_cookie }} }
-    http-after-response set-var-fmt(txn.octavia_cookie_issue) "v1.{{ member.persistence_cookie }}.%[date(0,us)]" if octavia_cookie_marker { srv_name -m str {{ member.id }} }
+    http-after-response set-var-fmt(txn.octavia_cookie_issue) "v1.{{ member.persistence_cookie }}.%[date(0,us)]" if { var(txn.octavia_cookie_served_by) -m str {{ member.id }} } !{ var(txn.octavia_cookie_member) -m str {{ member.persistence_cookie }} }
     {% endfor %}
     http-after-response set-var(txn.octavia_cookie_signature) var(txn.octavia_cookie_issue),hmac(sha256,txn.octavia_cookie_signing_key),ub64enc if { var(txn.octavia_cookie_issue) -m found }
-    http-after-response replace-header Set-Cookie '^{{ escaped_name }}=.*$' "{{ name }}=%[var(txn.octavia_cookie_issue)].%[var(txn.octavia_cookie_signature)]; path=/" if { var(txn.octavia_cookie_signature) -m found }
+    http-after-response set-var-fmt(txn.octavia_cookie_out) "%[var(txn.octavia_cookie_issue)].%[var(txn.octavia_cookie_signature)]" if { var(txn.octavia_cookie_signature) -m found }
+    http-after-response add-header Cache-Control private if !octavia_cookie_marker { var(txn.octavia_cookie_out) -m found }
+    http-after-response add-header Set-Cookie "{{ name }}=%[var(txn.octavia_cookie_out)]; path=/" if !octavia_cookie_marker { var(txn.octavia_cookie_out) -m found }
+    http-after-response set-var(txn.octavia_cookie_out) var(txn.octavia_cookie) if octavia_cookie_marker !{ var(txn.octavia_cookie_issue) -m found } { var(txn.octavia_cookie_member) -m found }
+    http-after-response replace-header Set-Cookie '^{{ escaped_name }}=.*$' "{{ name }}=%[var(txn.octavia_cookie_out)]; path=/" if octavia_cookie_marker { var(txn.octavia_cookie_out) -m found }
 {% endmacro %}
 
 
@@ -973,7 +986,8 @@ backend {{ pool.id }}:{{ listener.id }}
     {% endif %}
     {% set cors = listener.get('cors_by_backend', {}).get(('pool', pool.id), []) %}
 {{ cors_request(cors) -}}
-{{ policy_response_headers(listener, 'pool', pool.id) -}}
+    {% set reserved_cookie = pool.session_persistence.cookie_name if pool.session_persistence.absolute_timeout_us is defined else none %}
+{{ policy_response_headers(listener, 'pool', pool.id, reserved_cookie) -}}
 {{ cors_response(cors) -}}
     {% for policy_id, args in listener.get('http_request_policies_by_pool', {}).get(pool.id, []) %}
     http-request octavia-http-policy {{ args|join(' ') }} if {{ selected_policy_match_macro(policy_id) }}

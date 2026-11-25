@@ -2829,7 +2829,18 @@ class TestHaproxyCfg(base.TestCase):
             type=constants.SESSION_PERSISTENCE_HTTP_COOKIE,
             cookie_name='gw.session', http_cookie_name_enabled=True,
             cookie_absolute_timeout_ms=0, cookie_scope='a' * 64)
-        listener = listener._replace(default_pool=pool, pools=[pool])
+        policy_tuple = sample_configs_combined.sample_l7policy_tuple(
+            'cookie-filter')
+        policy = SimpleNamespace(**policy_tuple._asdict())
+        policy.redirect_pool = pool
+        policy.redirect_pool_id = pool.id
+        policy.response_header_operations = [
+            {'operation': 'SET', 'name': 'sEt-CoOkIe',
+             'value': 'gw.session=from-filter'},
+            {'operation': 'SET', 'name': 'X-Cookie-Fixture', 'value': 'kept'},
+        ]
+        listener = listener._replace(default_pool=pool, pools=[pool],
+                                     l7policies=[policy])
         amphora = sample_configs_combined.sample_amphora_tuple()
         conf = self.useFixture(oslo_fixture.Config(cfg.CONF))
         with tempfile.TemporaryDirectory() as directory:
@@ -2856,12 +2867,23 @@ class TestHaproxyCfg(base.TestCase):
                 amphora, [listener], amp_details={capability: True},
                 http_cookie_results=results)
             self.assertEqual({pool.id: constants.ACTIVE}, results)
-            self.assertNotIn(base64.b64encode(key).decode('ascii'), rendered)
-            self.assertIn(' -m int lt 0', rendered)
-            self.assertIn('req.cook_cnt(gw.session) eq 1', rendered)
-            self.assertIn("Set-Cookie '^gw[.]session=.*$'", rendered)
-            self.assertIn('use-server sample_member_id_1 if', rendered)
-            self.assertNotRegex(rendered, r'(?m)^    server .* cookie ')
+            # Keep the signing material out of assertion failure messages.
+            encoded_key = base64.b64encode(key).decode('ascii')
+            self.assertEqual(-1, rendered.find(encoded_key))
+            config_for_assertions = '\n'.join(
+                line for line in rendered.splitlines()
+                if 'set-var(txn.octavia_cookie_signing_key) str(' not in line)
+            for expected in (
+                    ' -m int lt 0', 'req.cook_cnt(gw.session) eq 1',
+                    "Set-Cookie '^gw[.]session=.*$'",
+                    'use-server sample_member_id_1 if',
+                    'set-header "x-cookie-fixture" "kept"'):
+                self.assertIn(expected, config_for_assertions)
+            self.assertNotIn('gw.session=from-filter', config_for_assertions)
+            server_lines = '\n'.join(
+                line for line in rendered.splitlines()
+                if line.startswith('    server '))
+            self.assertNotIn(' cookie ', server_lines)
 
         old_amphora = self.jinja_cfg.render_loadbalancer_obj(
             amphora, [listener], amp_details={})

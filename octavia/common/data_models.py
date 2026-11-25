@@ -185,7 +185,8 @@ class SessionPersistence(BaseDataModel):
     def __init__(self, pool_id=None, type=None, cookie_name=None,
                  pool=None, persistence_timeout=None,
                  persistence_granularity=None, http_cookie_name_enabled=False,
-                 cookie_absolute_timeout_ms=None, cookie_scope=None):
+                 cookie_absolute_timeout_ms=None, cookie_scope=None,
+                 cookie_absolute_timeout_error=False):
         self.pool_id = pool_id
         self.type = type
         self.cookie_name = cookie_name
@@ -195,6 +196,7 @@ class SessionPersistence(BaseDataModel):
         self.http_cookie_name_enabled = http_cookie_name_enabled
         self.cookie_absolute_timeout_ms = cookie_absolute_timeout_ms
         self.cookie_scope = cookie_scope
+        self.cookie_absolute_timeout_error = cookie_absolute_timeout_error
 
     def delete(self):
         self.pool.session_persistence = None

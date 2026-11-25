@@ -1139,6 +1139,8 @@ def pool_dict_to_provider_dict(pool_dict, for_delete=False, for_update=False):
             del new_pool_dict['session_persistence']['pool']
         new_pool_dict['session_persistence'].pop(
             'http_cookie_name_enabled', None)
+        new_pool_dict['session_persistence'].pop(
+            'cookie_absolute_timeout_error', None)
         # Keep legacy provider payloads unchanged. An update carrying explicit
         # nulls uses them to clear the timeout and scope.
         if not for_update:

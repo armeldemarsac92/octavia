@@ -2476,6 +2476,8 @@ class TestPool(base.BaseAPITest):
                     policy, cookie_absolute_timeout_ms=invalid), status=400)
 
         persistence = 'session_persistence'
+        anchor_id = self.create_pool(*args)['pool']['id']
+        self.set_lb_status(lb_id)
         created = self.create_pool(*args, session_persistence=policy)['pool']
         path = self.POOL_PATH.format(pool_id=created['id'])
         cast = rpc.return_value.cast
@@ -2505,10 +2507,49 @@ class TestPool(base.BaseAPITest):
             repo.mark_active(session, pool_id)
         self.assertEqual(constants.ERROR,
                          self.get(path).json['pool']['provisioning_status'])
+        page = {'id': pool_id, 'marker': anchor_id, 'limit': 1,
+                'sort': 'id:asc' if anchor_id < pool_id else 'id:desc',
+                'fields': ['id', 'provisioning_status']}
+        projected = self.get(self.POOLS_PATH, params=page).json['pools']
+        self.assertEqual([{'id': pool_id, 'provisioning_status':
+                           constants.ERROR}], projected)
+
+        # An ordinary PUT may replay the same policy. Publishing the pool's
+        # lifecycle completion does not make its still-degraded cookies ready.
+        self.set_lb_status(lb_id)
+        self.put(path, self._build_body({
+            persistence: update}))
+        self.assertEqual(max_timeout, cast.call_args.kwargs['pool_updates']
+                         [persistence]['cookie_absolute_timeout_ms'])
+        with db_api.session().begin() as session:
+            repo.mark_active(session, pool_id)
+        self.assertEqual(constants.ERROR,
+                         self.get(path).json['pool']['provisioning_status'])
         with db_api.session().begin() as session:
             repo.set_http_cookie_pool_statuses(
                 session, persisted_policy, failed=set(), recovered={pool_id})
         self.assertEqual(constants.ACTIVE,
+                         self.get(path).json['pool']['provisioning_status'])
+        projected = self.get(self.POOLS_PATH, params=page).json['pools']
+        self.assertEqual([{'id': pool_id, 'provisioning_status':
+                           constants.ACTIVE}], projected)
+
+        # Failures in each profile remain visible when the other recovers.
+        with db_api.session().begin() as session:
+            repo.update(session, pool_id, backend_tls_hostname='origin.test')
+            repo.set_backend_tls_pool_statuses(
+                session, closed={pool_id}, recovered=set())
+            repo.set_http_cookie_pool_statuses(
+                session, persisted_policy, failed=set(), recovered={pool_id})
+        self.assertEqual(constants.ERROR,
+                         self.get(path).json['pool']['provisioning_status'])
+        with db_api.session().begin() as session:
+            repo.set_http_cookie_pool_statuses(
+                session, persisted_policy, failed={pool_id}, recovered=set())
+            repo.set_backend_tls_pool_statuses(
+                session, closed=set(), recovered={pool_id})
+            repo.update(session, pool_id, backend_tls_hostname=None)
+        self.assertEqual(constants.ERROR,
                          self.get(path).json['pool']['provisioning_status'])
 
         self.conf.config(group='api_settings',

@@ -551,8 +551,8 @@ to the default. To remove persistence entirely, send
 Absolute HTTP session cookie timeouts
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Apply database migration ``5b9299b23980`` and update every API, worker and
-eligible Amphora agent. Qualify the regional OpenSSL-enabled HAProxy builds
+Apply database migrations through ``6529f4796d83`` and update the API, workers
+and eligible Amphora agents. Qualify the regional OpenSSL-enabled HAProxy builds
 before enabling discovery. The profile uses native HAProxy facilities and
 was qualified against HAProxy 3.0.19. The upgraded agent advertises support
 to the worker for HAProxy 3.0 and newer with OpenSSL. Qualify any later build
@@ -594,6 +594,9 @@ The provider then advertises ``http_cookie_absolute_timeout_v1``. A named
 scope, project, name and timeout preserve affinity to the same destination
 address and port after a reload or failover. A cookie for an expired,
 unavailable or unknown member falls back to the pool's normal balancing.
+The affinity cookie name is reserved in responses. A response header
+modifier targeting that cookie does not affect the session or remove
+other application cookies.
 
 HAProxy checks age with its native microsecond wall-clock sample. HAProxy
 refreshes this sample after polling and gives no maximum sampling delay
@@ -606,10 +609,12 @@ age reaches the deadline. The arrival check applies to new requests.
 Removing API discovery prevents new enrollment and replacement. Existing
 pools continue using their stored policy. If a worker cannot read a valid
 key, or an Amphora does not advertise support, the new configuration
-balances the affected pool without affinity and the pool reports
-``ERROR``. Re-render after restoring the key and eligible Amphora
-support. A successful render on all assigned Amphorae restores the
-pool's provisioning status. The load balancer's previously loaded
+balances the affected pool without affinity. After an Amphora confirms
+this reload, pool reads report ``ERROR`` for an otherwise active pool.
+Re-render after restoring the key and eligible Amphora support. All
+Amphorae in the allocated topology must confirm the restored policy before
+pool reads stop reporting this affinity error. The pool's own provisioning
+failures remain visible. The load balancer's previously loaded
 configuration remains in use until a reload. Explicitly clear both fields
 with ``null`` to return to named affinity without a timeout, or set
 ``session_persistence`` to ``null`` to remove affinity entirely.

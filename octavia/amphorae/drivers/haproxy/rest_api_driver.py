@@ -191,17 +191,31 @@ class HaproxyAmphoraLoadBalancerDriver(
             return
 
         votes = {}
-        yield {'http_cookie_observed': votes}
-        expected = {amp.id for amp in loadbalancer.amphorae
-                    if amp.status != consts.DELETED}
-        paired = loadbalancer.topology == consts.TOPOLOGY_ACTIVE_STANDBY
-        complete = len(expected) == (2 if paired else 1)
+        completed = False
+        try:
+            yield {'http_cookie_observed': votes}
+            completed = True
+        finally:
+            self._publish_http_cookie_results(
+                loadbalancer, policies, votes, completed)
+
+    def _publish_http_cookie_results(self, loadbalancer, policies, votes,
+                                     completed):
+        # An acknowledged degradation is observable even if a subsequent
+        # peer fails. Recovery requires every member of the allocated topology.
+        expected = set()
+        if completed:
+            try:
+                expected = {amp.id for amp in
+                            self._allocated_amphorae(loadbalancer)}
+            except driver_except.ListenerProvisioningError:
+                pass
         failed = {pool_id for pool_id in policies
                   if any(vote.get(pool_id) == consts.ERROR
                          for vote in votes.values())}
         recovered = {
             pool_id for pool_id in policies.keys() - failed
-            if complete and all(votes.get(amp_id, {}).get(pool_id) ==
+            if expected and all(votes.get(amp_id, {}).get(pool_id) ==
                                 consts.ACTIVE for amp_id in expected)}
         if failed or recovered:
             with db_api.session().begin() as session:
@@ -344,11 +358,7 @@ class HaproxyAmphoraLoadBalancerDriver(
                     amp_details=amp_details, **tracing_options,
                     **cookie_options)
                 if tcp_batch_configs is not None:
-                    tcp_batch_configs.append((amphora, config))
-                    if http_cookie_observed is not None:
-                        # The outer observer only publishes after the batch
-                        # has uploaded and reloaded on all its Amphorae.
-                        http_cookie_observed[amphora.id] = cookie_results
+                    tcp_batch_configs.append((amphora, config, cookie_results))
                     return {listener.id for listener in listeners_to_update}
                 self.clients[amphora.api_version].upload_config(
                     amphora, loadbalancer.id, config,
@@ -462,7 +472,7 @@ class HaproxyAmphoraLoadBalancerDriver(
                                       timeout_dict=timeout_dict)
 
     @staticmethod
-    def _allocated_udp_amphorae(loadbalancer):
+    def _allocated_amphorae(loadbalancer):
         amphorae = [amp for amp in loadbalancer.amphorae
                     if amp.status == consts.AMPHORA_ALLOCATED]
         roles = {
@@ -487,7 +497,7 @@ class HaproxyAmphoraLoadBalancerDriver(
 
         # Ordinary member updates need the complete allocated topology.
         # Replacement Amphorae use the single-peer failover render method.
-        amphorae = self._allocated_udp_amphorae(loadbalancer)
+        amphorae = self._allocated_amphorae(loadbalancer)
         config = self.lvs_jinja.build_config(listener=listener)
         for amphora in amphorae:
             self._populate_amphora_api_version(amphora)
@@ -517,7 +527,7 @@ class HaproxyAmphoraLoadBalancerDriver(
     def _update_scoped_udp_listeners(self, loadbalancer, listeners, *,
                                      delete=False):
         if any(self._has_udp_guard(listener) for listener in listeners):
-            amphorae = self._allocated_udp_amphorae(loadbalancer)
+            amphorae = self._allocated_amphorae(loadbalancer)
         else:
             amphorae = [amp for amp in loadbalancer.amphorae
                         if amp.status != consts.DELETED]
@@ -571,12 +581,15 @@ class HaproxyAmphoraLoadBalancerDriver(
             if tcp_member_batch:
                 # Build every peer's combined config before uploading any
                 # candidate. Validate all uploads before requesting a reload.
-                for amphora, config in tcp_batch_configs:
+                for amphora, config, _ in tcp_batch_configs:
                     self.clients[amphora.api_version].upload_config(
                         amphora, loadbalancer.id, config)
-                for amphora, _config in tcp_batch_configs:
+                votes = cookie_options.get('http_cookie_observed')
+                for amphora, _, cookie_results in tcp_batch_configs:
                     self.clients[amphora.api_version].reload_listener(
                         amphora, loadbalancer.id)
+                    if votes is not None:
+                        votes[amphora.id] = cookie_results
 
     def update_failover_listeners(self, loadbalancer, amphora_index,
                                   amphorae_status, timeout_dict=None):

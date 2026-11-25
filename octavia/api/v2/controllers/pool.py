@@ -927,6 +927,9 @@ class PoolsController(base.BaseController):
             if persistence:
                 persistence['http_cookie_name_enabled'] = (
                     _has_named_http_cookie(persistence))
+                if ('cookie_absolute_timeout_ms' in persistence and
+                        persistence['cookie_absolute_timeout_ms'] is None):
+                    persistence['cookie_absolute_timeout_error'] = False
             self.repositories.update_pool_and_sp(context.session, id,
                                                  db_pool_dict)
 

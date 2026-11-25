@@ -1151,22 +1151,17 @@ class PoolRepository(BaseRepository):
         pool = self.model_class
         for pool_id in sorted(failed | recovered):
             name, timeout, scope = policies[pool_id]
-            query = session.query(pool).filter(
-                pool.id == pool_id, pool.enabled.is_(True),
-                pool.session_persistence.has(and_(
-                    persistence.cookie_name == name,
-                    persistence.cookie_absolute_timeout_ms == timeout,
-                    persistence.cookie_scope == scope)))
-            if pool_id in failed:
-                query.filter(pool.provisioning_status.notin_(
-                    (consts.PENDING_DELETE, consts.DELETED))).update(
-                        {'provisioning_status': consts.ERROR},
-                        synchronize_session=False)
-            else:
-                query.filter(
-                    pool.provisioning_status == consts.ERROR).update(
-                        {'provisioning_status': consts.ACTIVE},
-                        synchronize_session=False)
+            session.query(persistence).filter(
+                persistence.pool_id == pool_id,
+                persistence.cookie_name == name,
+                persistence.cookie_absolute_timeout_ms == timeout,
+                persistence.cookie_scope == scope,
+                persistence.pool.has(and_(
+                    pool.enabled.is_(True),
+                    pool.provisioning_status.notin_(
+                        (consts.PENDING_DELETE, consts.DELETED))))).update(
+                            {'cookie_absolute_timeout_error':
+                             pool_id in failed}, synchronize_session=False)
 
     def mark_active(self, session, id):
         if self.batch_owns_graph(session, id):
@@ -1181,18 +1176,14 @@ class PoolRepository(BaseRepository):
                     {'provisioning_status': consts.ERROR})
         # The Amphora driver records closed protected pools after applying
         # the safe configuration. A flow must not turn those errors ACTIVE.
-        timed_cookie = pool.session_persistence.has(
-            models.SessionPersistence.cookie_absolute_timeout_ms.is_not(None))
         session.query(pool).filter(
             pool.id == id,
             or_(pool.tcp_member_batch_id.is_(None), ~failed),
             or_(and_(pool.backend_tls_hostname.is_(None),
-                     pool.backend_tls_require_h2.is_(False),
-                     ~timed_cookie),
+                     pool.backend_tls_require_h2.is_(False)),
                 pool.enabled.is_(False),
                 pool.provisioning_status != consts.ERROR)).update(
-                    {'provisioning_status': consts.ACTIVE},
-                    synchronize_session=False)
+                    {'provisioning_status': consts.ACTIVE})
 
     def get_on_load_balancer_for_update(
             self, session, lb_id, project_id, pool_id, *,

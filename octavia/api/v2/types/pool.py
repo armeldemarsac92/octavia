@@ -133,6 +133,18 @@ class BasePoolType(types.BaseType):
 
     _child_map = {'health_monitor': {'id': 'healthmonitor_id'}}
 
+    @classmethod
+    def from_db_obj(cls, db_obj):
+        result = super().from_db_obj(db_obj)
+        persistence = db_obj.session_persistence
+        if (db_obj.enabled and
+                db_obj.provisioning_status == constants.ACTIVE and
+                persistence is not None and
+                persistence.cookie_absolute_timeout_ms is not None and
+                persistence.cookie_absolute_timeout_error):
+            result.provisioning_status = constants.ERROR
+        return result
+
 
 class PoolResponse(BasePoolType):
     """Defines which attributes are to be shown on any response."""
