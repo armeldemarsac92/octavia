@@ -36,6 +36,7 @@ from octavia.api.v2.types import pool as pool_types
 from octavia.common import constants
 from octavia.common import data_models
 from octavia.common import exceptions
+from octavia.common import listener_request_filters
 from octavia.common import validate
 from octavia.db import prepare as db_prepare
 from octavia.i18n import _
@@ -814,6 +815,38 @@ class PoolsController(base.BaseController):
             driver_utils.require_no_exposed_request_transforms(
                 driver, policy_repo, session, disabling_pool=pool_id)
 
+    def _validate_authorization_pool_update(
+            self, session, pool_id, current, changes):
+        if not changes.keys() & {
+                'tags', 'tls_enabled', 'backend_h2c',
+                'backend_tls_require_h2', 'backend_tls_hostname',
+                'ca_tls_certificate_id', 'backend_tls_system_ca',
+                'alpn_protocols'}:
+            return
+        listener_id = (self.repositories.listener
+                       .get_request_filter_listener_using_pool(
+                           session, pool_id))
+        policies = (self.repositories.l7policy
+                    .get_external_auth_policies_using_pool(session, pool_id))
+        if not listener_id and not policies:
+            return
+        tags = changes.get('tags')
+        if 'tags' not in changes:
+            tags = self.repositories.pool.get_tags_for_update(
+                session, pool_id)
+        tags = tags or ()
+        if listener_id and not listener_request_filters.valid_pool(
+                current, tags=tags, changes=changes):
+            raise exceptions.PoolInUseByListenerRequestFilter(
+                id=pool_id, listener_id=listener_id)
+        for policy in policies:
+            protocol = ('GRPC' if validate.is_grpc_external_auth(
+                policy.external_auth) else constants.PROTOCOL_HTTP)
+            if not listener_request_filters.valid_pool(
+                    current, protocol=protocol, tags=tags, changes=changes):
+                raise exceptions.PoolInUseByL7Policy(
+                    id=pool_id, l7policy_id=policy.l7policy_id)
+
     def _validate_pool_persistence_update(self, session, pool_id, pool,
                                           current, driver):
         changes = pool.session_persistence
@@ -1043,23 +1076,9 @@ class PoolsController(base.BaseController):
                 driver_utils.require_backend_retry_budget(
                     driver, current.protocol)
             listener_repo = self.repositories.listener
-            if (pool.tls_enabled is True or pool.backend_h2c is True or
-                    (pool.tags is not wtypes.Unset and
-                     constants.GATEWAY_LISTENER_AUTH_POOL_TAG not in
-                     (pool.tags or []))):
-                filter_listener_id = (
-                    listener_repo.get_request_filter_listener_using_pool(
-                        context.session, id))
-                if filter_listener_id:
-                    raise exceptions.PoolInUseByListenerRequestFilter(
-                        id=id, listener_id=filter_listener_id)
-                policy_id = (self.repositories.l7policy
-                             .get_external_auth_policy_using_pool(
-                                 context.session, id))
-                if policy_id:
-                    raise exceptions.PoolInUseByL7Policy(
-                        id=id, l7policy_id=policy_id)
             pool_dict = pool.to_dict(render_unsets=False)
+            self._validate_authorization_pool_update(
+                context.session, id, current, pool_dict)
             transport_fields = {
                 'backend_h2c', 'backend_tls_require_h2', 'tls_enabled',
                 'alpn_protocols'}

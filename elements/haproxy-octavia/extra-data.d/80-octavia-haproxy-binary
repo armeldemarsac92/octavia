@@ -5,3 +5,8 @@ if [[ -n "${DIB_OCTAVIA_HAPROXY_BINARY:-}" ]]; then
     install -m 0755 "$DIB_OCTAVIA_HAPROXY_BINARY" \
         "$TMP_HOOKS_PATH/octavia-haproxy-strict"
 fi
+
+if [[ -n "${DIB_OCTAVIA_GRPC_AUTHZ_BINARY:-}" ]]; then
+    install -m 0755 "$DIB_OCTAVIA_GRPC_AUTHZ_BINARY" \
+        "$TMP_HOOKS_PATH/octavia-grpc-authz"
+fi

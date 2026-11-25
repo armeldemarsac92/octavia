@@ -31,6 +31,7 @@ from octavia.common import constants
 import octavia.common.context
 from octavia.common import data_models
 from octavia.common import exceptions
+from octavia.common.jinja.haproxy.combined_listeners import jinja_cfg
 from octavia.common import policy
 from octavia.controller.queue.v2 import endpoints
 from octavia.controller.worker.v2.tasks import amphora_driver_tasks
@@ -220,6 +221,146 @@ class TestInitialL7Rules(base.BaseAPITest):
                  status=400)
         self.put(copying_path, {'l7policy': {
             'external_auth': auth, 'targets': [target]}})
+
+    def test_grpc_external_auth_reconciles_the_authorizer_reference(self):
+        enabled = ['amphora']
+        self.conf.config(
+            group='api_settings', enabled_backend_h2c_providers=enabled,
+            enabled_l7policy_http_external_auth_providers=enabled)
+        origin = self.create_pool(self.lb_id, 'HTTP', 'ROUND_ROBIN')['pool']
+        self.set_lb_status(self.lb_id)
+        role = constants.GATEWAY_GRPC_AUTH_POOL_TAG
+        auth_pool = self.create_pool(
+            self.lb_id, 'HTTP', 'ROUND_ROBIN', backend_h2c=True,
+            tags=[role])['pool']
+        self.set_lb_status(self.lb_id)
+
+        field = 'external_auth'
+        auth = {'protocol': 'GRPC', 'pool_id': auth_pool['id'],
+                'allowed_request_headers': [
+                    'X-Identity', ':authority', 'x-identity']}
+        payload = {'action': 'REDIRECT_TO_POOL', 'redirect_prefix': None,
+                   'redirect_pool_id': origin['id'], field: auth}
+        caps = self.PROVIDERS_PATH + '/amphora/gateway_capabilities'
+        grpc_cap = constants.GATEWAY_CAPABILITY_L7POLICY_GRPC_EXTERNAL_AUTH
+        self.assertNotIn(grpc_cap, self.get(caps).json['gateway_capabilities'])
+        self._post_policy(status=501, **payload)
+        self.conf.config(
+            group='api_settings',
+            enabled_l7policy_grpc_external_auth_providers=enabled,
+            enabled_l7policy_http_external_auth_providers=[])
+        self.assertIn(grpc_cap, self.get(caps).json['gateway_capabilities'])
+        self._post_policy(status=400, **{
+            **payload, field: {**auth, 'allowed_response_headers': []}})
+        self._post_policy(status=400, **{
+            **payload, field: {**auth, 'pool_id': origin['id']}})
+        policy = self._post_policy(**payload)['l7policy']
+        auth['allowed_request_headers'] = [':authority', 'x-identity']
+        self.assertEqual(auth, policy[field])
+        self.assertEqual(auth, self.rpc.cast.call_args.kwargs[
+            constants.L7POLICY][field])
+        path = self.L7POLICY_PATH.format(l7policy_id=policy['id'])
+        self.assertEqual(auth, self.get(path).json['l7policy'][field])
+        [listed] = self.get(self.L7POLICIES_PATH).json['l7policies']
+        self.assertEqual(auth, listed[field])
+
+        self.set_lb_status(self.lb_id)
+        self.put(path, {'l7policy': {'admin_state_up': True}})
+        self.set_lb_status(self.lb_id)
+        pool_path = self.POOL_PATH.format(pool_id=auth_pool['id'])
+        self.delete(pool_path, status=409)
+        self.put(pool_path, {'pool': {'backend_h2c': False}}, status=409)
+        conflicting_tags = [role, constants.GATEWAY_LISTENER_AUTH_POOL_TAG]
+        self.put(pool_path, {'pool': {'tags': conflicting_tags}}, status=409)
+        self.put(pool_path, {'pool': {'tags': [role, 'operator-note']}})
+        self.set_lb_status(self.lb_id)
+
+        self.conf.config(
+            group='api_settings',
+            enabled_l7policy_grpc_external_auth_providers=[],
+            enabled_l7policy_http_external_auth_providers=enabled)
+        listener_path = self.LISTENER_PATH.format(listener_id=self.listener_id)
+        self.put(listener_path, {'listener': {'admin_state_up': False}})
+        self.set_lb_status(self.lb_id)
+        self.put(listener_path, {'listener': {'admin_state_up': True}},
+                 status=501)
+        self.assertEqual(auth, self.get(path).json['l7policy'][field])
+        self.assertIsNone(self.put(path, {'l7policy': {field: None}})
+                          .json['l7policy'][field])
+        self.assertIsNone(self.rpc.cast.call_args.kwargs[
+            constants.L7POLICY_UPDATES][field])
+        self.set_lb_status(self.lb_id)
+        self.delete(pool_path)
+
+    def test_grpc_external_auth_validates_tls_h2_and_activation(self):
+        enabled = ['amphora']
+        self.conf.config(
+            group='api_settings', enabled_gateway_action_providers=enabled,
+            enabled_backend_tls_hostname_providers=enabled,
+            enabled_backend_tls_h2_alpn_providers=enabled,
+            enabled_l7policy_grpc_external_auth_providers=enabled)
+        self.cert_manager_mock().get_secret.return_value = (
+            sample_certs.X509_CA_CERT)
+        origin = self.create_pool(self.lb_id, 'HTTP', 'ROUND_ROBIN')['pool']
+        self.set_lb_status(self.lb_id)
+        auth_pool = self.create_pool(
+            self.lb_id, 'HTTP', 'ROUND_ROBIN', tls_enabled=True,
+            backend_tls_hostname='authorizer.example.test',
+            ca_tls_container_ref=uuidutils.generate_uuid(),
+            backend_tls_require_h2=True, alpn_protocols=['h2'],
+            tags=[constants.GATEWAY_GRPC_AUTH_POOL_TAG])['pool']
+        self.set_lb_status(self.lb_id)
+        auth = {'protocol': 'GRPC', 'pool_id': auth_pool['id']}
+        pool_path = self.POOL_PATH.format(pool_id=auth_pool['id'])
+        self.put(pool_path, {'pool': {'alpn_protocols': ['http/1.1']}})
+        self.set_lb_status(self.lb_id)
+        weighted = {'action': 'WEIGHTED_TARGETS', 'redirect_prefix': None,
+                    'targets': [{'pool_id': origin['id'], 'weight': 1}],
+                    'external_auth': auth}
+        self._post_policy(status=400, **weighted)
+        self.put(pool_path, {'pool': {'alpn_protocols': ['h2']}})
+        self.set_lb_status(self.lb_id)
+
+        activation_path, request = self._prepare_activation_group(**weighted)
+        self.put(pool_path, {'pool': {'alpn_protocols': ['http/1.1']}},
+                 status=409)
+        self.conf.config(
+            group='api_settings',
+            enabled_l7policy_grpc_external_auth_providers=[])
+        graph = self.get(activation_path).json['l7policy_activation']
+        self.assertEqual(auth, graph['policies'][0]['policy']['external_auth'])
+        self.assertCountEqual([origin['id'], auth_pool['id']],
+                              [row['pool']['id'] for row in graph['pools']])
+        self.post(activation_path, request, status=501)
+        self.conf.config(
+            group='api_settings',
+            enabled_l7policy_grpc_external_auth_providers=enabled)
+        self.post(activation_path, request, status=204)
+
+        endpoints.Endpoints().activate_l7policies(
+            {}, **self.rpc.cast.call_args.kwargs)
+        with db_api.session().begin() as session:
+            lb = self.lb_repo.get(session, id=self.lb_id)
+        amp = data_models.Amphora(id='local',
+                                  status=constants.AMPHORA_ALLOCATED)
+        caps = {constants.GATEWAY_CAPABILITY_L7POLICY_GRPC_EXTERNAL_AUTH: True,
+                constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME: True,
+                constants.GATEWAY_CAPABILITY_BACKEND_TLS_H2_ALPN: True}
+        renderer = jinja_cfg.JinjaTemplater()
+        socket = f"/run/octavia/grpc-auth/{auth_pool['id']}.sock"
+        for available in (True, False):
+            with self.subTest(ca_available=available):
+                material = ({'ca_cert': '/auth-ca.pem'} if available else
+                            {'closed': True})
+                config = renderer.build_config(
+                    amp, lb.listeners, {auth_pool['id']: material},
+                    amp_details=caps, haproxy_versions=['3', '0', '19'])
+                self.assertEqual(available, socket in config)
+                self.assertEqual(
+                    available, 'http-request lua.octavia-grpc-auth ' in config)
+                if not available:
+                    self.assertIn('http-request deny deny_status 503 if '
+                                  '{ var(txn.octavia_l7_policy)', config)
 
     def test_http_external_auth_withdrawal_blocks_indirect_exposure(self):
         self.conf.config(

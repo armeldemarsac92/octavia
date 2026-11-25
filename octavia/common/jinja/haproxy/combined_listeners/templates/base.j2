@@ -17,6 +17,11 @@
 global
     daemon
     user nobody
+    {% if loadbalancer.get('grpc_auth_pools') %}
+    httpclient.retries 0
+    httpclient.timeout.connect 3s
+    lua-load-per-thread {{ constants.HAPROXY_GRPC_AUTH_SCRIPT }}
+    {% endif %}
     {% if config_publication %}
     description octavia-config-{{ config_publication }}
     {% elif otlp_publication %}
@@ -63,7 +68,7 @@ global
             {% endif %}
         {% endif %}
     {% endfor %}
-    {% for pool in loadbalancer.get('listener_auth_pools', []) %}
+    {% for pool in loadbalancer.get('listener_auth_pools', []) + loadbalancer.get('grpc_auth_pools', []) %}
         {% if pool.health_monitor and pool.health_monitor.enabled and
               pool.health_monitor.type == constants.HEALTH_MONITOR_PING and
               found_ns.found == false %}

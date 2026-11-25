@@ -1161,19 +1161,35 @@ l7policy-http-request-policy:
   type: object
 l7policy-external-auth:
   description: |
-    Bodyless HTTP authorization for the selected forwarding policy. The
-    object requires the authorization ``pool_id`` and accepts optional
+    Bodyless authorization for the selected ``REDIRECT_TO_POOL`` or
+    ``WEIGHTED_TARGETS`` policy on an HTTP or terminated HTTPS listener.
+    The authorization ``pool_id`` must belong to the same load balancer
+    and project as the policy.
+
+    Omit ``protocol`` for HTTP authorization with
+    ``l7policy_http_external_auth_v1``. The pool uses plain HTTP and carries
+    the ``gw-api-listener-auth-pool-v1`` tag. HTTP accepts optional
     ``path_prefix``, ``allowed_request_headers`` and
-    ``allowed_response_headers``. It requires a provider enrolled in
-    ``l7policy_http_external_auth_v1``, an HTTP or terminated HTTPS listener
-    and a plain HTTP authorization pool on the same load balancer and
-    project. ``REDIRECT_TO_POOL`` and ``WEIGHTED_TARGETS`` are supported.
+    ``allowed_response_headers``.
+
+    Set ``protocol`` to ``GRPC`` for Envoy v3 authorization with
+    ``l7policy_grpc_external_auth_v1``. The HTTP pool carries the
+    ``gw-api-grpc-auth-pool-v1`` tag and uses cleartext HTTP/2 with
+    ``backend_h2c``, or verified TLS with ``backend_tls_require_h2``,
+    ``backend_tls_hostname`` and a trusted CA source. If the pool
+    explicitly lists ALPN protocols, the list includes ``h2``.
+    The optional ``allowed_request_headers`` list selects headers sent
+    to the authorizer. An omitted or empty list allows request headers
+    exposed by the listener filter. Request method, path, authority, scheme
+    and protocol are supplied separately. The authorization check omits the
+    request body.
+
     Other policy and weighted target filters cannot be combined with this
     field. Listener authorization, when configured, runs before policy
     selection. Omit this field in an update to preserve it, or send
-    ``null`` to clear it. Enrolled providers return ``null`` when there is
-    no stored value. Configured values remain visible if enrollment is
-    withdrawn.
+    ``null`` to clear it. A provider enrolled for either protocol returns
+    ``null`` when there is no stored value. Configured values remain visible
+    if enrollment is withdrawn.
   in: body
   required: false
   type: object

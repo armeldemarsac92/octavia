@@ -1,0 +1,10 @@
+[Unit]
+Description=Amphora Envoy v3 authorization adapter
+Requires=octavia-grpc-authz.socket
+After=octavia-grpc-authz.socket
+
+[Service]
+User=nobody
+ExecStart=/usr/libexec/octavia-grpc-authz
+NoNewPrivileges=true
+RestrictAddressFamilies=AF_UNIX

@@ -344,8 +344,8 @@ class L7RuleController(base.BaseController):
                             session, rule, compare_type=exact)):
                     driver_utils.require_tls_sni_suffix(driver)
             if policy.external_auth is not None and listener.enabled:
-                driver_utils.require_l7policy_http_external_auth(
-                    driver, listener.protocol)
+                driver_utils.require_l7policy_external_auth(
+                    driver, listener.protocol, policy.external_auth)
             if redirect and listener.enabled:
                 driver_utils.require_http_request_redirect(driver)
                 self._require_no_transform_exposed_by_ordered_redirect(

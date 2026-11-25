@@ -15,6 +15,8 @@ the standard ``loadbalancer`` and ``listener`` representations, plus a
 ``pools`` array of destinations referenced by the listener or its policies.
 Each destination has a ``pool`` object with ``healthmonitor`` when present
 and a separate ``members`` array with detailed members and their ``pool_id``.
+The array includes policy authorization pools. Their configured references
+are visible even if authorization enrollment has been withdrawn.
 
 The ``policies`` array contains every non-deleted policy of the listener in
 position order, without pagination. Each element has an opaque ``revision``
