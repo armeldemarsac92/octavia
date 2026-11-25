@@ -398,7 +398,7 @@ backend {{ pool.id }}:{{ listener.id }}
 {%- endmacro %}
 
 
-{% macro stock_redirect_macro(constants, policy, unless_ordered=False) %}
+{% macro stock_redirect_macro(constants, policy, unless_ordered=False, auth_mode=False) %}
     {% set code = (" code %s"|format(policy.redirect_http_code)) if policy.redirect_http_code else "" %}
     {% if policy.action == constants.L7POLICY_ACTION_REDIRECT_TO_URL %}
         {% set mode = "location" %}
@@ -407,17 +407,26 @@ backend {{ pool.id }}:{{ listener.id }}
         {% set mode = "prefix" %}
         {% set destination = policy.redirect_prefix %}
     {% endif %}
-    redirect{{ code }} {{ mode }} {{ destination }} if{% if unless_ordered %} !{{ ordered_redirect_match_macro() }}{% endif %}{{ l7rule_list_macro(constants, policy) }}
+    redirect{{ code }} {{ mode }} {{ destination }} if{% if auth_mode %} { var(txn.octavia_legacy_redirect) -m found }{% endif %}{% if unless_ordered %} !{{ ordered_redirect_match_macro() }}{% endif %}{{ l7rule_list_macro(constants, policy) }}
 {% endmacro %}
 
 
-{% macro select_switching_policy_macro(constants, l7policy) %}
-    {% if l7policy.weighted_targets is defined or
+{% macro select_switching_policy_macro(constants, l7policy, auth_mode=False) %}
+    {% if auth_mode and l7policy.request_redirect is defined %}
+        {% set match = request_redirect_match_macro(constants, l7policy) %}
+        {% if l7policy.action != constants.L7POLICY_ACTION_REDIRECT_REQUEST %}
+            {% set match = ' ' ~ ordered_redirect_match_macro() ~ match %}
+        {% endif %}
+    {% elif l7policy.weighted_targets is defined or
+          (auth_mode and l7policy.external_auth is defined) or
           l7policy.fixed_http_status_code is defined or
           (l7policy.action == constants.L7POLICY_ACTION_REDIRECT_TO_POOL and
            l7policy.redirect_pool and
            (l7policy.redirect_pool.enabled or l7policy.redirect_pool.closed)) %}
-    http-request set-var(txn.octavia_l7_policy) str({{ l7policy.id }}) if !{ var(txn.octavia_l7_policy) -m found }{{ l7rule_list_macro(constants, l7policy) }}
+        {% set match = l7rule_list_macro(constants, l7policy) %}
+    {% endif %}
+    {% if match is defined %}
+    http-request set-var(txn.octavia_l7_policy) str({{ l7policy.id }}) if !{ var(txn.octavia_l7_policy) -m found }{% if auth_mode %} !{ var(txn.octavia_legacy_redirect) -m found }{% endif %}{{ match }}
         {% if l7policy.weighted_targets is defined %}
     http-request set-var(txn.octavia_weighted_draw) rand({{ l7policy.total_weight }}) if {{ selected_policy_match_macro(l7policy.id) }}
         {% endif %}
@@ -430,19 +439,26 @@ backend {{ pool.id }}:{{ listener.id }}
 {%- endmacro %}
 
 
-{% macro l7policy_macro(constants, l7policy, listener) %}
+{% macro l7policy_macro(constants, l7policy, listener, auth_mode=False) %}
+    {% set match = (' ' ~ selected_policy_match_macro(l7policy.id)) if auth_mode else l7rule_list_macro(constants, l7policy) %}
     {% if l7policy.action == constants.L7POLICY_ACTION_REJECT %}
-    http-request deny if{{ l7rule_list_macro(constants, l7policy) }}
+        {% if not auth_mode %}
+    http-request deny if{{ match }}
+        {% endif %}
     {% elif l7policy.request_redirect is defined %}
-    use_backend {{ request_redirect_backend_name(listener, l7policy) }} if{% if l7policy.action != constants.L7POLICY_ACTION_REDIRECT_REQUEST %} {{ ordered_redirect_match_macro() }}{% endif %}{{ request_redirect_match_macro(constants, l7policy) }}
+        {% if not auth_mode %}
+            {% set ordered = ' ' ~ ordered_redirect_match_macro() if l7policy.action != constants.L7POLICY_ACTION_REDIRECT_REQUEST else '' %}
+            {% set match = ordered ~ request_redirect_match_macro(constants, l7policy) %}
+        {% endif %}
+    use_backend {{ request_redirect_backend_name(listener, l7policy) }} if{{ match }}
     {% elif l7policy.action in (constants.L7POLICY_ACTION_REDIRECT_TO_URL, constants.L7POLICY_ACTION_REDIRECT_PREFIX) %}
-        {{- stock_redirect_macro(constants, l7policy) -}}
+        {{- stock_redirect_macro(constants, l7policy, auth_mode=auth_mode) -}}
     {% elif l7policy.action == constants.L7POLICY_ACTION_REDIRECT_TO_POOL and
             (l7policy.redirect_pool.enabled or l7policy.redirect_pool.closed) %}
-    use_backend {{ l7policy.redirect_pool.id }}:{{ listener.id }} if{{ l7rule_list_macro(constants, l7policy) }}
+    use_backend {{ l7policy.redirect_pool.id }}:{{ listener.id }} if{{ match }}
     {% elif l7policy.action == constants.L7POLICY_ACTION_FIXED_RESPONSE %}
     {# Keep status responses in the same ordered switching stage as pools. #}
-    use_backend {{ fixed_response_backend_name(constants, listener, l7policy.id) }} if{{ l7rule_list_macro(constants, l7policy) }}
+    use_backend {{ fixed_response_backend_name(constants, listener, l7policy.id) }} if{{ match }}
     {% elif l7policy.weighted_targets is defined %}
         {% for target in l7policy.weighted_targets %}
             {% if target.pool_id is defined %}
@@ -480,6 +496,15 @@ backend {{ pool.id }}:{{ listener.id }}
 {% endmacro %}
 
 
+{% macro authorization_request_macro(auth, condition) %}
+    {% if auth.available %}
+    http-request octavia-auth /run/octavia/listener-auth/{{ auth.pool_id }}.sock {{ auth.prefix }} {{ auth.request_headers }} {{ auth.response_headers }} if {{ condition }}
+    {% else %}
+    http-request deny deny_status 503 if {{ condition }}
+    {% endif %}
+{% endmacro %}
+
+
 {% macro listener_request_filters_macro(constants, listener) %}
     {% set sections = listener.request_filter_sections %}
     {% set tls = listener.protocol == constants.PROTOCOL_TERMINATED_HTTPS %}
@@ -490,29 +515,18 @@ backend {{ pool.id }}:{{ listener.id }}
     http-request set-var(txn.octavia_auth_authority) req.fhdr(host),host_only
     {% endif %}
     acl octavia_auth_dns {{ fetch }} -m reg -i {{ dns_name }}
-    {% set found = namespace(auth=false) %}
     {% for section in sections %}
-        {% if section.requests|selectattr('available')|list %}
-            {% set found.auth = true %}
-        {% endif %}
     http-request set-var(txn.octavia_auth_section) int({{ section.id }}) if !{ var(txn.octavia_auth_section) -m found }{% if section.hostname != '*' %}{{ https_section_condition(fetch, 'octavia_auth_dns', section.hostname) }}{% endif %}
 
     {% endfor %}
     http-request return status {{ 421 if tls else 404 }} unless { var(txn.octavia_auth_section) -m found }
-    {% if found.auth %}
-    filter octavia-auth
-    {% endif %}
     {% for section in sections %}
         {% set condition = '{ var(txn.octavia_auth_section) -m int eq ' ~ section.id ~ ' }' %}
         {% if section.reject %}
     http-request deny deny_status 403 if {{ condition }}
         {% endif %}
         {% for auth in section.requests %}
-            {% if auth.available %}
-    http-request octavia-auth /run/octavia/listener-auth/{{ auth.pool_id }}.sock {{ auth.prefix }} {{ auth.request_headers }} {{ auth.response_headers }} if {{ condition }}
-            {% else %}
-    http-request deny deny_status 503 if {{ condition }}
-            {% endif %}
+            {{- authorization_request_macro(auth, condition) -}}
         {% endfor %}
     {% endfor %}
 {% endmacro %}
@@ -559,6 +573,8 @@ backend {{ pool.id }}:{{ listener.id }}
 
 {% macro frontend_macro(constants, lib_consts, listener, lb_vip_address, additional_vips) %}
 frontend {{ listener.id }}
+    {% set policies = listener.l7policies|selectattr('enabled')|selectattr('l7rules')|list %}
+    {% set route_auth = policies|selectattr('external_auth', 'defined')|list %}
     {% if listener.otlp_tracing is defined %}
     http-request lua.{{ listener.otlp_tracing.action_prefix }}-start {{ listener.id }}
     http-after-response lua.{{ listener.otlp_tracing.action_prefix }}-finish
@@ -569,7 +585,7 @@ frontend {{ listener.id }}
     {% if (listener.protocol.lower() ==
        constants.PROTOCOL_TERMINATED_HTTPS.lower()) %}
         {% if listener.https_sections is not defined %}
-            {% if listener.request_filter_sections is defined %}
+            {% if listener.request_filter_sections is defined or route_auth %}
     http-request redirect scheme https if !{ ssl_fc }
             {% else %}
     redirect scheme https if !{ ssl_fc }
@@ -592,7 +608,10 @@ frontend {{ listener.id }}
     acl octavia_grpc_mirror_media req.fhdr(content-type) -m reg -i {{ listener.grpc_mirror_media_acl|safe }}
     http-request set-var(txn.octavia_grpc_mirror) bool(true) if METH_POST { fc_http_major eq 2 } { req.fhdr_cnt(content-type) eq 1 } octavia_grpc_mirror_media
     {% endif %}
-    {% set policies = listener.l7policies|selectattr('enabled')|selectattr('l7rules')|list %}
+    {% set listener_auth = listener.get('request_filter_sections', [])|map(attribute='requests')|sum(start=[]) %}
+    {% if listener_auth|selectattr('available')|list or route_auth|map(attribute='external_auth')|selectattr('available')|list %}
+    filter octavia-auth
+    {% endif %}
     {% set tcp_weighted = policies|selectattr('tcp_weighted_targets', 'defined')|list %}
     {% if listener.inspect_tls_sni is defined %}
     tcp-request inspect-delay {{ listener.timeout_tcp_inspect }}
@@ -607,7 +626,7 @@ frontend {{ listener.id }}
         {{- listener_request_filters_macro(constants, listener) -}}
     {% endif %}
     {% set structured = policies|selectattr('action', 'equalto', constants.L7POLICY_ACTION_REDIRECT_REQUEST)|list %}
-    {% set select_policy = listener.weighted_response_codes is defined or
+    {% set select_policy = route_auth or listener.weighted_response_codes is defined or
                            listener.request_header_operations_by_pool is defined or
                            listener.response_header_operations_by_backend is defined or
                            listener.request_url_rewrites_by_pool is defined or
@@ -625,16 +644,29 @@ frontend {{ listener.id }}
     http-request set-var(txn.octavia_ordered_redirect) bool(true) if !{{ ordered_redirect_match_macro() }}{{ request_redirect_match_macro(constants, l7policy) }}
         {% endfor %}
     {% endif %}
+    {% if route_auth %}
+        {# Stock rejects and redirects precede backend selection. Capture the
+           legacy redirects before an authorization response can add headers. #}
+        {% for l7policy in policies if l7policy.action == constants.L7POLICY_ACTION_REJECT %}
+    http-request deny if{{ l7rule_list_macro(constants, l7policy) }}
+        {% endfor %}
+        {% for l7policy in policies if l7policy.action in (constants.L7POLICY_ACTION_REDIRECT_TO_URL, constants.L7POLICY_ACTION_REDIRECT_PREFIX) %}
+    http-request set-var(txn.octavia_legacy_redirect) bool(true) if !{{ ordered_redirect_match_macro() }}{{ l7rule_list_macro(constants, l7policy) }}
+        {% endfor %}
+    {% endif %}
     {% if select_policy %}
         {# Match the first eligible switching policy before sampling. Only a
            weighted winner draws, and txn variables are reset per request. #}
         {% for l7policy in policies %}
-            {{- select_switching_policy_macro(constants, l7policy) -}}
+            {{- select_switching_policy_macro(constants, l7policy, auth_mode=route_auth) -}}
         {% endfor %}
     {% endif %}
+    {% for l7policy in route_auth %}
+        {{- authorization_request_macro(l7policy.external_auth, selected_policy_match_macro(l7policy.id)) -}}
+    {% endfor %}
     {% if structured %}
         {% for l7policy in policies if l7policy.request_redirect is defined and l7policy.action != constants.L7POLICY_ACTION_REDIRECT_REQUEST %}
-            {{- stock_redirect_macro(constants, l7policy, unless_ordered=True) -}}
+            {{- stock_redirect_macro(constants, l7policy, unless_ordered=True, auth_mode=route_auth) -}}
         {% endfor %}
     {% endif %}
     {% if tcp_weighted %}
@@ -644,7 +676,7 @@ frontend {{ listener.id }}
             {% if not (select_policy or structured) %}
                 {{- l7policy_rules_macro(constants, l7policy, listener) -}}
             {% endif %}
-            {{- l7policy_macro(constants, l7policy, listener) -}}
+            {{- l7policy_macro(constants, l7policy, listener, auth_mode=route_auth) -}}
         {% endfor %}
     {% endif %}
     {% if listener.default_http_status_code is defined %}

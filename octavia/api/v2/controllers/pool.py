@@ -1053,6 +1053,12 @@ class PoolsController(base.BaseController):
                 if filter_listener_id:
                     raise exceptions.PoolInUseByListenerRequestFilter(
                         id=id, listener_id=filter_listener_id)
+                policy_id = (self.repositories.l7policy
+                             .get_external_auth_policy_using_pool(
+                                 context.session, id))
+                if policy_id:
+                    raise exceptions.PoolInUseByL7Policy(
+                        id=id, l7policy_id=policy_id)
             pool_dict = pool.to_dict(render_unsets=False)
             transport_fields = {
                 'backend_h2c', 'backend_tls_require_h2', 'tls_enabled',
@@ -1195,8 +1201,10 @@ class PoolsController(base.BaseController):
                 raise exceptions.PoolInUseByListenerOtlpTracing(
                     id=id, listener_id=tracing_listener_id)
             policy_repo = self.repositories.l7policy
-            policy_id = (policy_repo.get_weighted_policy_using_pool(
+            policy_id = (policy_repo.get_external_auth_policy_using_pool(
                 context.session, db_pool.id) or
+                policy_repo.get_weighted_policy_using_pool(
+                    context.session, db_pool.id) or
                 policy_repo.get_mirroring_policy_using_pool(
                     context.session, db_pool.id) or
                 policy_repo.get_policy_using_pool(

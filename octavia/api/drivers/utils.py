@@ -48,6 +48,8 @@ HTTP_REQUEST_MIRROR_PAYLOAD_AVAILABLE = hasattr(
     driver_dm.L7Policy(), 'request_mirrors')
 LISTENER_OTLP_TRACING_PAYLOAD_AVAILABLE = hasattr(
     driver_dm.Listener(), 'otlp_tracing')
+L7POLICY_HTTP_EXTERNAL_AUTH_PAYLOAD_AVAILABLE = hasattr(
+    driver_dm.L7Policy(), 'external_auth')
 LISTENER_REQUEST_FILTERS_PAYLOAD_AVAILABLE = hasattr(
     driver_dm.Listener(), 'request_filter_sections')
 WEIGHTED_TARGET_PAYLOAD_AVAILABLE = hasattr(driver_dm.L7Policy(), 'targets')
@@ -215,6 +217,13 @@ def gateway_capabilities(driver):
                     False) is True):
         capabilities.append(
             constants.GATEWAY_CAPABILITY_LISTENER_REQUEST_FILTERS)
+    if (L7POLICY_HTTP_EXTERNAL_AUTH_PAYLOAD_AVAILABLE and
+            driver.name in
+            api_settings.enabled_l7policy_http_external_auth_providers and
+            getattr(driver, 'supports_l7policy_http_external_auth',
+                    False) is True):
+        capabilities.append(
+            constants.GATEWAY_CAPABILITY_L7POLICY_HTTP_EXTERNAL_AUTH)
     initial_rules_providers = (
         api_settings.enabled_l7policy_initial_rules_providers)
     if (driver.name in initial_rules_providers and
@@ -555,6 +564,19 @@ def require_http_retry_backoff(driver, protocol):
                 'provider.'))
 
 
+def require_l7policy_http_external_auth(driver, protocol):
+    if protocol not in (constants.PROTOCOL_HTTP,
+                        constants.PROTOCOL_TERMINATED_HTTPS):
+        raise exceptions.ValidationException(detail=_(
+            'L7 policy HTTP authorization requires HTTP or TERMINATED_HTTPS.'))
+    if (constants.GATEWAY_CAPABILITY_L7POLICY_HTTP_EXTERNAL_AUTH not in
+            gateway_capabilities(driver)):
+        raise exceptions.ProviderUnsupportedOptionError(
+            prov=driver.name, user_msg=_(
+                'L7 policy HTTP authorization is unavailable for this '
+                'provider.'))
+
+
 def require_listener_request_filters(driver):
     if (constants.GATEWAY_CAPABILITY_LISTENER_REQUEST_FILTERS not in
             gateway_capabilities(driver)):
@@ -670,6 +692,9 @@ def _withdrawn_request_transforms(driver):
         yield 'http_retry_backoff', require_http_retry_backoff
     if constants.GATEWAY_CAPABILITY_HTTP_REQUEST_MIRROR not in capabilities:
         yield 'request_mirrors', require_http_request_mirror
+    if (constants.GATEWAY_CAPABILITY_L7POLICY_HTTP_EXTERNAL_AUTH not in
+            capabilities):
+        yield 'external_auth', require_l7policy_http_external_auth
     yield from _withdrawn_grpc_metadata(capabilities)
 
 
@@ -948,7 +973,10 @@ def require_gateway_policy_action(driver, action, protocol, *,
                                   request_url_rewrite=None, targets=None,
                                   request_cors=None,
                                   http_request_policy=None,
-                                  request_mirrors=None):
+                                  request_mirrors=None,
+                                  external_auth=None):
+    if external_auth is not None:
+        require_l7policy_http_external_auth(driver, protocol)
     if validate.request_mirror_pool_ids(request_mirrors, targets):
         require_http_request_mirror(driver, protocol)
     if http_request_policy is not None:
@@ -1609,7 +1637,7 @@ def db_l7policy_to_provider_l7policy(db_l7policy):
         if not new_l7policy_dict.get(field):
             new_l7policy_dict.pop(field, None)
     for field in ('fixed_response', 'redirect_request', 'request_url_rewrite',
-                  'request_cors', 'http_request_policy'):
+                  'request_cors', 'http_request_policy', 'external_auth'):
         if new_l7policy_dict.get(field) is None:
             new_l7policy_dict.pop(field, None)
     return driver_dm.L7Policy.from_dict(new_l7policy_dict)
@@ -1628,6 +1656,8 @@ def l7policy_dict_to_provider_dict(l7policy_dict):
         new_l7policy_dict.pop('http_request_policy', None)
     if not HTTP_REQUEST_MIRROR_PAYLOAD_AVAILABLE:
         new_l7policy_dict.pop('request_mirrors', None)
+    if not L7POLICY_HTTP_EXTERNAL_AUTH_PAYLOAD_AVAILABLE:
+        new_l7policy_dict.pop('external_auth', None)
     if (not TCP_TLS_MIXED_MODE_PAYLOAD_AVAILABLE or
             not new_l7policy_dict.get('tcp_tls_passthrough')):
         new_l7policy_dict.pop('tcp_tls_passthrough', None)

@@ -222,6 +222,7 @@ class L7RuleController(base.BaseController):
                     request_cors=db_l7policy.request_cors,
                     http_request_policy=db_l7policy.http_request_policy,
                     request_mirrors=db_l7policy.request_mirrors,
+                    external_auth=db_l7policy.external_auth,
                     targets=db_l7policy.targets,
                     tcp_tls_passthrough=db_l7policy.tcp_tls_passthrough,
                     tcp_tls_mixed_mode=db_l7policy.listener.tcp_tls_mixed_mode,
@@ -342,6 +343,9 @@ class L7RuleController(base.BaseController):
                         not rules.has_other_enabled_rules(
                             session, rule, compare_type=exact)):
                     driver_utils.require_tls_sni_suffix(driver)
+            if policy.external_auth is not None and listener.enabled:
+                driver_utils.require_l7policy_http_external_auth(
+                    driver, listener.protocol)
             if redirect and listener.enabled:
                 driver_utils.require_http_request_redirect(driver)
                 self._require_no_transform_exposed_by_ordered_redirect(
@@ -430,6 +434,7 @@ class L7RuleController(base.BaseController):
                     request_cors=db_l7policy.request_cors,
                     http_request_policy=db_l7policy.http_request_policy,
                     request_mirrors=db_l7policy.request_mirrors,
+                    external_auth=db_l7policy.external_auth,
                     targets=db_l7policy.targets,
                     tcp_tls_passthrough=db_l7policy.tcp_tls_passthrough,
                     tcp_tls_mixed_mode=db_l7policy.listener.tcp_tls_mixed_mode,

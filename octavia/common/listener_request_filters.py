@@ -12,17 +12,10 @@
 
 """Ordered HTTP authorization filters applied before listener routing."""
 
-import re
-import uuid
-
 from octavia.common import constants
 from octavia.common import exceptions
 from octavia.common import validate
 from octavia.i18n import _
-
-
-PATH_RE = re.compile(r"/(?:[-A-Za-z0-9/._~!$&'()*+,;=:@]|%[0-9a-fA-F]{2})*")
-HEADER_NAME_RE = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]{1,256}")
 
 
 def normalize(sections):
@@ -66,36 +59,8 @@ def _normalize_external_auth(request):
             not isinstance(request['http'], dict)):
         raise exceptions.ValidationException(detail=_(
             'Only HTTP ExternalAuth listener request filters are supported.'))
-    auth = request['http']
-    if auth.keys() - {'pool_id', 'path_prefix', 'allowed_request_headers',
-                      'allowed_response_headers'}:
-        raise exceptions.ValidationException(detail=_(
-            'Invalid HTTP ExternalAuth options.'))
-    pool_id = auth.get('pool_id')
-    try:
-        if not isinstance(pool_id, str) or str(uuid.UUID(pool_id)) != pool_id:
-            raise ValueError()
-    except ValueError as exc:
-        raise exceptions.ValidationException(detail=_(
-            'HTTP ExternalAuth requires a pool UUID.')) from exc
-    result = {'pool_id': pool_id}
-    path = auth.get('path_prefix', '')
-    if not isinstance(path, str) or (
-            path and (len(path) > 1024 or not PATH_RE.fullmatch(path))):
-        raise exceptions.ValidationException(detail=_(
-            'Invalid HTTP ExternalAuth path prefix.'))
-    if path:
-        result['path_prefix'] = path
-    for field in ('allowed_request_headers', 'allowed_response_headers'):
-        headers = auth.get(field, [])
-        if (not isinstance(headers, list) or len(headers) > 64 or
-                any(not isinstance(name, str) or
-                    not HEADER_NAME_RE.fullmatch(name) for name in headers)):
-            raise exceptions.ValidationException(detail=_(
-                'Invalid HTTP ExternalAuth header list.'))
-        if headers:
-            result[field] = sorted({name.lower() for name in headers})
-    return {'type': 'ExternalAuth', 'http': result}
+    return {'type': 'ExternalAuth',
+            'http': validate.http_external_auth(request['http'])}
 
 
 def pool_ids(sections):

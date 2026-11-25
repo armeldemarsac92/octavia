@@ -161,6 +161,10 @@ api_opts = [
                        'per-route HTTP retry backoff. Requires HTTP request '
                        'policy support and upgraded API, workers and Amphora '
                        'agents and images.')),
+    cfg.ListOpt('enabled_l7policy_http_external_auth_providers', default=[],
+                help=_('Providers exposing HTTP L7 policy authorization. '
+                       'Enable after upgrading the API, worker, octavia-lib, '
+                       'database and qualifying eligible Amphora images.')),
     cfg.ListOpt('enabled_listener_request_filter_providers', default=[],
                 help=_('Providers exposing ordered listener HTTP request '
                        'filters. Enable after updating the database, '
