@@ -691,19 +691,46 @@ class ApplyL7PolicyActivation(BaseAmphoraTask):
                     return candidate, True
                 pools = {pool.id: pool for pool in candidate.pools}
                 linked_pool_ids = {pool.id for pool in frontend.pools}
+                withdrawn_pool_ids = set()
                 for policy in frontend.l7policies:
                     change = transition.get(policy.id)
                     if change is None:
                         continue
+                    if policy.redirect_pool is not None:
+                        withdrawn_pool_ids.add(policy.redirect_pool.id)
+                        policy.redirect_pool.l7policies.remove(policy)
+                    if policy.external_auth is not None:
+                        withdrawn_pool_ids.add(policy.external_auth['pool_id'])
                     origin = change['origin']
                     pool = pools[origin] if origin else None
                     l7policy_activation.apply_transition(policy, change, pool)
-                    if pool and pool.id not in linked_pool_ids:
-                        frontend.pools.append(pool)
-                        if all(row.id != frontend.id
-                               for row in pool.listeners):
-                            pool.listeners.append(frontend)
-                        linked_pool_ids.add(pool.id)
+                    if pool:
+                        pool.l7policies.append(policy)
+                        if pool.id not in linked_pool_ids:
+                            frontend.pools.append(pool)
+                            linked_pool_ids.add(pool.id)
+                        authorizer = pools[change['external_auth']['pool_id']]
+                        for destination in (pool, authorizer):
+                            if all(row.id != frontend.id
+                                   for row in destination.listeners):
+                                destination.listeners.append(frontend)
+                if withdrawn_pool_ids:
+                    # Resolve both directions from the SQL graph's remaining
+                    # references before staging any protected TLS pools.
+                    remaining_pool_ids = {
+                        pool.id for pool in listener._linked_pools(
+                            withdrawn_policies=transition)}
+                    frontend.pools = [pool for pool in frontend.pools
+                                      if pool.id in remaining_pool_ids]
+                    for pool in lb.pools:
+                        if (pool.id in withdrawn_pool_ids and
+                                all(row.id != frontend.id for row in
+                                    pool._linked_listeners(
+                                        withdrawn_policies=transition))):
+                            candidate_pool = pools[pool.id]
+                            candidate_pool.listeners = [
+                                row for row in candidate_pool.listeners
+                                if row.id != frontend.id]
                 return candidate, False
             if restoring:
                 for policy in policies:

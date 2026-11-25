@@ -586,6 +586,7 @@ class TestInitialL7Rules(base.BaseAPITest):
         self.conf.config(
             group='api_settings', enabled_gateway_action_providers=enabled,
             enabled_backend_h2c_providers=enabled,
+            enabled_backend_tls_hostname_providers=enabled,
             enabled_l7policy_grpc_external_auth_providers=enabled,
             enabled_l7policy_grpc_auth_transition_providers=enabled)
         origin = self.create_pool(self.lb_id, 'HTTP', 'ROUND_ROBIN')['pool']
@@ -594,14 +595,19 @@ class TestInitialL7Rules(base.BaseAPITest):
             self.lb_id, 'HTTP', 'ROUND_ROBIN', backend_h2c=True,
             tags=[constants.GATEWAY_GRPC_AUTH_POOL_TAG])['pool']
         self.set_lb_status(self.lb_id)
-        private = self.create_pool(self.lb_id, 'HTTP', 'ROUND_ROBIN')['pool']
+        certs = self.cert_manager_mock()
+        certs.get_secret.return_value = sample_certs.X509_CA_CERT
+        private = self.create_pool(
+            self.lb_id, 'HTTP', 'ROUND_ROBIN', tls_enabled=True,
+            backend_tls_hostname='private.example.test',
+            ca_tls_container_ref=uuidutils.generate_uuid())['pool']
         self.set_lb_status(self.lb_id)
         auth = {'protocol': 'GRPC', 'pool_id': authorizer['id']}
         for path in ('/protected', '/secure', '/public'):
             policy = self._post_policy(
                 action='REDIRECT_TO_POOL', redirect_prefix=None,
-                redirect_pool_id=(origin if path == '/public'
-                                  else private)['id'],
+                redirect_pool_id=(private if path == '/protected'
+                                  else origin)['id'],
                 external_auth=None if path == '/public' else auth,
                 rules=[{'type': 'PATH', 'compare_type': 'EQUAL_TO',
                         'value': path}])['l7policy']
@@ -611,6 +617,10 @@ class TestInitialL7Rules(base.BaseAPITest):
                      {'l7policy': {'admin_state_up': True}})
             self.set_lb_status(self.lb_id)
 
+        with self.session.begin():
+            self.create_amphora(uuidutils.generate_uuid(), self.lb_id,
+                                role=constants.ROLE_STANDALONE,
+                                lb_network_ip='192.0.2.100')
         path = (self.LISTENER_PATH.format(listener_id=self.listener_id) +
                 '/l7policy_grpc_auth_transition')
         graph = self.get(path).json['l7policy_activation']
@@ -640,8 +650,34 @@ class TestInitialL7Rules(base.BaseAPITest):
                        'policies': [duplicate, withdrawal['policies'][1]]}
             self.post(path, {field: invalid}, status=400)
         self.post(path, {field: withdrawal}, status=204)
-        endpoints.Endpoints().activate_l7policies(
-            {}, **self.rpc.cast.call_args.kwargs)
+        delivery = self.rpc.cast.call_args.kwargs
+        caps = {constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME: True}
+        client = rest_api_driver.AmphoraAPIClient1_0
+        self.conf.config(group='controller_worker',
+                         amphora_driver='amphora_haproxy_rest_driver')
+        with (mock.patch.object(certs, 'get_secret',
+                                side_effect=RuntimeError('CA unavailable')),
+              mock.patch.object(rest_api_driver.AmphoraAPIClientBase,
+                                'get_api_version',
+                                return_value={'api_version': '1.0'}),
+              mock.patch.object(client, 'get_info', return_value={
+                  'haproxy_version': '3.0.19'}),
+              mock.patch.object(client, 'get_details', return_value=caps),
+              mock.patch.object(client, 'upload_config') as upload,
+              mock.patch.object(client, '_action') as reload):
+            endpoints.Endpoints().activate_l7policies({}, **delivery)
+        upload.assert_called_once()
+        reload.assert_called_once()
+        config = upload.call_args.args[2]
+        self.assertIn(f'use_backend {origin["id"]}', config)
+        self.assertNotIn(private['id'], config)
+        listener = self.get_listener(self.listener_id)['listener']
+        self.assertTrue(listener['admin_state_up'])
+        self.assertEqual(constants.ACTIVE, listener['provisioning_status'])
+        self.assertEqual(constants.ACTIVE, self.get(self.POOL_PATH.format(
+            pool_id=private['id'])).json['pool']['provisioning_status'])
+        self.conf.config(group='controller_worker',
+                         amphora_driver='amphora_noop_driver')
         rows = self.get(path).json['l7policy_activation']['policies']
         first, second, public = [row['policy'] for row in rows]
         self.assertEqual(order, [first['id'], second['id'], public['id']])
@@ -671,6 +707,10 @@ class TestInitialL7Rules(base.BaseAPITest):
         candidate = update.call_args_list[0].args[0].listeners[0]
         self.assertCountEqual([origin['id'], private['id']],
                               [pool.id for pool in candidate.pools])
+        private_pool = next(pool for pool in candidate.pools
+                            if pool.id == private['id'])
+        self.assertEqual([self.listener_id],
+                         [row.id for row in private_pool.listeners])
         self.assertTrue(restored.enabled)
         self.assertEqual(['FIXED_RESPONSE', 'FIXED_RESPONSE',
                           'REDIRECT_TO_POOL'],
