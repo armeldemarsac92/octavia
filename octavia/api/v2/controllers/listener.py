@@ -496,7 +496,8 @@ class ListenersController(base.BaseController):
                 driver, pool.protocol, pool.tls_enabled,
                 tcp_tls_termination=listener_dict.get('tcp_tls_termination'),
                 hostname=pool.backend_tls_hostname,
-                ca_ref=pool.ca_tls_certificate_id)
+                ca_ref=pool.ca_tls_certificate_id,
+                system_ca=pool.backend_tls_system_ca)
 
         try:
             db_listener = self.repositories.listener.create(
@@ -848,7 +849,8 @@ class ListenersController(base.BaseController):
                     driver, pool.protocol, pool.tls_enabled,
                     tcp_tls_termination=True,
                     hostname=pool.backend_tls_hostname,
-                    ca_ref=pool.ca_tls_certificate_id)
+                    ca_ref=pool.ca_tls_certificate_id,
+                    system_ca=pool.backend_tls_system_ca)
 
     def _validate_otlp_tracing(self, session, driver, protocol, tracing,
                                lb_id, project_id):

@@ -926,6 +926,45 @@ class TestHaproxyCfg(base.TestCase):
                       config)
         self.assertNotIn('verify none', config)
 
+    def test_backend_tls_system_ca_uses_verified_snapshot(self):
+        hostname = 'backend.example.test'
+        digest = 'a' * 64
+        snapshot = f'/var/lib/octavia/lb/backend-system-ca/{digest}.pem'
+        listener = sample_configs_combined.sample_listener_tuple()
+        pool = SimpleNamespace(**dict(
+            listener.pools[0]._asdict(), tls_enabled=True,
+            backend_tls_hostname=hostname, backend_tls_system_ca=True))
+        args = (sample_configs_combined.sample_amphora_tuple(),
+                [listener._replace(default_pool=pool, pools=[pool])])
+        material = {pool.id: {'ca_cert': snapshot, 'system_ca_sha256': digest}}
+        capabilities = {
+            constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME: True,
+            constants.GATEWAY_CAPABILITY_BACKEND_TLS_SYSTEM_CA: True,
+        }
+        config = self.jinja_cfg.render_loadbalancer_obj(
+            *args, tls_certs=material, amp_details=capabilities)
+        self.assertIn(f'ca-file {snapshot} verify required', config)
+        self.assertIn(f'sni str({hostname}) verifyhost-strict {hostname}',
+                      config)
+        self.assertNotIn('verify none', config)
+
+        # The installed generation can confirm a prepared empty pool.
+        pool.members = []
+        result = {}
+        config = self.jinja_cfg.render_loadbalancer_obj(
+            *args, tls_certs=material, amp_details=capabilities,
+            system_ca_results=result)
+        self.assertIn(f'default-server ca-file {snapshot}', config)
+        self.assertNotIn('\n    server ', config)
+        self.assertEqual({pool.id: digest}, result)
+
+        result = {}
+        config = self.jinja_cfg.render_loadbalancer_obj(
+            *args, system_ca_results=result)
+        self.assertIn(f'backend {pool.id}:{listener.id}', config)
+        self.assertNotIn('ca-file', config)
+        self.assertEqual({}, result)
+
     def test_otlp_tracing_uses_private_collector_backend(self):
         pool_id = 'e7b5c88c-ac10-4ec1-8935-aba43987cf01'
         fixture = sample_configs_combined.sample_listener_tuple()

@@ -11,7 +11,10 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
+import hashlib
+from pathlib import Path
 import subprocess
+import tempfile
 from unittest import mock
 
 import flask
@@ -22,6 +25,7 @@ from oslo_utils import uuidutils
 from octavia.amphorae.backends.agent.api_server import loadbalancer
 from octavia.amphorae.backends.agent.api_server import util as agent_util
 from octavia.common import constants as consts
+from octavia.tests.common import sample_certs
 from octavia.tests.common import utils as test_utils
 import octavia.tests.unit.base as base
 
@@ -37,9 +41,51 @@ class ListenerTestCase(base.TestCase):
         self.mock_platform.return_value = "ubuntu"
         self.test_loadbalancer = loadbalancer.Loadbalancer()
 
-    def test_otlp_reload_acknowledges_only_the_running_config(self):
+    def test_system_ca_stages_immutable_local_image_bundle(self):
+        app = flask.Flask(__name__)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / 'system-ca.pem'
+            pem = sample_certs.X509_CA_CERT
+            source.write_bytes(pem)
+            digest = hashlib.sha256(pem).hexdigest()
+            config = self.useFixture(oslo_fixture.Config(CONF))
+            config.config(group='haproxy_amphora', base_path=directory)
+            request = {'path': str(source), 'sha256': digest}
+            with app.test_request_context(json=request):
+                stage = self.test_loadbalancer.stage_backend_tls_system_ca
+                response = stage(LB_ID1)
+                self.assertEqual(201, response.status_code)
+                self.assertEqual({'sha256': digest}, response.json)
+                self.assertEqual(201, stage(LB_ID1).status_code)
+                snapshot = (root / LB_ID1 /
+                            consts.HAPROXY_SYSTEM_CA_DIRECTORY /
+                            f'{digest}.pem')
+                self.assertEqual(pem, snapshot.read_bytes())
+
+                source.write_bytes(b'')
+                self.assertEqual(409, stage(LB_ID1).status_code)
+                source.write_bytes(b'not a certificate')
+                self.assertEqual(409, stage(LB_ID1).status_code)
+                source.unlink()
+                self.assertEqual(400, stage(LB_ID1).status_code)
+                self.assertEqual(pem, snapshot.read_bytes())
+
+            invalid = b'invalid with matching digest'
+            source.write_bytes(invalid)
+            request['sha256'] = hashlib.sha256(invalid).hexdigest()
+            with app.test_request_context(json=request):
+                self.assertEqual(400, stage(LB_ID1).status_code)
+
+    def test_reload_acknowledges_only_the_running_config(self):
+        for header, prefix in (
+                (consts.HAPROXY_OTLP_PUBLICATION_HEADER, 'octavia-otlp'),
+                (consts.HAPROXY_CONFIG_PUBLICATION_HEADER, 'octavia-config')):
+            with self.subTest(header=header):
+                self._check_reload_publication(header, prefix)
+
+    def _check_reload_publication(self, header, prefix):
         publication = '1' * 32
-        header = consts.HAPROXY_OTLP_PUBLICATION_HEADER
         app = flask.Flask(__name__)
         with (
             app.test_request_context(headers={header: publication}),
@@ -54,7 +100,7 @@ class ListenerTestCase(base.TestCase):
                               'HAProxyQuery') as query,
         ):
             info = query.return_value.show_info
-            desired = f'octavia-otlp-{publication}'
+            desired = f'{prefix}-{publication}'
             info.return_value = {'description': desired, 'Stopping': '1'}
             response = self.test_loadbalancer.start_stop_lb(
                 LB_ID1, consts.AMP_ACTION_RELOAD)

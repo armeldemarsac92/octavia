@@ -20,6 +20,7 @@ Defined here so these can also be used at deeper levels than the API.
 
 
 import ipaddress
+import os
 import re
 import typing
 import uuid
@@ -365,19 +366,38 @@ def validate_tcp_tls_mixed_default_pool(pool):
             'A mixed TLS listener cannot have a default pool.'))
 
 
+def is_backend_tls_system_ca_profile(path, sha256):
+    return (isinstance(path, str) and os.path.isabs(path) and
+            not any(ord(char) < 32 for char in path) and
+            isinstance(sha256, str) and
+            re.fullmatch(r'[0-9a-f]{64}', sha256) is not None)
+
+
+def backend_tls_system_ca_profile(provider):
+    api = CONF.api_settings
+    if (provider not in api.enabled_backend_tls_system_ca_providers or
+            provider not in api.enabled_backend_tls_hostname_providers):
+        return None
+    profile = (CONF.haproxy_amphora.backend_tls_system_ca_path,
+               CONF.haproxy_amphora.backend_tls_system_ca_sha256)
+    return profile if is_backend_tls_system_ca_profile(*profile) else None
+
+
 def validate_tcp_redirect_pool_protocol(protocol, tls_enabled, *,
                                         tcp_tls_termination=False,
-                                        hostname=None, ca_ref=None):
+                                        hostname=None, ca_ref=None,
+                                        system_ca=False):
     if (tcp_tls_termination and protocol == constants.PROTOCOL_TCP and
-            tls_enabled is True and is_exact_sni_name(hostname) and ca_ref):
+            tls_enabled is True and is_exact_sni_name(hostname) and
+            bool(ca_ref) != (system_ca is True)):
         return
     if (protocol != constants.PROTOCOL_TCP or tls_enabled or
             hostname is not None):
         if tcp_tls_termination:
             raise exceptions.ValidationException(detail=_(
                 'A terminating TCP listener requires a plaintext TCP pool '
-                'or a TCP pool with TLS, a backend DNS hostname and a CA '
-                'certificate reference.'))
+                'or a TCP pool with TLS, a backend DNS hostname and an '
+                'authenticated CA source.'))
         raise exceptions.ValidationException(detail=_(
             'TCP listener policies require a TCP pool with '
             'tls_enabled false.'))

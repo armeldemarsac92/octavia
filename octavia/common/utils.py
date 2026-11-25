@@ -45,8 +45,25 @@ def get_hostname():
     return socket.gethostname()
 
 
+def backend_tls_system_ca_pool_ids(loadbalancer):
+    return {pool.id for pool in getattr(loadbalancer, 'pools', ())
+            if (getattr(pool, 'backend_tls_system_ca', False) is True and
+                pool.provisioning_status != constants.DELETED)}
+
+
+def amphora_roles_match_topology(topology, roles):
+    expected = {
+        constants.TOPOLOGY_SINGLE: {constants.ROLE_STANDALONE},
+        constants.TOPOLOGY_ACTIVE_STANDBY: {
+            constants.ROLE_MASTER, constants.ROLE_BACKUP},
+    }.get(topology)
+    return expected is not None and len(roles) == len(expected) and (
+        set(roles) == expected)
+
+
 def is_protected_backend_tls_pool(pool):
     return (getattr(pool, 'backend_tls_hostname', None) is not None or
+            getattr(pool, 'backend_tls_system_ca', False) is True or
             getattr(pool, 'backend_tls_require_h2', False) is True or
             bool(getattr(pool, 'backend_tls_subject_alt_names', None)))
 

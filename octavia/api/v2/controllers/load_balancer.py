@@ -797,6 +797,7 @@ class LoadBalancersController(base.BaseController):
                                              not passthrough),
                         hostname=target.get('backend_tls_hostname'),
                         ca_ref=target.get('ca_tls_certificate_id'),
+                        system_ca=target.get('backend_tls_system_ca'),
                         tls_sni_policy=tcp_policy)
 
     def _graph_create(self, session, db_lb, listeners, pools, driver):

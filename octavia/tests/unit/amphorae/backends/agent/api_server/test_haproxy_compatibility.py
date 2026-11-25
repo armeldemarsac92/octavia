@@ -118,6 +118,8 @@ class HAProxyCompatTestCase(base.TestCase):
     def test_backend_tls_capabilities(self, check_output):
         hostname = constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME
         tcp_auth = constants.GATEWAY_CAPABILITY_TCP_TLS_BACKEND_AUTH
+        system_ca = constants.GATEWAY_CAPABILITY_BACKEND_TLS_SYSTEM_CA
+        authenticated = {hostname: True, tcp_auth: True, system_ca: True}
         h2_alpn = constants.GATEWAY_CAPABILITY_BACKEND_TLS_H2_ALPN
         sans = constants.GATEWAY_CAPABILITY_BACKEND_TLS_SUBJECT_ALT_NAMES
         policy = constants.GATEWAY_CAPABILITY_HTTP_REQUEST_POLICY
@@ -125,17 +127,17 @@ class HAProxyCompatTestCase(base.TestCase):
         strict_dns = 'HAProxy version 3.0.19-ade9c1262-octavia-strict-dns-v1'
         for version, expected in (
                 ('HAProxy version 3.0.19-ade9c1262 ', {}),
-                (f'{strict_dns} ', {hostname: True, tcp_auth: True}),
+                (f'{strict_dns} ', authenticated),
                 (f'{strict_dns}-h2-alpn-v1 ',
-                 {hostname: True, tcp_auth: True, h2_alpn: True}),
+                 {**authenticated, h2_alpn: True}),
                 (f'{strict_dns}-h2-alpn-v1-backend-sans-v1 ',
-                 {hostname: True, tcp_auth: True, h2_alpn: True, sans: True}),
+                 {**authenticated, h2_alpn: True, sans: True}),
                 (f'{strict_dns}-h2-alpn-v1-backend-sans-v1-http-policy-v1 ',
-                 {hostname: True, tcp_auth: True, h2_alpn: True, sans: True,
+                 {**authenticated, h2_alpn: True, sans: True,
                   policy: True}),
                 (f'{strict_dns}-h2-alpn-v1-backend-sans-v1-http-policy-v1'
                  '-http-mirror-v1 ',
-                 {hostname: True, tcp_auth: True, h2_alpn: True, sans: True,
+                 {**authenticated, h2_alpn: True, sans: True,
                   policy: True, mirror: True})):
             with self.subTest(version=version):
                 check_output.side_effect = [

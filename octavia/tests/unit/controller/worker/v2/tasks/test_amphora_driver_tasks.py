@@ -272,6 +272,17 @@ class TestAmphoraDriverTasks(base.TestCase):
         mock_amphora_repo_update.assert_called_once_with(
             _session_mock, AMP_ID, status=constants.ERROR)
 
+        mock_lb_get.return_value = data_models.LoadBalancer(
+            topology=constants.TOPOLOGY_ACTIVE_STANDBY,
+            pools=[data_models.Pool(id='system', backend_tls_system_ca=True)])
+        mock_amphora_repo_update.reset_mock()
+        self.assertRaises(
+            driver_except.CoordinatedListenerUpdateError,
+            amp_list_update_obj.execute, _LB_mock, 0, [_amphora_mock], {},
+            AMP_ID)
+        mock_amphora_repo_update.assert_called_once_with(
+            _session_mock, AMP_ID, status=constants.ERROR)
+
         pool = data_models.Pool(
             udp_packet_drop={'numerator': 1, 'denominator': 4})
         mock_lb_get.return_value = data_models.LoadBalancer(listeners=[

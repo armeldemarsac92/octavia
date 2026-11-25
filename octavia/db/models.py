@@ -397,6 +397,10 @@ class Pool(base_models.BASE, base_models.IdMixin, base_models.ProjectMixin,
     crl_container_id = sa.Column(sa.String(255), nullable=True)
     tls_enabled = sa.Column(sa.Boolean, default=False, nullable=False)
     backend_tls_hostname = sa.Column(sa.String(253), nullable=True)
+    backend_tls_system_ca = sa.Column(
+        sa.Boolean, default=False, server_default=sa.false(), nullable=False)
+    backend_tls_system_ca_sha256 = sa.Column(sa.String(64), nullable=True)
+    backend_tls_system_ca_peers = sa.Column(sa.JSON(none_as_null=True))
     backend_tls_subject_alt_names = sa.Column(sa.JSON(none_as_null=True))
     backend_retry_budget = sa.Column(sa.JSON(none_as_null=True))
     tcp_connection_rejection = sa.Column(sa.JSON(none_as_null=True))

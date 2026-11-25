@@ -22,6 +22,7 @@ from octavia.api.v2.types import member as member_types
 from octavia.common import constants
 from octavia.common import data_models
 from octavia.common import exceptions
+from octavia.common import utils
 from octavia.common import validate
 from octavia.i18n import _
 
@@ -190,15 +191,28 @@ class PoolResponse(BasePoolType):
     tls_enabled = wtypes.wsattr(bool)
     backend_h2c = wtypes.wsattr(bool)
     backend_tls_hostname = wtypes.wsattr(wtypes.StringType(max_length=253))
+    backend_tls_system_ca = wtypes.wsattr(bool)
     backend_tls_require_h2 = wtypes.wsattr(bool)
     backend_tls_subject_alt_names = wtypes.wsattr(
         BackendTLSSubjectAltNames())
     backend_retry_budget = wtypes.wsattr(BackendRetryBudget())
     tcp_connection_rejection = wtypes.wsattr(types.TCPConnectionRejection())
     udp_packet_drop = wtypes.wsattr(types.UDPPacketDrop())
+    backend_tls_system_ca_sha256 = wtypes.wsattr(wtypes.StringType())
     tls_ciphers = wtypes.wsattr(wtypes.StringType())
     tls_versions = wtypes.wsattr(wtypes.ArrayType(wtypes.StringType()))
     alpn_protocols = wtypes.wsattr(wtypes.ArrayType(types.AlpnProtocolType()))
+
+    @staticmethod
+    def _backend_tls_system_ca_peers_match(db_obj):
+        lb = db_obj.load_balancer
+        peers = [amp for amp in lb.amphorae
+                 if amp.status != constants.DELETED]
+        roles = {amp.id: amp.role for amp in peers}
+        return (
+            all(amp.status == constants.AMPHORA_ALLOCATED for amp in peers) and
+            roles == db_obj.backend_tls_system_ca_peers and
+            utils.amphora_roles_match_topology(lb.topology, roles.values()))
 
     @classmethod
     def from_db_obj(cls, db_obj):
@@ -207,7 +221,17 @@ class PoolResponse(BasePoolType):
             result.backend_tls_subject_alt_names = wtypes.Unset
         if result.backend_retry_budget is None:
             result.backend_retry_budget = wtypes.Unset
-        provider = getattr(db_obj.load_balancer, 'provider', None)
+        load_balancer = db_obj.load_balancer
+        provider = getattr(load_balancer, 'provider', None)
+        profile = validate.backend_tls_system_ca_profile(provider)
+        if (not result.backend_tls_system_ca or not db_obj.enabled or
+                not getattr(load_balancer, 'enabled', False) or
+                db_obj.provisioning_status in (constants.PENDING_DELETE,
+                                               constants.DELETED) or
+                not profile or
+                result.backend_tls_system_ca_sha256 != profile[1] or
+                not cls._backend_tls_system_ca_peers_match(db_obj)):
+            result.backend_tls_system_ca_sha256 = None
         if (result.tcp_connection_rejection is None and
                 (db_obj.protocol != constants.PROTOCOL_TCP or
                  not driver_factory.provider_supports_tcp_connection_rejection(
@@ -308,6 +332,7 @@ class PoolPOST(BasePoolType):
     tls_enabled = wtypes.wsattr(bool, default=False)
     backend_h2c = wtypes.wsattr(bool, default=False)
     backend_tls_hostname = wtypes.wsattr(wtypes.StringType(max_length=253))
+    backend_tls_system_ca = wtypes.wsattr(bool, default=False)
     backend_tls_require_h2 = wtypes.wsattr(bool, default=False)
     backend_tls_subject_alt_names = wtypes.wsattr(
         BackendTLSSubjectAltNames())
@@ -337,6 +362,7 @@ class PoolPUT(BasePoolType):
     tls_enabled = wtypes.wsattr(bool)
     backend_h2c = wtypes.wsattr(bool)
     backend_tls_hostname = wtypes.wsattr(wtypes.StringType(max_length=253))
+    backend_tls_system_ca = wtypes.wsattr(bool)
     backend_tls_require_h2 = wtypes.wsattr(bool)
     backend_tls_subject_alt_names = wtypes.wsattr(
         BackendTLSSubjectAltNames())
@@ -371,6 +397,7 @@ class PoolSingleCreate(BasePoolType):
     tls_enabled = wtypes.wsattr(bool, default=False)
     backend_h2c = wtypes.wsattr(bool)
     backend_tls_hostname = wtypes.wsattr(wtypes.StringType(max_length=253))
+    backend_tls_system_ca = wtypes.wsattr(bool)
     backend_tls_require_h2 = wtypes.wsattr(bool)
     backend_tls_subject_alt_names = wtypes.wsattr(
         BackendTLSSubjectAltNames())

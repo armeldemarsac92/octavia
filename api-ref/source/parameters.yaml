@@ -241,13 +241,34 @@ backend-tls-hostname:
     Literal DNS hostname sent as backend SNI. With no explicit
     ``backend_tls_subject_alt_names``, it also authenticates the backend
     certificate against its DNS subject alternative names. Requires
-    ``tls_enabled`` set to true and a ``ca_tls_container_ref``. HTTP pools use
-    ``backend_tls_hostname_v1``. TCP pools use
+    ``tls_enabled`` set to true and either ``ca_tls_container_ref`` or
+    ``backend_tls_system_ca``. HTTP pools use ``backend_tls_hostname_v1``.
+    TCP pools use
     ``tcp_tls_backend_auth_v1`` and can only be attached to TCP listeners
     that terminate TLS. A partial update preserves the setting when omitted.
     To clear it, disable the pool, detach it from any terminating TCP
     listener defaults and policies, and explicitly send null while leaving
     the pool disabled.
+  in: body
+  required: false
+  type: string
+backend-tls-system-ca:
+  description: |
+    Use the regional Amphora system CA bundle to authenticate TLS pool
+    members. Defaults to false. Requires ``backend_tls_system_ca_v1``,
+    ``tls_enabled`` and ``backend_tls_hostname``. Omit
+    ``ca_tls_container_ref`` and ``crl_container_ref``. Omission on update
+    preserves the current value. Disable the pool before setting it to false.
+  in: body
+  required: false
+  type: boolean
+backend-tls-system-ca-sha256:
+  description: |
+    Read-only lowercase SHA-256 of the system CA PEM bundle prepared by
+    all serving Amphorae for the active HAProxy configuration. An enabled
+    and attached pool can report the digest before adding members.
+    Returns null when the applied bundle is unconfirmed or the regional
+    configuration has changed.
   in: body
   required: false
   type: string

@@ -17,7 +17,9 @@
 global
     daemon
     user nobody
-    {% if otlp_publication %}
+    {% if config_publication %}
+    description octavia-config-{{ config_publication }}
+    {% elif otlp_publication %}
     description octavia-otlp-{{ otlp_publication }}
     {% endif %}
     log {{ log_http | default('/run/rsyslog/octavia/log', true)}} local{{ user_log_facility }}

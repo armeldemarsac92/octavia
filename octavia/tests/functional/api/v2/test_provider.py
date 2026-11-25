@@ -271,6 +271,28 @@ class TestGatewayCapabilities(base.BaseAPITest):
             {'gateway_capabilities': []},
             self.get(self.capabilities_path('noop_driver')).json)
 
+    def test_backend_tls_system_ca_requires_regional_profile(self):
+        self.conf.config(
+            group='api_settings',
+            enabled_backend_tls_system_ca_providers=['amphora'])
+        self.conf.config(group='haproxy_amphora',
+                         backend_tls_system_ca_sha256='a' * 64)
+        self.assertEqual([], self.get(self.capabilities_path()).json[
+            'gateway_capabilities'])
+        self.conf.config(group='api_settings',
+                         enabled_backend_tls_hostname_providers=['amphora'])
+        self.conf.config(group='haproxy_amphora',
+                         backend_tls_system_ca_path='relative/path')
+        self.assertEqual(['backend_tls_hostname_v1'],
+                         self.get(self.capabilities_path()).json[
+                             'gateway_capabilities'])
+        self.conf.config(group='haproxy_amphora',
+                         backend_tls_system_ca_path='/etc/image-ca.pem')
+        self.assertEqual(['backend_tls_hostname_v1',
+                          'backend_tls_system_ca_v1'],
+                         self.get(self.capabilities_path()).json[
+                             'gateway_capabilities'])
+
     def test_backend_tls_h2_alpn_requires_its_own_enrollment(self):
         self.conf.config(
             group='api_settings',
