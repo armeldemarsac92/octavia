@@ -972,15 +972,26 @@ class LoadBalancerRepository(BaseRepository):
                                       project_id=lb.project_id)
                            .with_for_update().scalar())
             if listener_id:
-                policy_repo = L7PolicyRepository()
-                policies = policy_repo.get_listener_policies_for_update(
-                    session, listener_id)
-                for policy in policies:
-                    if (policy.project_id == lb.project_id and
-                            policy.id in operation['request']['policies']):
-                        policy.enabled = False
-                        policy.operating_status = consts.OFFLINE
-                        policy.provisioning_status = consts.ERROR
+                request = operation['request']
+                changes = request.get('grpc_auth_transition')
+                if changes:
+                    # These policies cover requests that may otherwise match
+                    # lower-priority policies. A failover must retain their
+                    # barriers, or close the listener for a failed withdrawal.
+                    if any(change['origin'] is None
+                           for change in changes.values()):
+                        listener = session.get(models.Listener, listener_id)
+                        listener.enabled = False
+                else:
+                    policy_repo = L7PolicyRepository()
+                    policies = policy_repo.get_listener_policies_for_update(
+                        session, listener_id)
+                    for policy in policies:
+                        if (policy.project_id == lb.project_id and
+                                policy.id in request['policies']):
+                            policy.enabled = False
+                            policy.operating_status = consts.OFFLINE
+                            policy.provisioning_status = consts.ERROR
             # Revoke the batch delivery while retaining its guard against
             # ordinary tasks already persisted by the jobboard.
             lb.l7policy_activation = {
@@ -1012,6 +1023,7 @@ class LoadBalancerRepository(BaseRepository):
         api_settings = CONF.api_settings
         if (lb.l7policy_graph_generation or lb.l7policy_activation or
                 api_settings.enabled_l7policy_batch_activation_providers or
+                api_settings.enabled_l7policy_grpc_auth_transition_providers or
                 lb.provider in
                 api_settings.enabled_l7policy_conditional_removal_providers):
             lb.l7policy_graph_generation = uuidutils.generate_uuid()

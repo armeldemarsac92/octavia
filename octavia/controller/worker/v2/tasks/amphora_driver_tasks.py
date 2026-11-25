@@ -604,10 +604,26 @@ class ApplyL7PolicyActivation(BaseAmphoraTask):
             return False
         try:
             graph, policies = l7policy_activation.snapshot(
-                session, self.repositories, lb, listener, pending=True)
+                session, self.repositories, lb, listener, pending=True,
+                additional_pools=l7policy_activation.transition_pools(
+                    request))
         except exceptions.L7PolicyActivationConflict:
             return False
         expected = request['policies']
+        transition = request.get('grpc_auth_transition')
+        if transition:
+            driver = driver_factory.get_driver(lb.provider)
+            if not l7policy_activation.grpc_auth_transition_available(
+                    driver, listener):
+                return False
+            try:
+                for change in transition.values():
+                    if change['origin'] is not None:
+                        driver_utils.require_l7policy_external_auth(
+                            driver, listener.protocol, change['external_auth'])
+            except (exceptions.ProviderUnsupportedOptionError,
+                    exceptions.ValidationException):
+                return False
         selected = [p for p in policies if p.id in expected]
         if listener.protocol == constants.PROTOCOL_TCP:
             driver = driver_factory.get_driver(lb.provider)
@@ -626,7 +642,7 @@ class ApplyL7PolicyActivation(BaseAmphoraTask):
             [p.id for p in policies] == request['order'] and
             len(selected) == len(expected) and
             all(p.provisioning_status == constants.PENDING_UPDATE and
-                not p.enabled and
+                p.enabled == bool(transition) and
                 all(rule.provisioning_status == constants.ACTIVE
                     for rule in p.l7rules) and
                 l7policy_activation.policy_revision(p) == expected[p.id]
@@ -638,19 +654,64 @@ class ApplyL7PolicyActivation(BaseAmphoraTask):
                 if policy.id in operation['request']['policies'] and
                 policy.project_id == lb.project_id]
 
+    @staticmethod
+    def _original_grpc_barriers(transition, policies, expected):
+        return (len(policies) == len(transition) and
+                all(policy.enabled and
+                    policy.action ==
+                    constants.L7POLICY_ACTION_FIXED_RESPONSE and
+                    policy.fixed_response == {'status_code': 500} and
+                    policy.external_auth is None and
+                    l7policy_activation.policy_revision(policy) ==
+                    expected[policy.id] for policy in policies))
+
     def _prepare(self, delivery, *, revert=False):
         with db_apis.session().begin() as session:
             owned = self._owned(session, delivery)
             if not owned:
                 return None, False
             lb, listener, operation = owned
+            request = operation['request']
+            transition = request.get('grpc_auth_transition')
+            withdraws = l7policy_activation.withdraws_grpc_auth(request)
+            # A worker that crashes after sending a restoration can only
+            # reassert the original 500s. A new write must prove intent again.
+            restoration_expired = (
+                transition and not withdraws and
+                (operation['phase'] != 'pending' or
+                 l7policy_activation.grpc_auth_recovery_ready(operation)))
             restoring = (revert or operation['phase'] == 'reverting' or
-                         not self._matches(session, lb, listener,
-                                           operation['request']))
+                         restoration_expired or
+                         not self._matches(session, lb, listener, request))
             lb.l7policy_activation = {
                 **operation, 'phase': 'reverting' if restoring else
                 'rendering'}
             policies = self._selected(lb, listener, operation)
+            if transition:
+                candidate = lb.to_data_model()
+                frontend = next(row for row in candidate.listeners
+                                if row.id == listener.id)
+                if restoring:
+                    if withdraws or not self._original_grpc_barriers(
+                            transition, policies, request['policies']):
+                        frontend.enabled = False
+                    return candidate, True
+                pools = {pool.id: pool for pool in candidate.pools}
+                linked_pool_ids = {pool.id for pool in frontend.pools}
+                for policy in frontend.l7policies:
+                    change = transition.get(policy.id)
+                    if change is None:
+                        continue
+                    origin = change['origin']
+                    pool = pools[origin] if origin else None
+                    l7policy_activation.apply_transition(policy, change, pool)
+                    if pool and pool.id not in linked_pool_ids:
+                        frontend.pools.append(pool)
+                        if all(row.id != frontend.id
+                               for row in pool.listeners):
+                            pool.listeners.append(frontend)
+                        linked_pool_ids.add(pool.id)
+                return candidate, False
             if restoring:
                 for policy in policies:
                     policy.enabled = False
@@ -679,11 +740,33 @@ class ApplyL7PolicyActivation(BaseAmphoraTask):
             if recovered_pools:
                 self.repositories.pool.set_backend_tls_pool_statuses(
                     session, closed=(), recovered=recovered_pools)
-            for policy in self._selected(lb, listener, operation):
-                policy.enabled = applied
-                policy.provisioning_status = (constants.ACTIVE if applied
+            request = operation['request']
+            transition = request.get('grpc_auth_transition')
+            selected = self._selected(lb, listener, operation)
+            barrier_confirmed = False
+            if transition and not applied and healthy:
+                barrier_confirmed = self._original_grpc_barriers(
+                    transition, selected, request['policies'])
+                if not barrier_confirmed:
+                    listener.enabled = False
+            pools = {pool.id: pool for pool in lb.pools} if transition else {}
+            for policy in selected:
+                if transition:
+                    if applied:
+                        change = transition[policy.id]
+                        policy_repo = self.repositories.l7policy
+                        policy_repo._replace_external_auth_pool_ref(
+                            session, policy.id, listener, policy.project_id,
+                            change['external_auth'])
+                        l7policy_activation.apply_transition(
+                            policy, change, pools.get(change['origin']))
+                else:
+                    policy.enabled = applied
+                healthy_policy = applied or barrier_confirmed
+                policy.provisioning_status = (constants.ACTIVE
+                                              if healthy_policy
                                               else constants.ERROR)
-                policy.operating_status = (constants.ONLINE if applied
+                policy.operating_status = (constants.ONLINE if healthy_policy
                                            else constants.OFFLINE)
             status = constants.ACTIVE if healthy else constants.ERROR
             lb.provisioning_status = status
@@ -700,7 +783,9 @@ class ApplyL7PolicyActivation(BaseAmphoraTask):
             if applied:
                 session.flush()
                 graph, _policies = l7policy_activation.snapshot(
-                    session, self.repositories, lb, listener)
+                    session, self.repositories, lb, listener,
+                    additional_pools=l7policy_activation.transition_pools(
+                        request))
                 result['applied_revision'] = graph.graph_revision
             lb.l7policy_activation = result
             return True

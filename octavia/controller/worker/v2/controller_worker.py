@@ -917,7 +917,9 @@ class ControllerWorker:
 
     @staticmethod
     def _batch_owns_resource(resource_repo, resource_id):
-        if CONF.api_settings.enabled_l7policy_batch_activation_providers:
+        settings = CONF.api_settings
+        if (settings.enabled_l7policy_batch_activation_providers or
+                settings.enabled_l7policy_grpc_auth_transition_providers):
             with db_apis.session().begin() as session:
                 return resource_repo.batch_owns_graph(session, resource_id)
         return False
