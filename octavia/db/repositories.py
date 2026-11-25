@@ -3035,7 +3035,12 @@ class L7PolicyRepository(BaseRepository):
         query = self._active_http_policies(session)
         if retry_backoff:
             query = query.add_columns(policy.http_request_policy)
-        external_auth = transform in ('external_auth', 'grpc_external_auth')
+        auth_body_over_limit = transform == (
+            'external_auth_forward_body_over_limit')
+        auth_forward_body = (auth_body_over_limit or
+                             transform == 'external_auth_forward_body')
+        external_auth = (auth_forward_body or
+                         transform in ('external_auth', 'grpc_external_auth'))
         if external_auth:
             query = query.add_columns(policy.external_auth).filter(
                 policy.external_auth.isnot(None))
@@ -3116,9 +3121,14 @@ class L7PolicyRepository(BaseRepository):
             of=policy if binary_grpc_request else None).all()
         return [row for row in rows
                 if self._in_https_section(row) and
-                (not external_auth or
+                (not external_auth or auth_forward_body or
                  validate.is_grpc_external_auth(row.external_auth) ==
                  (transform == 'grpc_external_auth')) and
+                (not auth_forward_body or
+                 validate.l7policy_external_auth_forwards_body(
+                     row.external_auth)) and
+                (not auth_body_over_limit or
+                 validate.external_auth_body_over_limit(row.external_auth)) and
                 (not retry_backoff or
                  'backoff_ms' in row.http_request_policy.get('retry', {})) and
                 (not binary_grpc_response or

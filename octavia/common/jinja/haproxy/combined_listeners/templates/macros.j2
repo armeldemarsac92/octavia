@@ -498,11 +498,16 @@ backend {{ pool.id }}:{{ listener.id }}
 
 {% macro authorization_request_macro(auth, condition) %}
     {% if auth.available and auth.get('protocol') == 'GRPC' %}
+        {% if auth.forward_body_max_size is defined %}
+    http-request octavia-collect-body {{ auth.forward_body_max_size }} if {{ condition }}
+    http-request lua.octavia-grpc-auth-body {{ auth.pool_id }} {{ auth.request_headers }} {{ auth.forward_body_max_size }} if {{ condition }}
+        {% else %}
     http-request lua.octavia-grpc-auth {{ auth.pool_id }} {{ auth.request_headers }} if {{ condition }}
+        {% endif %}
     http-request use-service lua.octavia-grpc-auth-denial if {{ condition }} { var(txn.octavia_grpc_auth_denied) -m bool }
     http-request return status 503 if {{ condition }} !{ var(txn.octavia_grpc_auth_allowed) -m bool }
     {% elif auth.available %}
-    http-request octavia-auth /run/octavia/listener-auth/{{ auth.pool_id }}.sock {{ auth.prefix }} {{ auth.request_headers }} {{ auth.response_headers }} if {{ condition }}
+    http-request octavia-auth /run/octavia/listener-auth/{{ auth.pool_id }}.sock {{ auth.prefix }} {{ auth.request_headers }} {{ auth.response_headers }}{% if auth.forward_body_max_size is defined %} {{ auth.forward_body_max_size }}{% endif %} if {{ condition }}
     {% else %}
     http-request deny deny_status 503 if {{ condition }}
     {% endif %}

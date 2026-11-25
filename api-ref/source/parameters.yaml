@@ -718,6 +718,15 @@ gateway-capabilities:
   in: body
   required: true
   type: array
+l7policy-external-auth-max-body-bytes:
+  description: |
+    Regional maximum, in bytes, for the body limit requested by an L7
+    policy using ExternalAuth. Present when the provider advertises
+    ``l7policy_external_auth_forward_body_v1``. gRPC authorization has an
+    additional protocol maximum of 2146435071 bytes.
+  in: body
+  required: false
+  type: integer
 flavor-capabilities:
   description: |
     The provider flavor capabilities dictionary object.
@@ -1161,7 +1170,7 @@ l7policy-http-request-policy:
   type: object
 l7policy-external-auth:
   description: |
-    Bodyless authorization for the selected ``REDIRECT_TO_POOL`` or
+    External authorization for the selected ``REDIRECT_TO_POOL`` or
     ``WEIGHTED_TARGETS`` policy on an HTTP or terminated HTTPS listener.
     The authorization ``pool_id`` must belong to the same load balancer
     and project as the policy.
@@ -1181,8 +1190,20 @@ l7policy-external-auth:
     The optional ``allowed_request_headers`` list selects headers sent
     to the authorizer. An omitted or empty list allows request headers
     exposed by the listener filter. Request method, path, authority, scheme
-    and protocol are supplied separately. The authorization check omits the
-    request body.
+    and protocol are supplied separately.
+
+    For either protocol, set ``forward_body_max_size`` to a positive byte
+    limit to send the complete request body to the authorizer. This
+    requires the provider capability ``l7policy_external_auth_forward_body_v1``.
+    A missing or zero value sends a bodyless authorization check. Positive
+    values must fit the provider's ``l7policy_external_auth_max_body_bytes``
+    and the protocol maximum. HTTP accepts up to 2147483647 bytes and gRPC
+    accepts up to 2146435071 bytes, reserving 1048576 bytes for the protobuf
+    envelope. When a request exceeds the policy limit, the client receives
+    HTTP 413 before the authorizer or origin receives the request. If the
+    shared body buffer budget is exhausted by concurrent requests, the
+    affected request receives HTTP 503. A successful check preserves the
+    body at the origin.
 
     Other policy and weighted target filters cannot be combined with this
     field. Listener authorization, when configured, runs before policy

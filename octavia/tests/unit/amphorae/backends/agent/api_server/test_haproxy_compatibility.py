@@ -178,6 +178,41 @@ class HAProxyCompatTestCase(base.TestCase):
                     if suffix else [], calls)
 
     @mock.patch.object(haproxy_compatibility.subprocess, 'check_output')
+    @mock.patch.object(haproxy_compatibility, '_supports_grpc_external_auth')
+    @mock.patch.object(haproxy_compatibility.subprocess, 'run')
+    @mock.patch.object(haproxy_compatibility, '_valid_haproxy_config')
+    def test_external_auth_forward_body_requires_working_actions(
+            self, validate, run, grpc_auth, check_output):
+        check_output.return_value = (
+            'HAProxy version 3.0.19-ade9c1262-octavia-strict-dns-v1'
+            '-h2-alpn-v1-backend-sans-v1-http-policy-v1-http-mirror-v1'
+            '-listener-auth-v1 2026/03/19\n'
+            'Feature list : +LUA\n    [OCTAVIA] octavia-auth')
+        grpc_auth.return_value = True
+        http = constants.AMPHORA_CAPABILITY_HTTP_AUTH_BODY
+        grpc = constants.AMPHORA_CAPABILITY_GRPC_AUTH_BODY
+        compat = haproxy_compatibility
+        http_probe = compat._HTTP_EXTERNAL_AUTH_FORWARD_BODY_PROBE
+        grpc_probe = compat._GRPC_EXTERNAL_AUTH_FORWARD_BODY_PROBE
+        run.return_value.stdout = (
+            constants.GRPC_AUTH_ADAPTER_FORWARD_BODY_CAPABILITY + '\n')
+        for probe, supported, unsupported in ((http_probe, http, grpc),
+                                              (grpc_probe, grpc, http)):
+            with self.subTest(supported=supported):
+                validate.side_effect = lambda cmd, config: config == probe
+                features = compat.get_haproxy_capabilities()
+                self.assertTrue(features[supported])
+                self.assertNotIn(unsupported, features)
+                validate.assert_any_call(
+                    compat.CONF.haproxy_amphora.haproxy_cmd, probe)
+        run.return_value.stdout = ''
+        validate.side_effect = None
+        validate.return_value = True
+        features = compat.get_haproxy_capabilities()
+        self.assertTrue(features[http])
+        self.assertNotIn(grpc, features)
+
+    @mock.patch.object(haproxy_compatibility.subprocess, 'check_output')
     def test_http_retry_backoff_capability_uses_configured_binary(
             self, check_output):
         binary = '/opt/amphora/custom-haproxy'

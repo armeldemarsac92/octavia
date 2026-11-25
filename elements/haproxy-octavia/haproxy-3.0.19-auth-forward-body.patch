@@ -1,0 +1,819 @@
+diff --git a/include/haproxy/http_ana-t.h b/include/haproxy/http_ana-t.h
+index 8f8eb0e..2856339 100644
+--- a/include/haproxy/http_ana-t.h
++++ b/include/haproxy/http_ana-t.h
+@@ -257,6 +257,7 @@ struct http_txn {
+ 	short status;                   /* HTTP status sent to the client, negative if not set */
+ 	short server_status;            /* HTTP status received from the server, negative if not received */
+ 	struct http_reply *http_reply;  /* The HTTP reply to use as reply */
++	struct http_buffered_body *buffered_body; /* present only on enrolled requests */
+ 	struct buffer l7_buffer;        /* To store the data, in case we have to retry */
+ 	const struct http_request_policy *policy;
+ 	const struct octavia_retry_budget *retry_budget;
+diff --git a/include/haproxy/http_ana.h b/include/haproxy/http_ana.h
+index eed25fb..9571c4e 100644
+--- a/include/haproxy/http_ana.h
++++ b/include/haproxy/http_ana.h
+@@ -34,6 +34,8 @@
+ extern struct pool_head *pool_head_uniqueid;
+ extern struct pool_head *pool_head_http_txn;
+ 
++int http_get_buffered_body(const struct http_txn *txn, struct ist *payload);
++int http_collect_request_body(struct stream *s, unsigned int limit, struct ist *payload);
+ int http_wait_for_request(struct stream *s, struct channel *req, int an_bit);
+ int http_process_req_common(struct stream *s, struct channel *req, int an_bit, struct proxy *px);
+ int http_process_request(struct stream *s, struct channel *req, int an_bit);
+diff --git a/include/haproxy/htx-t.h b/include/haproxy/htx-t.h
+index a33da88..37d2017 100644
+--- a/include/haproxy/htx-t.h
++++ b/include/haproxy/htx-t.h
+@@ -141,6 +141,7 @@
+ #define HTX_SL_F_NORMALIZED_URI 0x00000800 /* The received URI is normalized (an implicit absolute-uri form) */
+ #define HTX_SL_F_CONN_UPG       0x00001000 /* The message contains "connection: upgrade" header */
+ #define HTX_SL_F_BODYLESS_RESP  0x00002000 /* The response to this message is bodyloess (only for reqyest) */
++#define HTX_SL_F_HAS_TRAILERS   0x00004000 /* complete message contains trailer fields */
+ 
+ /* This function is used to report flags in debugging tools. Please reflect
+  * below any single-bit flag addition above in the same order via the
+@@ -157,7 +158,8 @@ static forceinline char *hsl_show_flags(char *buf, size_t len, const char *delim
+ 	_(HTX_SL_F_CLEN, _(HTX_SL_F_CHNK, _(HTX_SL_F_VER_11,
+ 	_(HTX_SL_F_BODYLESS, _(HTX_SL_F_HAS_SCHM, _(HTX_SL_F_SCHM_HTTP,
+ 	_(HTX_SL_F_SCHM_HTTPS, _(HTX_SL_F_HAS_AUTHORITY,
+-	_(HTX_SL_F_NORMALIZED_URI, _(HTX_SL_F_CONN_UPG)))))))))))));
++	_(HTX_SL_F_NORMALIZED_URI, _(HTX_SL_F_CONN_UPG, _(HTX_SL_F_BODYLESS_RESP,
++	_(HTX_SL_F_HAS_TRAILERS)))))))))))))));
+ 	/* epilogue */
+ 	_(~0U);
+ 	return buf;
+diff --git a/src/flt_octavia_auth.c b/src/flt_octavia_auth.c
+index 75c1972..80cf2d0 100644
+--- a/src/flt_octavia_auth.c
++++ b/src/flt_octavia_auth.c
+@@ -1,6 +1,6 @@
+ /* SPDX-License-Identifier: GPL-2.0-or-later */
+ /*
+- * Listener HTTP authorization. The request rule waits for a bodyless check
++ * Listener HTTP authorization. The request rule waits for an authorization check
+  * through a private Unix socket, then resumes normal frontend rules.
+  */
+ 
+@@ -12,16 +12,20 @@
+ #include <haproxy/chunk.h>
+ #include <haproxy/filters.h>
+ #include <haproxy/http.h>
++#include <haproxy/http_ana.h>
+ #include <haproxy/http_client.h>
+ #include <haproxy/http_htx.h>
+ #include <haproxy/http_rules.h>
+ #include <haproxy/listener.h>
+ #include <haproxy/proxy.h>
++#include <haproxy/sample.h>
+ #include <haproxy/stream.h>
+ #include <haproxy/ticks.h>
+ 
+ #define AUTH_TIMEOUT_MS 3000
++#ifndef AUTH_ACTIVE_LIMIT
+ #define AUTH_ACTIVE_LIMIT 256
++#endif
+ #define AUTH_PATH_PREFIX_MAX 1024
+ #define AUTH_HEADERS_MAX (64 * (256 + 1))
+ 
+@@ -35,6 +39,14 @@ struct auth_rule {
+ 	struct ist prefix;
+ 	struct ist request_headers;
+ 	struct ist response_headers;
++	unsigned int body_limit;
++};
++
++struct auth_check {
++	struct stream *stream;
++	struct httpclient *client;
++	struct ist payload;
++	size_t sent;
+ };
+ 
+ /* Both configured name lists and Connection options are comma-separated. */
+@@ -82,7 +94,7 @@ static int request_connection_option(const struct htx *source, struct ist name)
+ }
+ 
+ static int make_auth_request(struct buffer *buffer, const struct htx *source,
+-                             const struct htx_sl *line, const struct auth_rule *rule)
++                             const struct htx_sl *line, const struct auth_rule *rule, size_t length)
+ {
+ 	struct http_uri_parser parser = http_uri_parser_init(htx_sl_req_uri(line));
+ 	struct ist path = http_parse_path(&parser);
+@@ -90,6 +102,8 @@ static int make_auth_request(struct buffer *buffer, const struct htx *source,
+ 	struct htx_sl *sl;
+ 	struct htx_blk *blk;
+ 	int has_host = 0;
++	char size[32];
++	struct ist length_header = ist2(size, snprintf(size, sizeof(size), "%zu", length));
+ 
+ 	if (!isttest(path))
+ 		path = isteq(htx_sl_req_uri(line), ist("*")) ? ist("*") : ist("/");
+@@ -103,7 +117,7 @@ static int make_auth_request(struct buffer *buffer, const struct htx *source,
+ 		path = ist2(b_orig(scratch), rule->prefix.len + path.len);
+ 	}
+ 	sl = htx_add_stline(dest, HTX_BLK_REQ_SL,
+-	                    HTX_SL_F_VER_11 | HTX_SL_F_BODYLESS |
++	                    HTX_SL_F_VER_11 | (length ? 0 : HTX_SL_F_BODYLESS) |
+ 	                    HTX_SL_F_XFER_LEN | HTX_SL_F_CLEN,
+ 	                    htx_sl_req_meth(line), path, ist("HTTP/1.1"));
+ 	if (!sl)
+@@ -130,10 +144,13 @@ static int make_auth_request(struct buffer *buffer, const struct htx *source,
+ 			return 0;
+ 	}
+ 	if ((!has_host && !htx_add_header(dest, ist("host"), ist(""))) ||
+-	    !htx_add_header(dest, ist("content-length"), ist("0")) ||
++	    !htx_add_header(dest, ist("content-length"), length_header) ||
+ 	    !htx_add_endof(dest, HTX_BLK_EOH))
+ 		return 0;
+-	dest->flags |= HTX_FL_EOM;
++	if (length)
++		dest->extra = length;
++	else
++		dest->flags |= HTX_FL_EOM;
+ 	htx_to_buf(dest, buffer);
+ 	return 1;
+ }
+@@ -175,16 +192,28 @@ static int copy_auth_headers(struct buffer *buffer, const struct http_hdr *heade
+ 
+ static void auth_wake_stream(struct httpclient *client)
+ {
+-	struct stream *stream = client->caller;
++	struct auth_check *check = client->caller;
++
++	if (check)
++		task_wakeup(check->stream->task, TASK_WOKEN_MSG);
++}
++
++static void auth_send_payload(struct httpclient *client)
++{
++	struct auth_check *check = client->caller;
+ 
+-	if (stream)
+-		task_wakeup(stream->task, TASK_WOKEN_MSG);
++	if (check && check->sent < check->payload.len)
++		check->sent += httpclient_req_xfer(client, istadv(check->payload, check->sent), 1);
+ }
+ 
+ static void auth_detach(struct stream *stream, struct filter *filter)
+ {
+-	if (filter->ctx) {
+-		httpclient_stop_and_destroy(filter->ctx);
++	struct auth_check *check = filter->ctx;
++
++	if (check) {
++		if (check->client)
++			httpclient_stop_and_destroy(check->client);
++		free(check);
+ 		filter->ctx = NULL;
+ 		_HA_ATOMIC_DEC(&auth_active);
+ 	}
+@@ -194,14 +223,55 @@ static struct flt_ops auth_ops = {
+ 	.detach = auth_detach,
+ };
+ 
++static int collect_for_action(struct stream *stream, struct proxy *px, unsigned int limit,
++                              int opts, struct ist *payload)
++{
++	if (opts & ACT_OPT_FIRST)
++		stream->req.analyse_exp = tick_add_ifset(now_ms, px->timeout.httpreq);
++	if ((stream->req.flags & CF_READ_TIMEOUT) || tick_is_expired(stream->req.analyse_exp, now_ms))
++		return 408;
++	if (opts & ACT_OPT_FINAL)
++		return 400;
++	return http_collect_request_body(stream, limit, payload);
++}
++
++static enum act_return action_collect_body(struct act_rule *rule, struct proxy *px,
++                                          struct session *sess, struct stream *stream, int opts)
++{
++	struct ist body;
++	int status = collect_for_action(stream, px, rule->arg.expr_int.value, opts, &body);
++
++	if (!status)
++		return ACT_RET_YIELD;
++	stream->req.analyse_exp = TICK_ETERNITY;
++	if (status == 200)
++		return ACT_RET_CONT;
++	stream->txn->status = status;
++	return ACT_RET_DENY;
++}
++
++static int fetch_auth_body(const struct arg *args, struct sample *smp, const char *kw, void *private)
++{
++	struct ist body;
++
++	if (!smp->strm || !http_get_buffered_body(smp->strm->txn, &body))
++		return 0;
++	smp->data.type = SMP_T_BIN;
++	smp->flags = SMP_F_CONST | SMP_F_VOL_TEST;
++	chunk_initlen(&smp->data.u.str, body.ptr ? body.ptr : "", 0, body.len);
++	return 1;
++}
++
+ static enum act_return action_octavia_auth(struct act_rule *rule, struct proxy *px,
+                                            struct session *sess, struct stream *stream, int opts)
+ {
+ 	const struct auth_rule *auth = rule->arg.act.p[0];
+ 	struct filter *candidate, *filter = NULL;
+ 	struct httpclient *client;
++	struct auth_check *check;
+ 	struct htx *incoming;
+ 	struct htx_sl *line;
++	struct ist payload = IST_NULL;
+ 	int status = 503;
+ 
+ 	list_for_each_entry(candidate, &strm_flt(stream)->filters, list) {
+@@ -213,14 +283,15 @@ static enum act_return action_octavia_auth(struct act_rule *rule, struct proxy *
+ 	if (!filter)
+ 		goto deny;
+ 
+-	if (!(opts & ACT_OPT_FIRST)) {
+-		client = filter->ctx;
+-		if (!client)
+-			goto deny;
++	check = filter->ctx;
++	if (check && check->client) {
++		client = check->client;
+ 		if (!(opts & ACT_OPT_FINAL) &&
+ 		    !tick_is_expired(stream->req.analyse_exp, now_ms)) {
+ 			if (client->flags & HTTPCLIENT_FS_GOT_HEADERS) {
+ 				status = client->res.status;
++				if (status == 200 && (client->flags & HTTPCLIENT_FA_DRAIN_REQ))
++					status = 503;
+ 				if (status == 200) {
+ 					if (!copy_auth_headers(&stream->req.buf, client->res.hdrs,
+ 					                       auth->response_headers))
+@@ -243,44 +314,58 @@ static enum act_return action_octavia_auth(struct act_rule *rule, struct proxy *
+ 
+ 	if (opts & ACT_OPT_FINAL)
+ 		goto deny;
++	if (stream->txn->meth == HTTP_METH_CONNECT) {
++		status = 403;
++		goto deny;
++	}
++	if (auth->body_limit) {
++		status = collect_for_action(stream, px, auth->body_limit, opts, &payload);
++		if (!status)
++			return ACT_RET_YIELD;
++		if (status != 200)
++			goto deny;
++		status = 503;
++	}
++
+ 	incoming = htxbuf(&stream->req.buf);
+ 	line = http_get_stline(incoming);
+ 	if (!line)
+ 		goto deny;
+-	if (line->info.req.meth == HTTP_METH_CONNECT) {
+-		status = 403;
++	/* Slow uploads consume only the separate collection budget. */
++	if (_HA_ATOMIC_ADD_FETCH(&auth_active, 1) > AUTH_ACTIVE_LIMIT) {
++		_HA_ATOMIC_DEC(&auth_active);
+ 		goto deny;
+ 	}
+-	if (_HA_ATOMIC_ADD_FETCH(&auth_active, 1) > AUTH_ACTIVE_LIMIT)
+-		goto release_slot;
+-
+-	client = httpclient_new_from_proxy(auth_proxy, stream, line->info.req.meth,
++	check = calloc(1, sizeof(*check));
++	if (!check) {
++		_HA_ATOMIC_DEC(&auth_active);
++		goto deny;
++	}
++	check->stream = stream;
++	check->payload = payload;
++	filter->ctx = check;
++	client = httpclient_new_from_proxy(auth_proxy, check, line->info.req.meth,
+ 	                                   ist("http://localhost/"));
++	check->client = client;
+ 	if (!client ||
+ 	    !sockaddr_alloc(&client->dst, &auth->destination, sizeof(auth->destination)) ||
+ 	    !b_alloc(&client->req.buf, DB_CHANNEL) ||
+-	    !make_auth_request(&client->req.buf, incoming, line, auth))
+-		goto release_client;
+-
++	    !make_auth_request(&client->req.buf, incoming, line, auth, check->payload.len))
++		goto deny;
++	if (check->payload.len)
++		client->ops.req_payload = auth_send_payload;
+ 	client->options |= HTTPCLIENT_O_HEADERS_ONLY;
+ 	client->ops.res_headers = auth_wake_stream;
+ 	client->ops.res_end = auth_wake_stream;
+ 	httpclient_set_timeout(client, AUTH_TIMEOUT_MS);
+ 	if (!httpclient_start(client))
+-		goto release_client;
+-	filter->ctx = client;
++		goto deny;
+ 	stream->req.analyse_exp = tick_add(now_ms, MS_TO_TICKS(AUTH_TIMEOUT_MS));
+ 	return ACT_RET_YIELD;
+ 
+- release_client:
+-	if (client && client->req.buf.size) {
+-		b_free(&client->req.buf);
+-		offer_buffers(NULL, 1);
+-	}
+-	httpclient_destroy(client);
+- release_slot:
+-	_HA_ATOMIC_DEC(&auth_active);
+  deny:
++	if (filter)
++		auth_detach(stream, filter);
+ 	stream->txn->status = status;
+ 	return ACT_RET_DENY;
+ }
+@@ -335,6 +420,31 @@ static int check_auth_rule(struct act_rule *rule, struct proxy *px, char **err)
+ 	return 0;
+ }
+ 
++static int parse_body_limit(const char *size, int *limit)
++{
++	long long value;
++
++	if (!*size || size[strspn(size, "0123456789")] ||
++	    strl2llrc(size, strlen(size), &value) || value > INT_MAX)
++		return 0;
++	*limit = value;
++	return 1;
++}
++
++static enum act_parse_ret parse_collect_body(const char **args, int *cur_arg, struct proxy *px,
++                                             struct act_rule *rule, char **err)
++{
++	if (!parse_body_limit(args[*cur_arg], &rule->arg.expr_int.value) ||
++	    !rule->arg.expr_int.value) {
++		memprintf(err, "octavia-collect-body expects a positive int32 byte count");
++		return ACT_RET_PRS_ERR;
++	}
++	(*cur_arg)++;
++	rule->action = ACT_CUSTOM;
++	rule->action_ptr = action_collect_body;
++	return ACT_RET_PRS_OK;
++}
++
+ static enum act_parse_ret parse_auth_rule(const char **args, int *cur_arg,
+                                           struct proxy *px, struct act_rule *rule, char **err)
+ {
+@@ -363,6 +473,17 @@ static enum act_parse_ret parse_auth_rule(const char **args, int *cur_arg,
+ 	rule->check_ptr = check_auth_rule;
+ 	rule->release_ptr = release_auth_rule;
+ 	*cur_arg += 4;
++	if (*args[*cur_arg] && strcmp(args[*cur_arg], "if") && strcmp(args[*cur_arg], "unless")) {
++		int limit;
++
++		if (!parse_body_limit(args[*cur_arg], &limit)) {
++			release_auth_rule(rule);
++			memprintf(err, "octavia-auth body limit must be a nonnegative int32 byte count");
++			return ACT_RET_PRS_ERR;
++		}
++		auth->body_limit = limit;
++		(*cur_arg)++;
++	}
+ 	auth_used = 1;
+ 	return ACT_RET_PRS_OK;
+ 
+@@ -433,6 +554,7 @@ static int precheck_auth(void)
+ static struct action_kw_list auth_actions = {
+ 	.kw = {
+ 		{ "octavia-auth", parse_auth_rule, 0 },
++		{ "octavia-collect-body", parse_collect_body, 0 },
+ 		{ NULL, NULL, 0 },
+ 	},
+ };
+@@ -447,6 +569,12 @@ static struct bind_kw_list auth_binds = { "OCTAVIA", { }, {
+ 	{ NULL, NULL, 0 },
+ } };
+ 
++static struct sample_fetch_kw_list auth_fetches = { ILH, {
++	{ "octavia.auth_body", fetch_auth_body, 0, NULL, SMP_T_BIN, SMP_USE_HRQHV },
++	{ /* END */ },
++} };
++
++INITCALL1(STG_REGISTER, sample_register_fetches, &auth_fetches);
+ INITCALL1(STG_REGISTER, http_req_keywords_register, &auth_actions);
+ INITCALL1(STG_REGISTER, flt_register_keywords, &auth_filters);
+ INITCALL1(STG_REGISTER, bind_register_keywords, &auth_binds);
+diff --git a/src/http_ana.c b/src/http_ana.c
+index e92387f..e829b24 100644
+--- a/src/http_ana.c
++++ b/src/http_ana.c
+@@ -889,6 +889,245 @@ int http_wait_for_request_body(struct stream *s, struct channel *req, int an_bit
+ 	return 0;
+ }
+ 
++/* The request channel remains a standard HTX buffer. While a rule awaits a
++ * complete message, park its headers and drain DATA as the mux delivers it.
++ * The second HTX buffer holds headers during collection and trailers during
++ * replay. Body storage grows with received bytes, at most the rule's limit.
++ */
++/* Retain only a bounded number of bodies, including slow origin replays. */
++#define HTTP_BUFFERED_BODY_LIMIT 256
++static unsigned int http_buffered_bodies;
++static unsigned long long http_body_bytes;
++static unsigned long long http_body_max_memory = 64ULL * 1024 * 1024;
++
++static int cfg_parse_body_memory(char **args, int section_type, struct proxy *px,
++                                 const struct proxy *defpx, const char *file, int line, char **err)
++{
++	long long value;
++
++	if (!*args[1] || *args[2] || args[1][strspn(args[1], "0123456789")] ||
++	    strl2llrc(args[1], strlen(args[1]), &value) || value < 1) {
++		memprintf(err, "'%s' expects a positive decimal byte count", args[0]);
++		return -1;
++	}
++	http_body_max_memory = value;
++	return 0;
++}
++
++static struct cfg_kw_list body_memory_keywords = { ILH, {
++	{ CFG_GLOBAL, "tune.octavia-auth-body-max-memory", cfg_parse_body_memory },
++	{ 0, NULL, NULL },
++} };
++
++INITCALL1(STG_REGISTER, cfg_register_keywords, &body_memory_keywords);
++
++struct http_buffered_body {
++	struct buffer saved;
++	struct ist bytes;
++	size_t capacity;
++	size_t replayed;
++	int complete;
++	int replay;
++};
++
++static void http_free_buffered_body(struct http_txn *txn)
++{
++	struct http_buffered_body *body = txn->buffered_body;
++
++	if (!body)
++		return;
++	if (b_size(&body->saved)) {
++		b_free(&body->saved);
++		offer_buffers(NULL, 1);
++	}
++	free(body->bytes.ptr);
++	_HA_ATOMIC_SUB(&http_body_bytes, body->capacity);
++	free(body);
++	txn->buffered_body = NULL;
++	_HA_ATOMIC_DEC(&http_buffered_bodies);
++}
++
++static int http_store_body_bytes(struct http_buffered_body *body, struct ist data, unsigned int limit)
++{
++	size_t needed, capacity;
++	unsigned long long used;
++	size_t growth;
++	char *ptr;
++
++	if (data.len > limit - body->bytes.len)
++		return 413;
++	needed = body->bytes.len + data.len;
++	if (needed > body->capacity) {
++		capacity = MAX(needed, MIN((size_t)limit, body->capacity * 2));
++		/* Charge the actual allocation, including spare capacity. Under
++		 * pressure prefer the bytes needed now over speculative growth.
++		 */
++		used = _HA_ATOMIC_LOAD(&http_body_bytes);
++		do {
++			if (needed - body->capacity > http_body_max_memory - used)
++				return 503;
++			growth = capacity - body->capacity;
++			if (growth > http_body_max_memory - used)
++				growth = needed - body->capacity;
++		} while (!_HA_ATOMIC_CAS(&http_body_bytes, &used, used + growth));
++		capacity = body->capacity + growth;
++		ptr = realloc(body->bytes.ptr, capacity);
++		if (!ptr) {
++			_HA_ATOMIC_SUB(&http_body_bytes, growth);
++			return 503;
++		}
++		body->capacity = capacity;
++		body->bytes.ptr = ptr;
++	}
++	if (data.len)
++		memcpy(body->bytes.ptr + body->bytes.len, data.ptr, data.len);
++	body->bytes.len = needed;
++	return 200;
++}
++
++/* Return 0 while awaiting the mux, 200 with the complete binary payload, or
++ * an HTTP failure status. A later auth rule may check the same transaction
++ * against a different limit without reading the transport a second time.
++ */
++int http_collect_request_body(struct stream *s, unsigned int limit, struct ist *payload)
++{
++	struct http_buffered_body *body = s->txn->buffered_body;
++	struct buffer *input = &s->req.buf;
++	struct htx *htx = htxbuf(input);
++	struct htx_blk *blk;
++	int eom = !!(htx->flags & HTX_FL_EOM);
++	int ret;
++
++	if (htx->flags & HTX_FL_PARSING_ERROR)
++		return 400;
++	if (htx->flags & HTX_FL_PROCESSING_ERROR)
++		return 503;
++	if (body && body->complete)
++		goto complete;
++	if (!body) {
++		struct http_hdr_ctx ctx = { .blk = NULL };
++		unsigned long long declared = 0;
++
++		if (http_find_header(htx, ist("content-length"), &ctx, 0)) {
++			if (http_parse_cont_len_header(&ctx.value, &declared, 0) < 0)
++				return 400;
++			if (declared > limit)
++				return 413;
++		}
++		if (http_handle_expect_hdr(s, htx, &s->txn->req) < 0)
++			return 503;
++		if (_HA_ATOMIC_ADD_FETCH(&http_buffered_bodies, 1) > HTTP_BUFFERED_BODY_LIMIT) {
++			_HA_ATOMIC_DEC(&http_buffered_bodies);
++			return 503;
++		}
++		body = calloc(1, sizeof(*body));
++		if (!body) {
++			_HA_ATOMIC_DEC(&http_buffered_bodies);
++			return 503;
++		}
++		s->txn->buffered_body = body;
++		if (!eom) {
++			struct htx *headers;
++
++			if (!b_alloc(&body->saved, DB_CHANNEL))
++				return 503;
++			headers = htx_from_buf(&body->saved);
++			htx_xfer_blks(headers, htx, UINT_MAX, HTX_BLK_EOH);
++			if (htx_get_tail_type(headers) != HTX_BLK_EOH)
++				return 503;
++			body->replay = 1;
++		}
++	}
++
++	for (blk = htx_get_head_blk(htx); blk;) {
++		if (htx_get_blk_type(blk) == HTX_BLK_TLR) {
++			struct htx *headers = body->replay ? htxbuf(&body->saved) : htx;
++			struct htx_sl *sl = http_get_stline(headers);
++
++			/* Preserve the original Content-Length for H2 backends. An
++			 * H1 backend must use chunked framing for the same trailers.
++			 */
++			if (!sl)
++				return 503;
++			sl->flags |= HTX_SL_F_HAS_TRAILERS;
++			break;
++		}
++		if (htx_get_blk_type(blk) != HTX_BLK_DATA) {
++			blk = htx_get_next_blk(htx, blk);
++			continue;
++		}
++		ret = http_store_body_bytes(body, htx_get_blk_value(htx, blk), limit);
++		if (ret != 200)
++			return ret;
++		blk = body->replay ? htx_remove_blk(htx, blk) : htx_get_next_blk(htx, blk);
++	}
++	if (body->replay && b_size(input)) {
++		htx_to_buf(htx, input);
++		sc_have_room(s->scf);
++	}
++	if (!eom) {
++		if (s->scf->flags & (SC_FL_EOS | SC_FL_ABRT_DONE | SC_FL_ERROR))
++			return 400;
++		return 0;
++	}
++	body->complete = 1;
++	if (body->replay) {
++		struct buffer trailers = *input;
++
++		*input = body->saved;
++		body->saved = trailers;
++		htxbuf(input)->extra = body->bytes.len;
++		/* The calling analyser cached a pointer to the previous HTX. Let it
++		 * reacquire the restored request channel before executing more rules.
++		 */
++		task_wakeup(s->task, TASK_WOKEN_MSG);
++		return 0;
++	}
++ complete:
++	if (body->bytes.len > limit)
++		return 413;
++	*payload = body->bytes;
++	return 200;
++}
++
++int http_get_buffered_body(const struct http_txn *txn, struct ist *payload)
++{
++	if (!txn || !txn->buffered_body || !txn->buffered_body->complete)
++		return 0;
++	*payload = txn->buffered_body->bytes;
++	return 1;
++}
++
++/* Feed saved bytes to the normal request forwarder in ordinary HTX windows.
++ * Trailers retain their HTX representation and follow the last body byte.
++ */
++static int http_replay_request_body(struct stream *s)
++{
++	struct http_buffered_body *body = s->txn->buffered_body;
++	struct htx *htx, *trailers;
++	size_t left = body->bytes.len - body->replayed;
++
++	if (!b_alloc(&s->req.buf, DB_CHANNEL))
++		return 0;
++	htx = htx_from_buf(&s->req.buf);
++	if (left)
++		body->replayed += htx_add_data(htx, ist2(body->bytes.ptr + body->replayed, left));
++	htx->extra = body->bytes.len - body->replayed;
++	if (body->replayed == body->bytes.len) {
++		trailers = htxbuf(&body->saved);
++		if (!htx_is_empty(trailers))
++			htx_xfer_blks(htx, trailers, UINT_MAX, HTX_BLK_EOT);
++		if (htx_is_empty(trailers)) {
++			if (htx_is_empty(htx) && !htx_add_endof(htx, HTX_BLK_EOT))
++				return 0;
++			htx->flags |= HTX_FL_EOM;
++			body->replay = 0;
++		}
++	}
++	htx_to_buf(htx, &s->req.buf);
++	return 1;
++}
++
+ /* This function is an analyser which forwards request body (including chunk
+  * sizes if any). It is called as soon as we must forward, even if we forward
+  * zero byte. The only situation where it must not be called is when we're in
+@@ -910,6 +1149,12 @@ int http_request_forward_body(struct stream *s, struct channel *req, int an_bit)
+ 
+ 	DBG_TRACE_ENTER(STRM_EV_STRM_ANA|STRM_EV_HTTP_ANA, s, txn, msg);
+ 
++	if (unlikely(txn->buffered_body)) {
++		if (txn->buffered_body->replay && !http_replay_request_body(s))
++			goto return_int_err;
++		if (!txn->buffered_body->replay)
++			http_free_buffered_body(txn);
++	}
+ 	htx = htxbuf(&req->buf);
+ 
+ 	if (htx->flags & HTX_FL_PARSING_ERROR)
+@@ -960,7 +1205,8 @@ int http_request_forward_body(struct stream *s, struct channel *req, int an_bit)
+ 	}
+ 	else {
+ 		c_adv(req, htx->data - co_data(req));
+-		if ((global.tune.options & GTUNE_USE_FAST_FWD) && (msg->flags & HTTP_MSGF_XFER_LEN) &&
++		if (!(txn->buffered_body && txn->buffered_body->replay) &&
++		    (global.tune.options & GTUNE_USE_FAST_FWD) && (msg->flags & HTTP_MSGF_XFER_LEN) &&
+ 		    (!(msg->flags & HTTP_MSGF_CONN_UPG) || (htx->flags & HTX_FL_EOM)))
+ 			channel_htx_forward_forever(req, htx);
+ 	}
+@@ -1047,6 +1293,11 @@ int http_request_forward_body(struct stream *s, struct channel *req, int an_bit)
+ 
+  missing_data_or_waiting:
+ 	/* stop waiting for data if the input is closed before the end */
++	if (txn->buffered_body && txn->buffered_body->replay) {
++		req->flags |= CF_WAKE_WRITE;
++		channel_dont_close(req);
++		goto waiting;
++	}
+ 	if (msg->msg_state < HTTP_MSG_ENDING && (s->scf->flags & (SC_FL_ABRT_DONE|SC_FL_EOS))) {
+ 		COUNT_IF(1, "Client abort during request forwarding");
+ 		goto return_cli_abort;
+@@ -4297,6 +4548,10 @@ enum rule_result http_wait_for_msg_body(struct stream *s, struct channel *chn,
+ 		goto end;
+ 	}
+ 
++	/* A fully captured request may still be waiting to replay into this channel. */
++	if (chn == &s->req && txn->buffered_body && txn->buffered_body->complete)
++		goto end;
++
+ 	/* Do nothing for bodyless and CONNECT requests */
+ 	if (txn->meth == HTTP_METH_CONNECT || (msg->flags & HTTP_MSGF_BODYLESS))
+ 		goto end;
+@@ -5279,6 +5534,7 @@ struct http_txn *http_create_txn(struct stream *s)
+ 	txn->server_status = -1;
+ 	txn->http_reply = NULL;
+ 	txn->l7_buffer = BUF_NULL;
++	txn->buffered_body = NULL;
+ 	txn->policy = NULL;
+ 	txn->retry_budget = NULL;
+ 	txn->request_expires_ms = 0;
+@@ -5335,6 +5591,7 @@ void http_destroy_txn(struct stream *s)
+ 	if (!LIST_ISEMPTY(&s->vars_reqres.head))
+ 		vars_prune(&s->vars_reqres, s->sess, s);
+ 
++	http_free_buffered_body(txn);
+ 	b_free(&txn->l7_buffer);
+ 	srv_drop(txn->retry_server);
+ 
+diff --git a/src/http_client.c b/src/http_client.c
+index 1e129e4..f78cd6d 100644
+--- a/src/http_client.c
++++ b/src/http_client.c
+@@ -733,6 +733,24 @@ static int httpclient_capture_headers(struct httpclient *hc, struct htx *htx)
+ 	return 1;
+ }
+ 
++/* HTX emits interim headers as one complete section, up to and including
++ * EOH. Leave any following final response in the channel for the caller.
++ */
++static void httpclient_skip_interim(struct channel *res, struct htx *htx)
++{
++	struct htx_blk *blk = htx_get_head_blk(htx);
++
++	while (blk) {
++		enum htx_blk_type type = htx_get_blk_type(blk);
++
++		c_rew(res, htx_get_blksz(blk));
++		blk = htx_remove_blk(htx, blk);
++		if (type == HTX_BLK_EOH)
++			break;
++	}
++	htx_to_buf(htx, &res->buf);
++}
++
+ void httpclient_applet_io_handler(struct appctx *appctx)
+ {
+ 	struct httpclient *hc = appctx->svcctx;
+@@ -794,16 +812,8 @@ void httpclient_applet_io_handler(struct appctx *appctx)
+ 					appctx->st0 = HTTPCLIENT_S_RES_BODY;
+ 				continue;
+ 			}
+-			do {
+-				enum htx_blk_type type = htx_get_blk_type(blk);
+-
+-				c_rew(res, htx_get_blksz(blk));
+-				blk = htx_remove_blk(htx, blk);
+-				if (type == HTX_BLK_EOH)
+-					break;
+-			} while (blk);
++			httpclient_skip_interim(res, htx);
+ 			sl = NULL;
+-			htx_to_buf(htx, &res->buf);
+ 			sc_will_read(sc);
+ 		}
+ 		if ((hc->flags & HTTPCLIENT_FS_MIRROR_RESPONSE) &&
+@@ -850,6 +860,23 @@ void httpclient_applet_io_handler(struct appctx *appctx)
+ 					if (hc->ops.req_payload) {
+ 						struct htx *hc_htx;
+ 
++						if ((hc->options & HTTPCLIENT_O_HEADERS_ONLY) && co_data(res)) {
++							htx = htxbuf(&res->buf);
++							/* The analyser may already have advanced "first"
++							 * past the forwarded interim headers.
++							 */
++							blk = htx_get_head_blk(htx);
++							if (!blk || htx_get_blk_type(blk) != HTX_BLK_RES_SL)
++								goto error;
++							sl = htx_get_blk_ptr(htx, blk);
++							if (sl->info.res.status < 200) {
++								if (sl->info.res.status == 101)
++									goto error;
++								httpclient_skip_interim(res, htx);
++								sc_will_read(sc);
++								continue;
++							}
++						}
+ 						if (co_data(res)) {
+ 							/* A response was received but we are still process the request.
+ 							 * It is unexpected and not really supported with the current API.
+@@ -937,17 +964,7 @@ void httpclient_applet_io_handler(struct appctx *appctx)
+ 					if (sl->info.res.status == 101)
+ 						goto error;
+ 
+-					while (blk) {
+-						enum htx_blk_type type = htx_get_blk_type(blk);
+-						uint32_t sz = htx_get_blksz(blk);
+-
+-						c_rew(res, sz);
+-						blk = htx_remove_blk(htx, blk);
+-						if (type == HTX_BLK_EOH) {
+-							htx_to_buf(htx, &res->buf);
+-							break;
+-						}
+-					}
++					httpclient_skip_interim(res, htx);
+ 					break;
+ 				}
+ 
+diff --git a/src/mux_h1.c b/src/mux_h1.c
+index 4a4fe50..1b9ad4a 100644
+--- a/src/mux_h1.c
++++ b/src/mux_h1.c
+@@ -2329,12 +2329,13 @@ static size_t h1_make_reqline(struct h1s *h1s, struct h1m *h1m, struct htx *htx,
+ 	h1m->flags |= H1_MF_XFER_LEN;
+ 	if (sl->flags & HTX_SL_F_CHNK)
+ 		h1m->flags |= H1_MF_CHNK;
+-	else if (sl->flags & HTX_SL_F_CLEN)
++	else if ((sl->flags & (HTX_SL_F_CLEN | HTX_SL_F_HAS_TRAILERS)) == HTX_SL_F_CLEN)
+ 		h1m->flags |= H1_MF_CLEN;
+ 	if (sl->flags & HTX_SL_F_XFER_ENC)
+ 		h1m->flags |= H1_MF_XFER_ENC;
+ 
+-	if (sl->flags & HTX_SL_F_BODYLESS && !(h1m->flags & H1_MF_CLEN)) {
++	if ((sl->flags & (HTX_SL_F_BODYLESS | HTX_SL_F_HAS_TRAILERS)) == HTX_SL_F_BODYLESS &&
++	    !(h1m->flags & H1_MF_CLEN)) {
+ 		h1m->flags = (h1m->flags & ~H1_MF_CHNK) | H1_MF_CLEN;
+ 		h1s->flags |= H1S_F_HAVE_CLEN;
+ 	}

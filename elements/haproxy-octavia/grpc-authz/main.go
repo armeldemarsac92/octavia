@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -34,8 +35,12 @@ func main() {
 		fmt.Println("octavia-grpc-authz 1")
 		return
 	}
+	if len(os.Args) == 2 && os.Args[1] == "--capabilities" {
+		fmt.Println("grpc_external_auth_forward_body_v1")
+		return
+	}
 	if len(os.Args) != 1 {
-		log.Fatal("usage: octavia-grpc-authz [--version]")
+		log.Fatal("usage: octavia-grpc-authz [--version|--capabilities]")
 	}
 	listener, err := activatedListener()
 	if err != nil {
@@ -99,6 +104,12 @@ func unixCheck(socketRoot string) checkFunc {
 			return nil, err
 		}
 		defer conn.Close()
-		return auth.NewAuthorizationClient(conn).Check(ctx, request)
+		var options []grpc.CallOption
+		if request.GetAttributes().GetRequest().GetHttp().GetSize() >= 0 {
+			// The peer's receive limit must cover the raw body and the protobuf
+			// envelope. The local decision and legacy send limits stay small.
+			options = append(options, grpc.MaxCallSendMsgSize(math.MaxInt32))
+		}
+		return auth.NewAuthorizationClient(conn).Check(ctx, request, options...)
 	}
 }

@@ -1395,17 +1395,53 @@ def is_grpc_external_auth(auth):
     return isinstance(auth, dict) and auth.get('protocol') == 'GRPC'
 
 
+def _external_auth_body_protocol_maximum(auth):
+    if is_grpc_external_auth(auth):
+        return constants.L7POLICY_GRPC_EXTERNAL_AUTH_FORWARD_BODY_MAX_SIZE
+    return constants.L7POLICY_EXTERNAL_AUTH_FORWARD_BODY_MAX_SIZE
+
+
+def l7policy_external_auth_max_body_bytes():
+    return min(CONF.haproxy_amphora.external_auth_body_buffer_bytes,
+               constants.L7POLICY_EXTERNAL_AUTH_FORWARD_BODY_MAX_SIZE)
+
+
 def l7policy_external_auth(auth):
-    if not is_grpc_external_auth(auth):
-        return http_external_auth(auth)
-    if auth.keys() - {'protocol', 'pool_id', 'allowed_request_headers'}:
-        raise exceptions.ValidationException(detail=_(
-            'Invalid gRPC ExternalAuth options.'))
-    result = _external_auth_pool(auth, _('gRPC ExternalAuth'))
-    result['protocol'] = 'GRPC'
-    _external_auth_headers(auth, result, _('gRPC ExternalAuth'),
-                           ('allowed_request_headers',), grpc=True)
+    size = 0
+    if isinstance(auth, dict) and 'forward_body_max_size' in auth:
+        auth = auth.copy()
+        size = auth.pop('forward_body_max_size')
+        maximum = _external_auth_body_protocol_maximum(auth)
+        if type(size) is not int or not 0 <= size <= maximum:
+            raise exceptions.ValidationException(detail=_(
+                'ExternalAuth forward_body_max_size must be an integer '
+                'between 0 and %(maximum)d.') % {'maximum': maximum})
+    if is_grpc_external_auth(auth):
+        if auth.keys() - {'protocol', 'pool_id', 'allowed_request_headers'}:
+            raise exceptions.ValidationException(detail=_(
+                'Invalid gRPC ExternalAuth options.'))
+        result = _external_auth_pool(auth, _('gRPC ExternalAuth'))
+        result['protocol'] = 'GRPC'
+        _external_auth_headers(auth, result, _('gRPC ExternalAuth'),
+                               ('allowed_request_headers',), grpc=True)
+    else:
+        result = http_external_auth(auth)
+    if size:
+        result['forward_body_max_size'] = size
     return result
+
+
+def l7policy_external_auth_forwards_body(auth):
+    size = (auth.get('forward_body_max_size')
+            if isinstance(auth, dict) else None)
+    return type(size) is int and size > 0
+
+
+def external_auth_body_over_limit(auth):
+    return (l7policy_external_auth_forwards_body(auth) and
+            auth['forward_body_max_size'] > min(
+                l7policy_external_auth_max_body_bytes(),
+                _external_auth_body_protocol_maximum(auth)))
 
 
 def sanitize_l7policy_api_args(l7policy, create=False, old_policy=None):

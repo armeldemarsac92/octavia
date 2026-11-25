@@ -6,19 +6,27 @@ import (
 	"context"
 	"errors"
 	"io"
+	"math"
 	"mime"
 	"net/http"
 	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	auth "github.com/envoyproxy/go-control-plane/envoy/service/auth/v3"
 	"golang.org/x/net/http/httpguts"
 )
 
-const formContentType = "application/x-www-form-urlencoded"
+const (
+	formContentType  = "application/x-www-form-urlencoded"
+	bodyContentType  = "application/vnd.octavia.grpc-authz-body"
+	formLengthHeader = "Octavia-Form-Length"
+	// The protobuf envelope and selected headers must fit alongside raw_body.
+	maxForwardBodySize = math.MaxInt32 - 4*maxFormSize
+)
 
 var (
 	poolID         = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
@@ -28,6 +36,7 @@ var (
 type checkFunc func(context.Context, string, *auth.CheckRequest) (*auth.CheckResponse, error)
 
 func newHandler(check checkFunc) http.Handler {
+	var inFlightBodyBytes atomic.Int64
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		deadline, ok := r.Context().Value(socketDeadlineKey{}).(time.Time)
 		if !ok {
@@ -48,6 +57,26 @@ func newHandler(check checkFunc) http.Handler {
 		}
 		httpRequest, err := readCheckRequest(w, r)
 		if err != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		if size := httpRequest.Size; size > 0 {
+			// Bound the total amount declared by concurrent checks while letting
+			// each read allocate only as the raw bytes actually arrive.
+			reserved := inFlightBodyBytes.Add(size)
+			defer inFlightBodyBytes.Add(-size)
+			if reserved > maxForwardBodySize {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			body, err := io.ReadAll(io.LimitReader(r.Body, size))
+			if err != nil || int64(len(body)) != size {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			httpRequest.RawBody = body
+		}
+		if ctx.Err() != nil {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
@@ -72,18 +101,44 @@ func newHandler(check checkFunc) http.Handler {
 
 func readCheckRequest(w http.ResponseWriter, r *http.Request) (*auth.AttributeContext_HttpRequest, error) {
 	contentType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
-	if err != nil || contentType != formContentType || len(r.Header.Values("Content-Type")) != 1 {
+	if err != nil || len(r.Header.Values("Content-Type")) != 1 {
 		return nil, errInvalidForm
 	}
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxFormSize))
-	if err != nil {
+	size := int64(-1)
+	formSize := int64(-1)
+	var formReader io.Reader
+	switch contentType {
+	case formContentType:
+		formReader = http.MaxBytesReader(w, r.Body, maxFormSize)
+	case bodyContentType:
+		// The private body frame starts with the legacy form and ends with
+		// the original bytes. A fixed HTTP length delimits the whole frame.
+		lengths := r.Header.Values(formLengthHeader)
+		if len(lengths) != 1 || len(r.TransferEncoding) != 0 {
+			return nil, errInvalidForm
+		}
+		length, err := strconv.ParseUint(lengths[0], 10, 32)
+		if err != nil || length == 0 || length > maxFormSize || r.ContentLength < int64(length) {
+			return nil, errInvalidForm
+		}
+		formSize = int64(length)
+		size = r.ContentLength - formSize
+		if size > maxForwardBodySize {
+			return nil, errInvalidForm
+		}
+		formReader = io.LimitReader(r.Body, formSize)
+	default:
+		return nil, errInvalidForm
+	}
+	body, err := io.ReadAll(formReader)
+	if err != nil || (formSize >= 0 && int64(len(body)) != formSize) {
 		return nil, errInvalidForm
 	}
 	form, err := url.ParseQuery(string(body))
 	if err != nil {
 		return nil, errInvalidForm
 	}
-	httpRequest := &auth.AttributeContext_HttpRequest{Size: -1}
+	httpRequest := &auth.AttributeContext_HttpRequest{Size: size}
 	for field, target := range map[string]*string{
 		"method": &httpRequest.Method, "path": &httpRequest.Path, "host": &httpRequest.Host,
 		"scheme": &httpRequest.Scheme, "protocol": &httpRequest.Protocol,

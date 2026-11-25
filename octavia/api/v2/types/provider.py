@@ -28,6 +28,7 @@ class ProvidersRootResponse(types.BaseType):
 
 class GatewayCapabilitiesResponse(types.BaseType):
     gateway_capabilities = wtypes.wsattr([wtypes.text])
+    l7policy_external_auth_max_body_bytes = wtypes.wsattr(int)
 
 
 class FlavorCapabilitiesResponse(types.BaseType):
