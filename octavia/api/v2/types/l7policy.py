@@ -12,6 +12,7 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+from oslo_config import cfg
 from wsme.rest import json as wsme_json
 from wsme import types as wtypes
 
@@ -19,7 +20,28 @@ from octavia.api.common import types
 from octavia.api.v2.types import l7rule as l7rule_types
 from octavia.api.v2.types import pool as pool_types
 from octavia.common import constants
+from octavia.common import exceptions
+from octavia.common import validate
 from octavia.i18n import _
+
+
+CONF = cfg.CONF
+
+
+class StoredHTTPExternalAuth(wtypes.UserType):
+    basetype = object
+    name = 'stored_external_auth'
+
+
+class HTTPExternalAuth(StoredHTTPExternalAuth):
+    name = 'external_auth'
+
+    @staticmethod
+    def validate(value):
+        try:
+            return validate.http_external_auth(value)
+        except exceptions.ValidationException as exc:
+            raise ValueError(str(exc)) from exc
 
 
 class BaseL7PolicyType(types.BaseType):
@@ -31,8 +53,9 @@ class BaseL7PolicyType(types.BaseType):
         for field in ('request_header_operations',
                       'response_header_operations', 'redirect_request',
                       'request_url_rewrite', 'request_cors',
-                      'http_request_policy', 'request_mirrors'):
-            if getattr(self, field) is wtypes.Unset:
+                      'http_request_policy', 'request_mirrors',
+                      'external_auth'):
+            if getattr(self, field, wtypes.Unset) is wtypes.Unset:
                 data.pop(field, None)
         return data
 
@@ -56,6 +79,7 @@ class L7PolicyResponse(BaseL7PolicyType):
     request_cors = wtypes.wsattr(types.HTTPRequestCORS())
     http_request_policy = wtypes.wsattr(types.HTTPRequestPolicy())
     request_mirrors = wtypes.wsattr(types.HTTPRequestMirrors())
+    external_auth = wtypes.wsattr(StoredHTTPExternalAuth())
     targets = wtypes.wsattr(types.WeightedL7PolicyTargets())
     request_header_operations = wtypes.wsattr(types.RequestHeaderOperations())
     response_header_operations = wtypes.wsattr(
@@ -81,6 +105,14 @@ class L7PolicyResponse(BaseL7PolicyType):
         if db_obj.https_listener_hostname is None:
             result.https_listener_hostname = wtypes.Unset
         listener = getattr(db_obj, 'listener', None)
+        lb = getattr(listener, 'load_balancer', None)
+        # A configured value remains visible if enrollment is withdrawn.
+        # Preserve unknown JSON for a controller that needs to withdraw it.
+        auth_providers = (
+            CONF.api_settings.enabled_l7policy_http_external_auth_providers)
+        if (getattr(db_obj, 'external_auth', None) is None and
+                getattr(lb, 'provider', None) not in auth_providers):
+            result.external_auth = wtypes.Unset
         passthrough = getattr(db_obj, 'tcp_tls_passthrough', None)
         if (getattr(listener, 'tcp_tls_mixed_mode', None) is not True or
                 not isinstance(passthrough, bool)):
@@ -144,6 +176,7 @@ class L7PolicyPOST(BaseL7PolicyType):
     request_cors = wtypes.wsattr(types.HTTPRequestCORS())
     http_request_policy = wtypes.wsattr(types.HTTPRequestPolicy())
     request_mirrors = wtypes.wsattr(types.HTTPRequestMirrors())
+    external_auth = wtypes.wsattr(HTTPExternalAuth())
     targets = wtypes.wsattr(types.WeightedL7PolicyTargets())
     request_header_operations = wtypes.wsattr(types.RequestHeaderOperations())
     response_header_operations = wtypes.wsattr(
@@ -205,6 +238,7 @@ class L7PolicyPUT(BaseL7PolicyType):
     request_cors = wtypes.wsattr(types.HTTPRequestCORS())
     http_request_policy = wtypes.wsattr(types.HTTPRequestPolicy())
     request_mirrors = wtypes.wsattr(types.HTTPRequestMirrors())
+    external_auth = wtypes.wsattr(HTTPExternalAuth())
     targets = wtypes.wsattr(types.WeightedL7PolicyTargets())
     request_header_operations = wtypes.wsattr(types.RequestHeaderOperations())
     response_header_operations = wtypes.wsattr(

@@ -84,6 +84,191 @@ class TestInitialL7Rules(base.BaseAPITest):
         return self.post(self.L7POLICIES_PATH, {'l7policy': body},
                          status=status).json
 
+    def test_http_external_auth_admission_and_withdrawal(self):
+        field = 'external_auth'
+        caps_path = self.PROVIDERS_PATH + '/amphora/gateway_capabilities'
+        cap = constants.GATEWAY_CAPABILITY_L7POLICY_HTTP_EXTERNAL_AUTH
+        legacy = self._post_policy()['l7policy']
+        legacy_path = self.L7POLICY_PATH.format(l7policy_id=legacy['id'])
+        self.assertNotIn(field, legacy)
+        self.set_lb_status(self.lb_id)
+        auth_pool = self.create_pool(
+            self.lb_id, 'HTTP', 'ROUND_ROBIN',
+            tags=[constants.GATEWAY_LISTENER_AUTH_POOL_TAG])['pool']
+        self.set_lb_status(self.lb_id)
+        origin = self.create_pool(
+            self.lb_id, 'HTTP', 'ROUND_ROBIN')['pool']
+        self.set_lb_status(self.lb_id)
+        foreign_lb = self.create_load_balancer(
+            uuidutils.generate_uuid(), provider='amphora',
+            project_id=self.project_id)['loadbalancer']
+        self.set_lb_status(foreign_lb['id'])
+        foreign_pool = self.create_pool(
+            foreign_lb['id'], 'HTTP', 'ROUND_ROBIN',
+            tags=[constants.GATEWAY_LISTENER_AUTH_POOL_TAG])['pool']
+        self.set_lb_status(foreign_lb['id'])
+        auth = {'pool_id': auth_pool['id'], 'path_prefix': '/auth',
+                'allowed_request_headers': ['x-identity']}
+        payload = {'action': 'REDIRECT_TO_POOL',
+                   'redirect_pool_id': origin['id'],
+                   'redirect_prefix': None, field: auth}
+        self.assertNotIn(cap, self.get(caps_path).json['gateway_capabilities'])
+        self._post_policy(status=501, **payload)
+        self.conf.config(group='api_settings',
+                         enabled_l7policy_http_external_auth_providers=[
+                             'amphora'])
+        self.assertIn(cap, self.get(caps_path).json['gateway_capabilities'])
+        self.assertIsNone(self.get(legacy_path).json['l7policy'][field])
+        self._post_policy(status=400, **{
+            **payload, 'redirect_pool_id': auth_pool['id']})
+        self._post_policy(status=400, **{
+            **payload, field: {'pool_id': origin['id']}})
+        self._post_policy(status=404, **{
+            **payload, field: {'pool_id': foreign_pool['id']}})
+        self._post_policy(status=400, **{
+            **payload, field: {'pool_id': auth_pool['id'], 'unknown': True}})
+        self._post_policy(status=400, **{**payload, 'action': 'REJECT',
+                                         'redirect_pool_id': None})
+        self._post_policy(status=400, **{
+            **payload, 'http_request_policy': {'request_timeout_ms': 50}})
+        policy = self._post_policy(**payload)['l7policy']
+        policy_id = policy['id']
+        path = self.L7POLICY_PATH.format(l7policy_id=policy_id)
+        self.assertEqual(auth, policy[field])
+        self.assertEqual(auth, self.rpc.cast.call_args.kwargs[
+            constants.L7POLICY][field])
+        self.assertEqual(auth, self.get(path).json['l7policy'][field])
+        pool_path = self.POOL_PATH.format(pool_id=auth_pool['id'])
+        self.assertFalse(policy['admin_state_up'])
+        expected_listeners = [{'id': self.listener_id}]
+        self.assertEqual(expected_listeners,
+                         self.get(pool_path).json['pool']['listeners'])
+        listed = self.get(self.POOLS_PATH).json['pools']
+        listed_auth = next(p for p in listed if p['id'] == auth_pool['id'])
+        self.assertEqual(expected_listeners, listed_auth['listeners'])
+        self.set_lb_status(self.lb_id)
+        self.delete(pool_path, status=409)
+        self.put(pool_path, {'pool': {'tags': []}}, status=409)
+        new_auth = {**auth, 'allowed_response_headers': ['x-team']}
+        updated = self.put(path, {'l7policy': {field: new_auth}})
+        self.assertEqual(new_auth, updated.json['l7policy'][field])
+        rpc = self.rpc.cast.call_args.kwargs
+        self.assertEqual(auth, rpc[constants.ORIGINAL_L7POLICY][field])
+        self.assertEqual(new_auth, rpc[constants.L7POLICY_UPDATES][field])
+        database_tasks.UpdateL7PolicyInDB().execute(
+            rpc[constants.ORIGINAL_L7POLICY], rpc[constants.L7POLICY_UPDATES])
+        self.set_lb_status(self.lb_id)
+        self.conf.config(group='api_settings',
+                         enabled_l7policy_http_external_auth_providers=[])
+        self.put(path, {'l7policy': {'admin_state_up': True}}, status=501)
+        self.assertEqual(new_auth, self.put(path, {
+            'l7policy': {'description': 'unrelated'}}).json['l7policy'][field])
+        self.set_lb_status(self.lb_id)
+        unknown = {'future_format': [1, 2]}
+        with db_api.session().begin() as session:
+            session.get(models.L7Policy, policy_id).external_auth = unknown
+        self.assertEqual(unknown, self.get(path).json['l7policy'][field])
+        self.assertNotIn(field, self.put(path, {'l7policy': {field: None}})
+                         .json['l7policy'])
+        self.assertIsNone(self.rpc.cast.call_args.kwargs[
+            constants.L7POLICY_UPDATES][field])
+        self.set_lb_status(self.lb_id)
+        self.delete(pool_path)
+
+    def test_http_external_auth_rejects_weighted_target_mirrors(self):
+        self.conf.config(
+            group='api_settings', enabled_gateway_action_providers=['amphora'],
+            enabled_l7policy_http_external_auth_providers=['amphora'],
+            enabled_http_request_mirror_providers=['amphora'])
+        auth_pool = self.create_pool(
+            self.lb_id, 'HTTP', 'ROUND_ROBIN',
+            tags=[constants.GATEWAY_LISTENER_AUTH_POOL_TAG])['pool']['id']
+        self.set_lb_status(self.lb_id)
+        origin = self.create_pool(
+            self.lb_id, 'HTTP', 'ROUND_ROBIN')['pool']['id']
+        self.set_lb_status(self.lb_id)
+        mirror_pool = self.create_pool(
+            self.lb_id, 'HTTP', 'ROUND_ROBIN')['pool']['id']
+        self.set_lb_status(self.lb_id)
+        auth = {'pool_id': auth_pool}
+        target = {'pool_id': origin, 'weight': 1}
+        mirrored = {**target, 'request_mirrors': [{
+            'pool_id': mirror_pool, 'numerator': 1, 'denominator': 1}]}
+        weighted = {'action': 'WEIGHTED_TARGETS', 'redirect_prefix': None}
+
+        self._post_policy(
+            status=400, **weighted, targets=[mirrored], external_auth=auth)
+        protected = self._post_policy(
+            **weighted, targets=[target], external_auth=auth)['l7policy']
+        self.set_lb_status(self.lb_id)
+        protected_path = self.L7POLICY_PATH.format(
+            l7policy_id=protected['id'])
+        self.put(protected_path, {'l7policy': {'targets': [mirrored]}},
+                 status=400)
+
+        copying = self._post_policy(**weighted, targets=[mirrored])['l7policy']
+        self.set_lb_status(self.lb_id)
+        copying_path = self.L7POLICY_PATH.format(l7policy_id=copying['id'])
+        self.put(copying_path, {'l7policy': {'external_auth': auth}},
+                 status=400)
+        self.put(copying_path, {'l7policy': {
+            'external_auth': auth, 'targets': [target]}})
+
+    def test_http_external_auth_withdrawal_blocks_indirect_exposure(self):
+        self.conf.config(
+            group='api_settings',
+            enabled_l7policy_http_external_auth_providers=['amphora'])
+        auth_pool = self.create_pool(
+            self.lb_id, 'HTTP', 'ROUND_ROBIN',
+            tags=[constants.GATEWAY_LISTENER_AUTH_POOL_TAG])['pool']['id']
+        self.set_lb_status(self.lb_id)
+        origin = self.create_pool(
+            self.lb_id, 'HTTP', 'ROUND_ROBIN')['pool']['id']
+        self.set_lb_status(self.lb_id)
+
+        def activate(**options):
+            policy = self._post_policy(**options)['l7policy']
+            self.set_lb_status(self.lb_id)
+            path = self.L7POLICY_PATH.format(l7policy_id=policy['id'])
+            self.put(path, {'l7policy': {'admin_state_up': True}})
+            self.set_lb_status(self.lb_id)
+            return path
+
+        blocker_path = activate(position=1)
+        protected_path = activate(
+            position=2, action='REDIRECT_TO_POOL', redirect_prefix=None,
+            redirect_pool_id=origin, external_auth={'pool_id': auth_pool})
+        origin_path = self.POOL_PATH.format(pool_id=origin)
+        authorizer_path = self.POOL_PATH.format(pool_id=auth_pool)
+        self.conf.config(group='api_settings',
+                         enabled_l7policy_http_external_auth_providers=[])
+        self.rpc.cast.reset_mock()
+        self.delete(blocker_path, status=501)
+        self.rpc.cast.assert_not_called()
+        self.put(origin_path, {'pool': {'admin_state_up': False}})
+        self.set_lb_status(self.lb_id)
+        self.put(origin_path, {'pool': {'admin_state_up': True}}, status=501)
+        self.put(authorizer_path, {'pool': {'admin_state_up': False}})
+        self.set_lb_status(self.lb_id)
+        self.put(origin_path, {'pool': {'admin_state_up': True}})
+        self.set_lb_status(self.lb_id)
+        self.put(authorizer_path, {'pool': {'admin_state_up': True}},
+                 status=501)
+        self.put(authorizer_path, {'pool': {'name': 'renamed authorizer'}})
+        self.set_lb_status(self.lb_id)
+        listener_path = self.LISTENER_PATH.format(listener_id=self.listener_id)
+        self.put(listener_path, {'listener': {'admin_state_up': False}})
+        self.set_lb_status(self.lb_id)
+        self.put(listener_path, {'listener': {'admin_state_up': True}},
+                 status=501)
+        self.put(protected_path, {'l7policy': {'external_auth': None}})
+        self.set_lb_status(self.lb_id)
+        self.put(listener_path, {'listener': {'admin_state_up': True}})
+        self.set_lb_status(self.lb_id)
+        self.put(authorizer_path, {'pool': {'admin_state_up': True}})
+        self.set_lb_status(self.lb_id)
+        self.delete(blocker_path)
+
     def _prepare_activation_group(self, **destination):
         self.conf.config(group='api_settings',
                          enabled_l7policy_batch_activation_providers=[

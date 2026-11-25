@@ -336,3 +336,35 @@ leaves the budget available for other requests.
 Run the loopback checks with the patched binary::
 
     python elements/haproxy-octavia/test-backend-retry-budget.py /path/to/haproxy -v
+
+HTTP L7 policy authorization
+============================
+
+The ``l7policy_http_external_auth_v1`` capability authorizes the first
+eligible L7 forwarding policy on an HTTP or terminated HTTPS listener.
+Enable ``[api_settings] enabled_l7policy_http_external_auth_providers``
+after updating the database, API, provider library and workers, and
+qualifying all eligible Amphora images. The agent uses the same native
+capability probe as listener authorization. A protected match returns a
+local 503 when the Amphora lacks that native action.
+
+The policy accepts ``external_auth`` with ``pool_id`` and optional
+``path_prefix``, ``allowed_request_headers`` and
+``allowed_response_headers``. It uses the same authorizer pool role and
+native HTTP contract as listener authorization. The policy retains the
+pool reference while the field is configured, including while disabled.
+Use an authorizer pool distinct from the origin pool and weighted
+forwarding targets. Policy and weighted target request and response
+filters cannot be combined with policy authorization.
+
+Listener authorization still runs before policy selection. Stock rejects
+and redirects keep their routing precedence. The authorizer runs after
+matching and before delivery to the selected backend. Its allowed
+response headers may reach the origin and do not cause a second match.
+A request to an unfiltered policy skips this check. An unsuccessful or
+unavailable authorization stops before the origin, including when other
+paths on the same listener use the same origin.
+
+Withdrawing regional enrollment blocks new configurations and scope
+expansion. Existing policies remain readable and enforced. To remove
+authorization from an existing policy, send ``"external_auth": null``.

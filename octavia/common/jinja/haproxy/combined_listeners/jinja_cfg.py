@@ -373,7 +373,10 @@ class JinjaTemplater:
         grpc_mirror_cap = constants.GATEWAY_CAPABILITY_GRPC_REQUEST_MIRROR
         feature_compatibility[grpc_mirror_cap] = (
             (amp_details or {}).get(grpc_mirror_cap) is True)
-        auth_capability = constants.GATEWAY_CAPABILITY_LISTENER_REQUEST_FILTERS
+        auth_capability = (
+            constants.GATEWAY_CAPABILITY_LISTENER_REQUEST_FILTERS)
+        feature_compatibility[auth_capability] = (
+            (amp_details or {}).get(auth_capability) is True)
         fallback_capability = (
             constants.GATEWAY_CAPABILITY_FRONTEND_CLIENT_AUTH_INSECURE_FALLBACK)
         sampling_capability = (
@@ -716,6 +719,11 @@ class JinjaTemplater:
             for section in listener.get('request_filter_sections', ())
             for auth in section['requests'] if auth['available']
         }
+        auth_pool_ids.update(
+            policy['external_auth']['pool_id']
+            for listener in listener_transforms if listener['enabled']
+            for policy in listener['l7policies']
+            if policy.get('external_auth', {}).get('available'))
         if auth_pool_ids:
             auth_pools = {
                 pool.id: pool for pool in loadbalancer.pools
@@ -1016,6 +1024,11 @@ class JinjaTemplater:
                 rule.enabled and rule.type == constants.L7RULE_TYPE_TLS_SNI
                 for rule in policy.l7rules))
         l7policies = []
+        policy_auth_supported = feature_compatibility.get(
+            constants.GATEWAY_CAPABILITY_LISTENER_REQUEST_FILTERS, False)
+        auth_pool_ids = {pool.id for pool in loadbalancer.pools
+                         if policy_auth_supported and
+                         self._auth_pool_available(pool, listener)}
         for policy in policy_gen:
             if (listener.protocol == constants.PROTOCOL_TCP and
                     policy.action ==
@@ -1052,6 +1065,29 @@ class JinjaTemplater:
                 policy, feature_compatibility, tls_enabled, tls_certs,
                 available_pool_ids, available_mirror_pool_ids,
                 grpc_mirror_pool_ids)
+            external_auth = getattr(policy, 'external_auth', None)
+            if (active and policy.enabled and transformed['l7rules'] and
+                    external_auth is not None):
+                transformed['external_auth'] = {'available': False}
+                if (policy_auth_supported and
+                        policy.project_id == listener.project_id ==
+                        loadbalancer.project_id and
+                        listener.load_balancer_id == loadbalancer.id and
+                        listener.protocol in (
+                            constants.PROTOCOL_HTTP,
+                            constants.PROTOCOL_TERMINATED_HTTPS) and
+                        (policy.action ==
+                         constants.L7POLICY_ACTION_WEIGHTED_TARGETS or
+                         policy.redirect_pool_id in available_pool_ids)):
+                    try:
+                        auth = validate.http_external_auth(external_auth)
+                    except exceptions.ValidationException:
+                        # A newer or unreadable stored filter keeps this
+                        # match closed until it can be updated or withdrawn.
+                        pass
+                    else:
+                        transformed['external_auth'] = self._encode_auth(
+                            auth, auth_pool_ids)
             if policy.enabled:
                 # Closing an HTTP policy must leave a retained mirror
                 # with the same pool classification as removing it.
@@ -1240,39 +1276,42 @@ class JinjaTemplater:
         pool_ids = listener_request_filters.pool_ids(sections)
         available = {
             pool.id for pool in loadbalancer.pools
-            if pool.id in pool_ids and pool.enabled and
-            pool.project_id == listener.project_id and
-            pool.load_balancer_id == listener.load_balancer_id and
-            pool.provisioning_status not in (
-                constants.PENDING_DELETE, constants.DELETED) and
-            listener_request_filters.valid_pool(pool)
+            if pool.id in pool_ids and
+            self._auth_pool_available(pool, listener)
         }
+        ordered_sections = sorted(
+            sections, key=lambda section: self._https_hostname_priority(
+                section['hostname']))
+        return [
+            {'id': index, 'hostname': section['hostname'],
+             'reject': section.get('reject', False),
+             'requests': [self._encode_auth(step['http'], available)
+                          for step in section.get('requests', ())]}
+            for index, section in enumerate(ordered_sections, start=1)]
 
+    @staticmethod
+    def _auth_pool_available(pool, listener):
+        return (pool.enabled and pool.project_id == listener.project_id and
+                pool.load_balancer_id == listener.load_balancer_id and
+                pool.provisioning_status not in (
+                    constants.PENDING_DELETE, constants.DELETED) and
+                listener_request_filters.valid_pool(pool))
+
+    @staticmethod
+    def _encode_auth(auth, available_pool_ids):
         def encode(value):
             # Config arguments contain only hex digits or the empty marker.
             return value.encode('ascii').hex() or '-'
 
-        ordered_sections = sorted(
-            sections, key=lambda section: self._https_hostname_priority(
-                section['hostname']))
-        result = []
-        for index, section in enumerate(ordered_sections, start=1):
-            requests = []
-            for step in section.get('requests', ()):
-                auth = step['http']
-                requests.append({
-                    'pool_id': auth['pool_id'],
-                    'available': auth['pool_id'] in available,
-                    'prefix': encode(auth.get('path_prefix', '')),
-                    'request_headers': encode(','.join(
-                        auth.get('allowed_request_headers', ()))),
-                    'response_headers': encode(','.join(
-                        auth.get('allowed_response_headers', ()))),
-                })
-            result.append({'id': index, 'hostname': section['hostname'],
-                           'reject': section.get('reject', False),
-                           'requests': requests})
-        return result
+        return {
+            'pool_id': auth['pool_id'],
+            'available': auth['pool_id'] in available_pool_ids,
+            'prefix': encode(auth.get('path_prefix', '')),
+            'request_headers': encode(','.join(
+                auth.get('allowed_request_headers', ()))),
+            'response_headers': encode(','.join(
+                auth.get('allowed_response_headers', ()))),
+        }
 
     @staticmethod
     def _backend_tls_san_options(sans):

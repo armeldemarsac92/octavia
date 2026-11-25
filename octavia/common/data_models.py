@@ -84,7 +84,7 @@ class ToDictMixin:
             if attr.startswith('_') or not kwargs.get(attr, True):
                 continue
             if attr in ('tags', 'https_virtual_hosts',
-                        'request_filter_sections',
+                        'request_filter_sections', 'external_auth',
                         'backend_tls_subject_alt_names',
                         'tcp_connection_rejection', 'udp_packet_drop'):
                 # Preserve JSON attributes in shallow payloads.
@@ -806,7 +806,8 @@ class L7Policy(BaseDataModel):
                  https_listener_hostname=None, tcp_tls_passthrough=False,
                  response_header_operations=None, redirect_request=None,
                  request_url_rewrite=None, request_cors=None,
-                 http_request_policy=None, request_mirrors=None):
+                 http_request_policy=None, request_mirrors=None,
+                 external_auth=None):
         self.id = id
         self.name = name
         self.description = description
@@ -817,6 +818,7 @@ class L7Policy(BaseDataModel):
         self.request_cors = request_cors
         self.http_request_policy = http_request_policy
         self.request_mirrors = request_mirrors or []
+        self.external_auth = external_auth
         self.redirect_pool_id = redirect_pool_id
         self.redirect_url = redirect_url
         self.position = position

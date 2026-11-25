@@ -147,6 +147,8 @@ HAPROXY_OTLP_TRACING_PROXY_PREFIX = 'octavia-otlp-'
 GATEWAY_OTLP_COLLECTOR_POOL_TAG = 'gw-api-otlp-collector-pool-v1'
 HAPROXY_OTLP_TRACING_SOCKET_DIR = '/run/octavia/telemetry'
 GATEWAY_CAPABILITY_LISTENER_REQUEST_FILTERS = 'listener_request_filters_v1'
+GATEWAY_CAPABILITY_L7POLICY_HTTP_EXTERNAL_AUTH = (
+    'l7policy_http_external_auth_v1')
 GATEWAY_LISTENER_AUTH_POOL_TAG = 'gw-api-listener-auth-pool-v1'
 HAPROXY_LISTENER_AUTH_PROXY_PREFIX = 'octavia-auth-'
 HTTP_REQUEST_POLICY_DURATION_MAX = 2**63 - 1
