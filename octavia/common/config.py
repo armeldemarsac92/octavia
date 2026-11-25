@@ -126,6 +126,12 @@ api_opts = [
                 help=_('Providers whose regional fleets support custom names '
                        'for load balancer-generated HTTP persistence cookies. '
                        'Enable after upgrading all API and worker services.')),
+    cfg.ListOpt('enabled_http_cookie_absolute_timeout_providers', default=[],
+                help=_('Providers with a qualified HTTP session cookie '
+                       'absolute timeout profile. Enable after updating the '
+                       'database, API, workers and Amphora agents, qualifying '
+                       'Amphora HAProxy builds and provisioning the shared '
+                       'worker signing key.')),
     cfg.ListOpt('enabled_backend_retry_budget_providers', default=[],
                 help=_('Providers whose regional fleets support Service '
                        'retry budgets. Enable after upgrading the database, '
@@ -493,6 +499,10 @@ haproxy_amphora_opts = [
                default='/var/lib/octavia/certs',
                help=_('Base directory for cert storage.')),
     cfg.StrOpt('haproxy_template', help=_('Custom haproxy template.')),
+    cfg.StrOpt('http_cookie_signing_key_file',
+               help=_('Worker-only path to a private 32-byte key file for '
+                      'absolute session cookie timeouts. The same key must '
+                      'be available to every worker serving the region.')),
     cfg.BoolOpt('connection_logging', default=True,
                 help=_('Set this to False to disable connection logging.')),
     cfg.IntOpt('connection_max_retries',

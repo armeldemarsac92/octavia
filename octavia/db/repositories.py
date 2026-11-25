@@ -1085,6 +1085,10 @@ class HealthMonitorRepository(BaseRepository):
 class SessionPersistenceRepository(BaseRepository):
     model_class = models.SessionPersistence
 
+    def get_for_update(self, session, pool_id):
+        return (session.query(self.model_class).filter_by(pool_id=pool_id)
+                .populate_existing().with_for_update().one_or_none())
+
     def update(self, session, pool_id, **model_kwargs):
         """Updates a session persistence entity in the database by pool_id."""
         session.query(self.model_class).filter_by(
@@ -1141,6 +1145,29 @@ class PoolRepository(BaseRepository):
                     consts.TCP_MEMBER_BATCH_FAILED)).update(
                     {'provisioning_status': consts.ACTIVE})
 
+    def set_http_cookie_pool_statuses(self, session, policies, *,
+                                      failed, recovered):
+        persistence = models.SessionPersistence
+        pool = self.model_class
+        for pool_id in sorted(failed | recovered):
+            name, timeout, scope = policies[pool_id]
+            query = session.query(pool).filter(
+                pool.id == pool_id, pool.enabled.is_(True),
+                pool.session_persistence.has(and_(
+                    persistence.cookie_name == name,
+                    persistence.cookie_absolute_timeout_ms == timeout,
+                    persistence.cookie_scope == scope)))
+            if pool_id in failed:
+                query.filter(pool.provisioning_status.notin_(
+                    (consts.PENDING_DELETE, consts.DELETED))).update(
+                        {'provisioning_status': consts.ERROR},
+                        synchronize_session=False)
+            else:
+                query.filter(
+                    pool.provisioning_status == consts.ERROR).update(
+                        {'provisioning_status': consts.ACTIVE},
+                        synchronize_session=False)
+
     def mark_active(self, session, id):
         if self.batch_owns_graph(session, id):
             return
@@ -1154,14 +1181,18 @@ class PoolRepository(BaseRepository):
                     {'provisioning_status': consts.ERROR})
         # The Amphora driver records closed protected pools after applying
         # the safe configuration. A flow must not turn those errors ACTIVE.
+        timed_cookie = pool.session_persistence.has(
+            models.SessionPersistence.cookie_absolute_timeout_ms.is_not(None))
         session.query(pool).filter(
             pool.id == id,
             or_(pool.tcp_member_batch_id.is_(None), ~failed),
             or_(and_(pool.backend_tls_hostname.is_(None),
-                     pool.backend_tls_require_h2.is_(False)),
+                     pool.backend_tls_require_h2.is_(False),
+                     ~timed_cookie),
                 pool.enabled.is_(False),
                 pool.provisioning_status != consts.ERROR)).update(
-                    {'provisioning_status': consts.ACTIVE})
+                    {'provisioning_status': consts.ACTIVE},
+                    synchronize_session=False)
 
     def get_on_load_balancer_for_update(
             self, session, lb_id, project_id, pool_id, *,

@@ -140,7 +140,10 @@ class HaproxyAmphoraLoadBalancerDriver(
 
         opted_in, protected = self._backend_tls_pools(loadbalancer)
         fallback, withdrawn = self._frontend_fallback_listeners(loadbalancer)
-        with self._otlp_render_results(loadbalancer) as tracing_options:
+        with (
+            self._otlp_render_results(loadbalancer) as tracing_options,
+            self._http_cookie_render_results(loadbalancer) as cookie_options
+        ):
             if opted_in or fallback or withdrawn:
                 peers = {amp.id: amp for amp in loadbalancer.amphorae
                          if amp.status != consts.DELETED}
@@ -148,11 +151,11 @@ class HaproxyAmphoraLoadBalancerDriver(
                 self._update_protected_tls_listeners(
                     loadbalancer, [amphora], peers.values(), protected,
                     fallback, withdrawn, timeout_dict=timeout_dict,
-                    **tracing_options)
+                    **tracing_options, **cookie_options)
             else:
                 self._update_amphora_listeners(
                     loadbalancer, amphora, timeout_dict=timeout_dict,
-                    **tracing_options)
+                    **tracing_options, **cookie_options)
 
     @staticmethod
     def _active_otlp_listeners(loadbalancer):
@@ -164,6 +167,46 @@ class HaproxyAmphoraLoadBalancerDriver(
                 listener.provisioning_status not in (
                     consts.PENDING_DELETE, consts.DELETED))
         }
+
+    @contextlib.contextmanager
+    def _http_cookie_render_results(self, loadbalancer):
+        policies = {}
+        if loadbalancer.enabled:
+            for listener in loadbalancer.listeners:
+                if not listener.enabled or listener.provisioning_status in (
+                        consts.PENDING_DELETE, consts.DELETED):
+                    continue
+                for pool in listener.pools:
+                    persistence = pool.session_persistence
+                    timeout = getattr(
+                        persistence, 'cookie_absolute_timeout_ms', None)
+                    if (pool.enabled and type(timeout) is int and
+                            pool.provisioning_status not in (
+                                consts.PENDING_DELETE, consts.DELETED)):
+                        policies[pool.id] = (
+                            persistence.cookie_name, timeout,
+                            persistence.cookie_scope)
+        if not policies:
+            yield {}
+            return
+
+        votes = {}
+        yield {'http_cookie_observed': votes}
+        expected = {amp.id for amp in loadbalancer.amphorae
+                    if amp.status != consts.DELETED}
+        paired = loadbalancer.topology == consts.TOPOLOGY_ACTIVE_STANDBY
+        complete = len(expected) == (2 if paired else 1)
+        failed = {pool_id for pool_id in policies
+                  if any(vote.get(pool_id) == consts.ERROR
+                         for vote in votes.values())}
+        recovered = {
+            pool_id for pool_id in policies.keys() - failed
+            if complete and all(votes.get(amp_id, {}).get(pool_id) ==
+                                consts.ACTIVE for amp_id in expected)}
+        if failed or recovered:
+            with db_api.session().begin() as session:
+                repo.PoolRepository().set_http_cookie_pool_statuses(
+                    session, policies, failed=failed, recovered=recovered)
 
     @contextlib.contextmanager
     def _otlp_render_results(self, loadbalancer):
@@ -202,7 +245,7 @@ class HaproxyAmphoraLoadBalancerDriver(
             amp_details=None, backend_tls_certs=None,
             frontend_tls_certs=None, closed_frontend=(),
             l7policy_activation=False, otlp_observed=None,
-            tcp_batch_configs=None):
+            tcp_batch_configs=None, http_cookie_observed=None):
         if not loadbalancer.listeners:
             LOG.debug('No listeners found to update.')
             return set()
@@ -290,19 +333,30 @@ class HaproxyAmphoraLoadBalancerDriver(
                 tracing_options = {}
                 if otlp_tls_certs:
                     tracing_options['otlp_tls_certs'] = otlp_tls_certs
+                cookie_results = {}
+                cookie_options = (
+                    {'http_cookie_results': cookie_results}
+                    if http_cookie_observed is not None else {})
                 config = self.jinja_combo.build_config(
                     host_amphora=amphora, listeners=listeners_to_update,
                     tls_certs=certs,
                     haproxy_versions=haproxy_versions,
-                    amp_details=amp_details, **tracing_options)
+                    amp_details=amp_details, **tracing_options,
+                    **cookie_options)
                 if tcp_batch_configs is not None:
                     tcp_batch_configs.append((amphora, config))
+                    if http_cookie_observed is not None:
+                        # The outer observer only publishes after the batch
+                        # has uploaded and reloaded on all its Amphorae.
+                        http_cookie_observed[amphora.id] = cookie_results
                     return {listener.id for listener in listeners_to_update}
                 self.clients[amphora.api_version].upload_config(
                     amphora, loadbalancer.id, config,
                     timeout_dict=timeout_dict)
                 self.clients[amphora.api_version].reload_listener(
                     amphora, loadbalancer.id, timeout_dict=timeout_dict)
+                if http_cookie_observed is not None:
+                    http_cookie_observed[amphora.id] = cookie_results
                 if otlp_observed is not None:
                     results = otlp_observed.setdefault(amphora.id, {})
                     for listener in listeners_to_update:
@@ -496,13 +550,16 @@ class HaproxyAmphoraLoadBalancerDriver(
             if tcp_member_batch else {})
         opted_in, protected = self._backend_tls_pools(loadbalancer)
         fallback, withdrawn = self._frontend_fallback_listeners(loadbalancer)
-        with self._otlp_render_results(loadbalancer) as tracing_options:
+        with (
+            self._otlp_render_results(loadbalancer) as tracing_options,
+            self._http_cookie_render_results(loadbalancer) as cookie_options
+        ):
             if (opted_in or fallback or withdrawn) and amphorae:
                 recovered = self._update_protected_tls_listeners(
                     loadbalancer, amphorae, amphorae, protected, fallback,
                     withdrawn, l7policy_activation=l7policy_activation,
                     l7policy_restoration=l7policy_restoration,
-                    **tracing_options, **batch_options)
+                    **tracing_options, **batch_options, **cookie_options)
                 if not tcp_member_batch:
                     return recovered
             else:
@@ -510,7 +567,7 @@ class HaproxyAmphoraLoadBalancerDriver(
                     self._update_amphora_listeners(
                         loadbalancer, amphora,
                         l7policy_activation=l7policy_activation,
-                        **tracing_options, **batch_options)
+                        **tracing_options, **batch_options, **cookie_options)
             if tcp_member_batch:
                 # Build every peer's combined config before uploading any
                 # candidate. Validate all uploads before requesting a reload.
@@ -538,14 +595,17 @@ class HaproxyAmphoraLoadBalancerDriver(
                 if (amphorae_status.get(amp.id, {}).get(consts.UNREACHABLE) or
                     (tracing_pair and amp.id not in amphorae_status))
             }
-            with self._otlp_render_results(loadbalancer) as tracing_options:
+            with (
+                self._otlp_render_results(loadbalancer) as tracing_options,
+                self._http_cookie_render_results(loadbalancer) as cookie_state
+            ):
                 self._update_protected_tls_listeners(
                     loadbalancer, [amp for amp in peers
                                    if amp.id not in unreachable],
                     peers, protected, fallback, withdrawn,
                     timeout_dict=timeout_dict,
                     unreachable=unreachable, coordinating_failover=True,
-                    **tracing_options)
+                    **tracing_options, **cookie_state)
         return coordinated
 
     @staticmethod
@@ -588,7 +648,8 @@ class HaproxyAmphoraLoadBalancerDriver(
             withdrawn, timeout_dict=None, unreachable=(),
             l7policy_activation=False,
             coordinating_failover=False, l7policy_restoration=False,
-            otlp_observed=None, tcp_batch_configs=None):
+            otlp_observed=None, tcp_batch_configs=None,
+            http_cookie_observed=None):
         # Preflight the pair and stage the TLS material before any reload.
         details = {}
         for amphora in peers if protected or fallback else amphorae:
@@ -660,6 +721,8 @@ class HaproxyAmphoraLoadBalancerDriver(
             tracing_options['otlp_observed'] = otlp_observed
         if tcp_batch_configs is not None:
             tracing_options['tcp_batch_configs'] = tcp_batch_configs
+        if http_cookie_observed is not None:
+            tracing_options['http_cookie_observed'] = http_cookie_observed
         for amphora in amphorae:
             try:
                 configured = self._update_amphora_listeners(

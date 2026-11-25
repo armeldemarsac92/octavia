@@ -236,12 +236,26 @@ scope, use distinct names for unrelated backends. Pools in the same
 project can share a name to preserve affinity to the same member address
 and port across routes. Member identifiers only affect load balancing.
 
-On Amphora, omitting the name or setting it to ``null`` in an
-``HTTP_COOKIE`` object uses the default name ``SRV``. Omitting the
-whole ``session_persistence`` object in a pool update preserves the
-current settings. Setting the object to ``null`` removes session
-persistence. Both forms of removal are available after regional
-discovery of the capability is disabled.
+On Amphora, when there is no stored absolute timeout, omitting the name or
+setting it to ``null`` in an ``HTTP_COOKIE`` object uses the default name
+``SRV``. Omitting the whole ``session_persistence`` object in a pool update
+preserves the current settings. Setting the object to ``null`` removes session
+persistence.
+
+A provider advertising ``http_cookie_absolute_timeout_v1`` also accepts
+``cookie_absolute_timeout_ms`` and ``cookie_scope`` together on a named
+``HTTP_COOKIE`` HTTP pool. The cookie is a browser-session cookie. The load
+balancer accepts it only if its age is nonnegative and below the configured
+timeout. A request that keeps its member keeps the original expiry.
+
+In a pool update, omitting both fields preserves a stored absolute timeout.
+When supplying or preserving a timeout, Octavia uses the enrolled name if
+omitted on an HTTP_COOKIE update. When changing the cookie name or
+persistence type, explicitly replace
+or clear the policy. Set both fields to ``null`` to clear the absolute
+timeout. Pool GET includes both fields while configured and omits them after
+removal. Explicit removal remains available after regional discovery is
+disabled.
 
 Pool Session Persistence Object
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -250,6 +264,8 @@ Pool Session Persistence Object
 
    - type: session_persistence_type
    - cookie_name: session_persistence_cookie
+   - cookie_absolute_timeout_ms: session_persistence_cookie_absolute_timeout_ms
+   - cookie_scope: session_persistence_cookie_scope
    - persistence_timeout: session_persistence_timeout
    - persistence_granularity: session_persistence_granularity
 

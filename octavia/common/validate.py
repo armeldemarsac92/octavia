@@ -1425,12 +1425,22 @@ def is_ip_member_of_cidr(address, cidr):
 
 HTTP_COOKIE_NAME = re.compile(r'[A-Za-z0-9_.-]{1,255}')
 HTTP_COOKIE_RESERVED_PREFIXES = ('__host-', '__secure-', '__http-')
+HTTP_COOKIE_SCOPE = re.compile(r'[0-9a-f]{64}')
 
 
 def is_valid_http_cookie_name(name):
     return (isinstance(name, str) and
             bool(HTTP_COOKIE_NAME.fullmatch(name)) and
             not name.lower().startswith(HTTP_COOKIE_RESERVED_PREFIXES))
+
+
+def is_valid_http_cookie_absolute_timeout(value):
+    return (type(value) is int and
+            0 <= value <= constants.HTTP_COOKIE_ABSOLUTE_TIMEOUT_MAX_MS)
+
+
+def is_valid_http_cookie_scope(value):
+    return isinstance(value, str) and bool(HTTP_COOKIE_SCOPE.fullmatch(value))
 
 
 def check_session_persistence(SP_dict):

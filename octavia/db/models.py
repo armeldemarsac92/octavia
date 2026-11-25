@@ -143,6 +143,8 @@ class SessionPersistence(base_models.BASE):
     cookie_name = sa.Column(sa.String(255), nullable=True)
     http_cookie_name_enabled = sa.Column(
         sa.Boolean(), nullable=False, server_default=sa.false())
+    cookie_absolute_timeout_ms = sa.Column(sa.BigInteger(), nullable=True)
+    cookie_scope = sa.Column(sa.String(64), nullable=True)
     persistence_timeout = sa.Column(sa.Integer(), nullable=True)
     persistence_granularity = sa.Column(sa.String(64), nullable=True)
     pool = orm.relationship("Pool", uselist=False,

@@ -2441,6 +2441,97 @@ class TestPool(base.BaseAPITest):
                 self.assertEqual(persistence, dto.session_persistence)
 
     @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
+    def test_http_cookie_absolute_timeout_lifecycle(self, rpc):
+        lb = self.create_load_balancer(
+            uuidutils.generate_uuid(), provider='amphora')['loadbalancer']
+        lb_id = lb['id']
+        self.set_lb_status(lb_id)
+        args = (lb_id, 'HTTP', 'ROUND_ROBIN')
+        name = {'type': 'HTTP_COOKIE', 'cookie_name': 'gw.session'}
+        scope = 'a' * 64
+        policy = dict(name, cookie_absolute_timeout_ms=0, cookie_scope=scope)
+        capability = constants.GATEWAY_CAPABILITY_HTTP_COOKIE_ABSOLUTE_TIMEOUT
+        provider_path = self.PROVIDERS_PATH + '/amphora/gateway_capabilities'
+        self.conf.config(
+            group='api_settings',
+            enabled_http_cookie_name_providers=['amphora'])
+        self.assertNotIn(capability,
+                         self.get(provider_path).json['gateway_capabilities'])
+        self.create_pool(*args, session_persistence=policy, status=501)
+
+        self.conf.config(group='api_settings',
+                         enabled_http_cookie_absolute_timeout_providers=[
+                             'amphora'])
+        self.assertIn(capability,
+                      self.get(provider_path).json['gateway_capabilities'])
+        self.create_pool(*args, session_persistence=dict(
+            name, cookie_absolute_timeout_ms=0), status=400)
+        self.create_pool(*args, session_persistence=dict(
+            policy, cookie_name=None), status=400)
+        self.create_pool(*args, session_persistence=dict(
+            policy, cookie_scope='A' * 64), status=400)
+        for invalid in (True, 1.5, '1', -1, 1439985600001):
+            with self.subTest(invalid=invalid):
+                self.create_pool(*args, session_persistence=dict(
+                    policy, cookie_absolute_timeout_ms=invalid), status=400)
+
+        persistence = 'session_persistence'
+        created = self.create_pool(*args, session_persistence=policy)['pool']
+        path = self.POOL_PATH.format(pool_id=created['id'])
+        cast = rpc.return_value.cast
+        self.assertEqual(created[persistence],
+                         cast.call_args.kwargs['pool'][persistence])
+        self.assertEqual(0, self.get(path).json['pool'][persistence]
+                         ['cookie_absolute_timeout_ms'])
+
+        self.set_lb_status(lb_id)
+        max_timeout = 1439985600000
+        update = {'cookie_absolute_timeout_ms': max_timeout,
+                  'cookie_scope': scope}
+        updated = self.put(path, self._build_body({
+            persistence: update})).json['pool'][persistence]
+        self.assertEqual(max_timeout, updated['cookie_absolute_timeout_ms'])
+        self.assertEqual(updated,
+                         cast.call_args.kwargs['pool_updates'][persistence])
+
+        # A fallback render may keep traffic available but must leave the
+        # affinity profile in ERROR until its Amphorae can enforce it again.
+        pool_id = created['id']
+        repo = repositories.PoolRepository()
+        persisted_policy = {pool_id: (name['cookie_name'], max_timeout, scope)}
+        with db_api.session().begin() as session:
+            repo.set_http_cookie_pool_statuses(
+                session, persisted_policy, failed={pool_id}, recovered=set())
+            repo.mark_active(session, pool_id)
+        self.assertEqual(constants.ERROR,
+                         self.get(path).json['pool']['provisioning_status'])
+        with db_api.session().begin() as session:
+            repo.set_http_cookie_pool_statuses(
+                session, persisted_policy, failed=set(), recovered={pool_id})
+        self.assertEqual(constants.ACTIVE,
+                         self.get(path).json['pool']['provisioning_status'])
+
+        self.conf.config(group='api_settings',
+                         enabled_http_cookie_absolute_timeout_providers=[],
+                         enabled_http_cookie_name_providers=[])
+        self.set_lb_status(lb_id)
+        self.put(path, self._build_body({persistence: policy}), status=501)
+        self.put(path, self._build_body({
+            persistence: dict(name, cookie_name=None)}), status=400)
+        preserved = self.put(path, self._build_body({
+            persistence: name})).json['pool'][persistence]
+        self.assertEqual(updated, preserved)
+
+        self.set_lb_status(lb_id)
+        self.put(path, self._build_body({
+            persistence: {'cookie_absolute_timeout_ms': None,
+                          'cookie_scope': None}}))
+        stored = self.get(path).json['pool'][persistence]
+        self.assertNotIn('cookie_absolute_timeout_ms', stored)
+        self.assertNotIn('cookie_scope', stored)
+        self.assertEqual(name['cookie_name'], stored['cookie_name'])
+
+    @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
     @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.'
                 'AmphoraProviderDriver.loadbalancer_create')
     def test_http_cookie_name_in_load_balancer_graph(self, create, _rpc):
@@ -2454,17 +2545,22 @@ class TestPool(base.BaseAPITest):
         fields['project_id'] = self.project_id
         self.post(self.LBS_PATH, {'loadbalancer': fields}, status=501)
         self.conf.config(group='api_settings',
-                         enabled_http_cookie_name_providers=['amphora'])
+                         enabled_http_cookie_name_providers=['amphora'],
+                         enabled_http_cookie_absolute_timeout_providers=[
+                             'amphora'])
         for option in ({'persistence_timeout': 0},
                        {'persistence_granularity': '255.255.255.0'}):
             pool['session_persistence'] = dict(named, **option)
             self.post(self.LBS_PATH, {'loadbalancer': fields}, status=400)
-        pool['session_persistence'] = named
+        pool['session_persistence'] = dict(
+            named, cookie_absolute_timeout_ms=1500, cookie_scope='a' * 64)
         lb = self.post(self.LBS_PATH, {'loadbalancer': fields})
         pool_id = lb.json['loadbalancer']['pools'][0]['id']
         path = self.POOL_PATH.format(pool_id=pool_id)
         persistence = self.get(path).json['pool']['session_persistence']
         self.assertEqual(named['cookie_name'], persistence['cookie_name'])
+        self.assertEqual(1500, persistence['cookie_absolute_timeout_ms'])
+        self.assertEqual('a' * 64, persistence['cookie_scope'])
         create.assert_called_once()
         created = create.call_args.args[0]
         self.assertEqual(persistence, created.pools[0].session_persistence)

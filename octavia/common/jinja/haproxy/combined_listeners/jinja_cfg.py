@@ -12,11 +12,15 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import base64
+import functools
 import hashlib
+import hmac
 import ipaddress
 import json
 import os
 import re
+import stat
 import typing as tp
 from urllib.parse import quote
 
@@ -69,6 +73,35 @@ def _http_cookie_member_token(project_id, cookie_name, address, port):
     identity = json.dumps([project_id, cookie_name, str(address), port],
                           separators=(',', ':'))
     return hashlib.sha256(identity.encode('ascii')).hexdigest()[:32]
+
+
+def _read_http_cookie_signing_key():
+    path = CONF.haproxy_amphora.http_cookie_signing_key_file
+    if path:
+        try:
+            # Opening first ensures the checks apply to the file being read.
+            # O_NONBLOCK avoids hanging on an accidentally supplied FIFO.
+            fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+            with os.fdopen(fd, 'rb') as key_file:
+                mode = os.fstat(key_file.fileno()).st_mode
+                non_owner = stat.S_IRWXG | stat.S_IRWXO
+                if stat.S_ISREG(mode) and not mode & non_owner:
+                    key = key_file.read(33)
+                    if len(key) == 32:
+                        return key
+        except OSError:
+            pass
+    LOG.warning('Absolute HTTP cookie affinity is disabled for this '
+                'render because the worker signing key is unavailable.')
+    return None
+
+
+def _derive_http_cookie_signing_key(key, project_id, scope, name, timeout):
+    context = json.dumps(
+        ['octavia-http-cookie-v1', project_id, scope, name, timeout],
+        separators=(',', ':')).encode('ascii')
+    digest = hmac.digest(key, context, 'sha256')
+    return base64.b64encode(digest).decode('ascii')
 
 
 def _quote_config_arg(value):
@@ -157,7 +190,7 @@ class JinjaTemplater:
 
     def build_config(self, host_amphora, listeners, tls_certs,
                      haproxy_versions, amp_details, socket_path=None,
-                     otlp_tls_certs=None):
+                     otlp_tls_certs=None, http_cookie_results=None):
         """Convert a logical configuration to the HAProxy version
 
         :param host_amphora: The Amphora this configuration is hosted on
@@ -190,7 +223,9 @@ class JinjaTemplater:
             socket_path=socket_path,
             feature_compatibility=feature_compatibility,
             amp_details=amp_details, haproxy_version=version,
-            otlp_tls_certs=otlp_tls_certs)
+            otlp_tls_certs=otlp_tls_certs,
+            **({'http_cookie_results': http_cookie_results}
+               if http_cookie_results is not None else {}))
 
     def _get_template(self):
         """Returns the specified Jinja configuration template."""
@@ -229,7 +264,8 @@ class JinjaTemplater:
                                 tls_certs=None, socket_path=None,
                                 feature_compatibility=None,
                                 amp_details: tp.Optional[dict] = None,
-                                haproxy_version=None, otlp_tls_certs=None):
+                                haproxy_version=None, otlp_tls_certs=None,
+                                http_cookie_results=None):
         """Renders a templated configuration from a load balancer object
 
         :param host_amphora: The Amphora this configuration is hosted on
@@ -240,7 +276,12 @@ class JinjaTemplater:
         :param haproxy_version: HAProxy version for compatibility checks
         :return: Rendered configuration
         """
-        feature_compatibility = feature_compatibility or {}
+        feature_compatibility = dict(feature_compatibility or {})
+        cookie_capability = (
+            constants.GATEWAY_CAPABILITY_HTTP_COOKIE_ABSOLUTE_TIMEOUT)
+        if (amp_details or {}).get(cookie_capability) is True:
+            feature_compatibility[cookie_capability] = functools.cache(
+                _read_http_cookie_signing_key)
         san_capability = (
             constants.GATEWAY_CAPABILITY_BACKEND_TLS_SUBJECT_ALT_NAMES)
         policy_capability = constants.GATEWAY_CAPABILITY_HTTP_REQUEST_POLICY
@@ -256,6 +297,16 @@ class JinjaTemplater:
             listeners,
             tls_certs,
             feature_compatibility, otlp_tls_certs=otlp_tls_certs)
+        if http_cookie_results is not None and loadbalancer['enabled']:
+            for listener in loadbalancer['listeners']:
+                if listener['enabled']:
+                    for pool in listener['pools']:
+                        persistence = pool['session_persistence']
+                        if (pool['enabled'] and
+                                'absolute_timeout_us' in (persistence or {})):
+                            http_cookie_results[pool['id']] = (
+                                constants.ACTIVE if persistence.get(
+                                    'signing_key') else constants.ERROR)
         if (haproxy_version and loadbalancer['enabled'] and
                 not versionutils.is_compatible("2.2.0", haproxy_version,
                                                same_major=False)):
@@ -1112,6 +1163,12 @@ class JinjaTemplater:
                     member['persistence_cookie'] = _http_cookie_member_token(
                         pool.project_id, name, member['address'],
                         member['protocol_port'])
+            timeout = getattr(pool.session_persistence,
+                              'cookie_absolute_timeout_ms', None)
+            scope = getattr(pool.session_persistence, 'cookie_scope', None)
+            if timeout is not None or scope is not None:
+                self._configure_absolute_http_cookie(
+                    pool, persistence, timeout, scope, feature_compatibility)
         if (pool.tls_certificate_id and pool_tls_certs and
                 pool_tls_certs.get('client_cert')):
             ret_value['client_cert'] = pool_tls_certs.get('client_cert')
@@ -1151,6 +1208,28 @@ class JinjaTemplater:
             ret_value['crl'] = pool_tls_certs.get('crl')
 
         return ret_value
+
+    @staticmethod
+    def _configure_absolute_http_cookie(pool, persistence, timeout, scope,
+                                        feature_compatibility):
+        name = persistence['cookie_name']
+        if (pool.protocol != constants.PROTOCOL_HTTP or
+                persistence['type'] !=
+                constants.SESSION_PERSISTENCE_HTTP_COOKIE or
+                not name or not validate.is_valid_http_cookie_scope(scope) or
+                not validate.is_valid_http_cookie_absolute_timeout(timeout)):
+            raise exceptions.ValidationException(detail=_(
+                'Invalid persisted absolute HTTP cookie policy.'))
+        # Keep the legacy cookie tokens off these server lines even when the
+        # key is unavailable or the Amphora does not support this profile.
+        persistence['absolute_timeout_us'] = timeout * 1000
+        read_key = feature_compatibility.get(
+            constants.GATEWAY_CAPABILITY_HTTP_COOKIE_ABSOLUTE_TIMEOUT)
+        if read_key:
+            key = read_key()
+            if key is not None:
+                persistence['signing_key'] = _derive_http_cookie_signing_key(
+                    key, pool.project_id, scope, name, timeout)
 
     @staticmethod
     def _transform_session_persistence(persistence, feature_compatibility):

@@ -39,6 +39,9 @@ def get_haproxy_capabilities():
         capabilities[
             constants.GATEWAY_CAPABILITY_FRONTEND_CLIENT_AUTH_INSECURE_FALLBACK
         ] = True
+        capabilities[
+            constants.GATEWAY_CAPABILITY_HTTP_COOKIE_ABSOLUTE_TIMEOUT
+        ] = True
     strict_dns = 'HAProxy version 3.0.19-ade9c1262-octavia-strict-dns-v1'
     backend_sans = f'{strict_dns}-h2-alpn-v1-backend-sans-v1'
     http_request_policy = f'{backend_sans}-http-policy-v1'

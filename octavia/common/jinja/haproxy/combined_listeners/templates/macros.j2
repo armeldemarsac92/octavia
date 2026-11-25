@@ -696,7 +696,8 @@ backend {{ reject }}
         {% set hm_opt = "" %}
     {% endif %}
     {% if persistence and (pool.session_persistence.type ==
-           constants.SESSION_PERSISTENCE_HTTP_COOKIE) %}
+           constants.SESSION_PERSISTENCE_HTTP_COOKIE) and
+           pool.session_persistence.absolute_timeout_us is not defined %}
         {% set persistence_opt = " cookie %s"|format(member.get('persistence_cookie', member.id)) %}
     {% else %}
         {% set persistence_opt = "" %}
@@ -913,6 +914,34 @@ listen octavia-mirror-{{ pool.id }}
 {% endmacro %}
 
 
+{% macro absolute_http_cookie(pool) %}
+    {% set cookie = pool.session_persistence %}
+    {% set name = cookie.cookie_name %}
+    {% set escaped_name = name|replace('.', '[.]') %}
+    acl octavia_cookie_unique req.cook_cnt({{ name }}) eq 1
+    acl octavia_cookie_format var(txn.octavia_cookie) -m reg '^v1[.][0-9a-f]{32}[.][1-9][0-9]{0,17}[.][A-Za-z0-9_-]{43}$'
+    acl octavia_cookie_age_valid var(txn.octavia_cookie_age) -m int ge 0
+    acl octavia_cookie_age_below_limit var(txn.octavia_cookie_age) -m int lt {{ cookie.absolute_timeout_us }}
+    acl octavia_cookie_authenticated var(txn.octavia_cookie_payload),hmac(sha256,txn.octavia_cookie_signing_key),ub64enc,secure_memcmp(txn.octavia_cookie_tag) -m bool
+    http-request set-var(txn.octavia_cookie_signing_key) str({{ cookie.signing_key }})
+    http-request set-var(txn.octavia_cookie) req.cook({{ name }}) if octavia_cookie_unique
+    http-request set-var(txn.octavia_cookie_issued) var(txn.octavia_cookie),word(3,.) if octavia_cookie_format
+    http-request set-var(txn.octavia_cookie_age) date(0,us),sub(txn.octavia_cookie_issued) if octavia_cookie_format
+    http-request set-var(txn.octavia_cookie_tag) var(txn.octavia_cookie),word(4,.) if octavia_cookie_age_valid octavia_cookie_age_below_limit
+    http-request set-var-fmt(txn.octavia_cookie_payload) "v1.%[var(txn.octavia_cookie),word(2,.)].%[var(txn.octavia_cookie_issued)]" if octavia_cookie_age_valid octavia_cookie_age_below_limit
+    http-request set-var(txn.octavia_cookie_member) var(txn.octavia_cookie),word(2,.) if octavia_cookie_age_valid octavia_cookie_age_below_limit octavia_cookie_authenticated
+    acl octavia_cookie_marker res.fhdr(Set-Cookie) -m beg {{ name }}=
+    {# Native insert/indirect strips the reserved cookie and inserts a marker
+       on a miss. Replace only that header with a signed session cookie. #}
+    {% for member in pool.members %}
+    use-server {{ member.id }} if { var(txn.octavia_cookie_member) -m str {{ member.persistence_cookie }} }
+    http-after-response set-var-fmt(txn.octavia_cookie_issue) "v1.{{ member.persistence_cookie }}.%[date(0,us)]" if octavia_cookie_marker { srv_name -m str {{ member.id }} }
+    {% endfor %}
+    http-after-response set-var(txn.octavia_cookie_signature) var(txn.octavia_cookie_issue),hmac(sha256,txn.octavia_cookie_signing_key),ub64enc if { var(txn.octavia_cookie_issue) -m found }
+    http-after-response replace-header Set-Cookie '^{{ escaped_name }}=.*$' "{{ name }}=%[var(txn.octavia_cookie_issue)].%[var(txn.octavia_cookie_signature)]; path=/" if { var(txn.octavia_cookie_signature) -m found }
+{% endmacro %}
+
+
 {% macro backend_macro(constants, lib_consts, listener, pool, loadbalancer, state_file) %}
 backend {{ pool.id }}:{{ listener.id }}
     {% if pool.proxy_protocol is not none %}
@@ -1052,6 +1081,9 @@ backend {{ pool.id }}:{{ listener.id }}
     option allbackups
     timeout connect {{ listener.timeout_member_connect }}
     timeout server {{ listener.timeout_member_data }}
+    {% if pool.session_persistence.signing_key and pool.members %}
+{{ absolute_http_cookie(pool) -}}
+    {% endif %}
     {% for member in pool.members %}
         {{- member_macro(constants, lib_consts, pool, member) -}}
     {% endfor %}

@@ -342,7 +342,9 @@ class SessionPersistenceModelTest(base.OctaviaDBTestBase, ModelTestMixin):
 
     def test_create(self):
         obj = self.create_session_persistence(self.session, self.pool.id)
-        self.assertEqual(f"SessionPersistence(cookie_name='cookie_name', "
+        self.assertEqual(f"SessionPersistence("
+                         f"cookie_absolute_timeout_ms=None, "
+                         f"cookie_name='cookie_name', cookie_scope=None, "
                          f"http_cookie_name_enabled=False, "
                          f"persistence_granularity=None, "
                          f"persistence_timeout=None, pool_id={obj.pool_id!r}, "
