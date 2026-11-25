@@ -206,6 +206,7 @@ class L7RuleController(base.BaseController):
                     request_mirrors=db_l7policy.request_mirrors,
                     targets=db_l7policy.targets,
                     tcp_tls_passthrough=db_l7policy.tcp_tls_passthrough,
+                    tcp_tls_mixed_mode=db_l7policy.listener.tcp_tls_mixed_mode,
                     tcp_tls_termination=tcp_tls_termination)
             if l7rule_dict['enabled']:
                 driver_utils.require_no_exposed_request_transforms(
@@ -303,10 +304,17 @@ class L7RuleController(base.BaseController):
         if rules.has_other_enabled_rules(session, rule):
             listener = self.repositories.listener.get_for_update(
                 session, policy.listener_id, show_deleted=False)
-            if (listener.enabled and listener.tcp_tls_termination and
-                    policy.action ==
+            if (listener.enabled and listener.protocol ==
+                    constants.PROTOCOL_TCP and policy.action ==
                     constants.L7POLICY_ACTION_WEIGHTED_TARGETS):
-                driver_utils.require_tls_sni_weighted_pools(driver)
+                passthrough = (policy.tcp_tls_passthrough or
+                               not listener.tcp_tls_termination)
+                driver_utils.require_tls_sni_weighted_pools(
+                    driver, passthrough=passthrough)
+                if (passthrough and not rules.has_other_enabled_rules(
+                        session, rule, compare_type=(
+                            constants.L7RULE_COMPARE_TYPE_EQUAL_TO))):
+                    driver_utils.require_tls_sni_suffix(driver)
                 driver_utils.validate_tcp_policy_targets(
                     driver, policy_repo, session, listener, policy.action,
                     policy.redirect_pool_id, policy.targets,
@@ -407,6 +415,7 @@ class L7RuleController(base.BaseController):
                     request_mirrors=db_l7policy.request_mirrors,
                     targets=db_l7policy.targets,
                     tcp_tls_passthrough=db_l7policy.tcp_tls_passthrough,
+                    tcp_tls_mixed_mode=db_l7policy.listener.tcp_tls_mixed_mode,
                     tcp_tls_termination=tcp_tls_termination)
                 if enabled:
                     driver_utils.require_no_exposed_request_transforms(

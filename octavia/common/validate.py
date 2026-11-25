@@ -339,11 +339,15 @@ def validate_tcp_tls_backend_listener(tcp_tls_termination, protocol, hostname):
             'a TCP listener that terminates TLS.'))
 
 
-def validate_tls_sni_weighted_policy(tcp_tls_termination, passthrough):
-    if tcp_tls_termination is not True or passthrough is not False:
+def tls_sni_weighted_passthrough(tcp_tls_termination, mixed_mode,
+                                 passthrough):
+    if (type(tcp_tls_termination) is not bool or
+            type(passthrough) is not bool or
+            (passthrough and not (tcp_tls_termination and mixed_mode))):
         raise exceptions.ValidationException(detail=_(
-            'Weighted TLS SNI pools require TLS termination on a TCP '
-            'listener with tcp_tls_passthrough set to false.'))
+            'A weighted TLS SNI policy can set tcp_tls_passthrough only '
+            'on a TCP listener with tcp_tls_mixed_mode enabled.'))
+    return passthrough or not tcp_tls_termination
 
 
 def tls_sni_weighted_targets(targets):

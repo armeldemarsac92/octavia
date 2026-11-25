@@ -28,6 +28,8 @@ import tenacity
 
 from octavia.amphorae.backends.agent import agent_jinja_cfg
 from octavia.amphorae.driver_exceptions import exceptions as driver_except
+from octavia.api.drivers import driver_factory
+from octavia.api.drivers import utils as driver_utils
 from octavia.common import constants
 from octavia.common import data_models as octavia_data_models
 from octavia.common import exceptions
@@ -137,10 +139,12 @@ class AmpListenersUpdate(BaseAmphoraTask):
             db_lb = self.loadbalancer_repo.get(session, id=loadbalancer_id)
         if db_lb is None:
             raise driver_except.ListenerProvisioningError()
+        weighted = utils.has_tls_sni_passthrough_weighted_policies(
+            db_lb, active=False)
         finalizing = (
             db_lb.topology == constants.TOPOLOGY_SINGLE and
-            bool(utils.active_http_retry_backoff_policies(db_lb)))
-        strict = finalizing or _has_managed_udp_listener(db_lb)
+            (utils.active_http_retry_backoff_policies(db_lb) or weighted))
+        strict = finalizing or weighted or _has_managed_udp_listener(db_lb)
         if db_amp is None and strict:
             raise driver_except.ListenerProvisioningError()
         try:
@@ -179,8 +183,10 @@ class AmphoraIndexListenerUpdate(BaseAmphoraTask):
             db_lb = self.loadbalancer_repo.get(
                 session, id=loadbalancer_id)
         managed_udp = _has_managed_udp_listener(db_lb)
-        strict = managed_udp or bool(utils.active_http_retry_backoff_policies(
-            db_lb))
+        strict = (
+            managed_udp or utils.active_http_retry_backoff_policies(db_lb) or
+            utils.has_tls_sni_passthrough_weighted_policies(
+                db_lb, active=False))
         if managed_udp and any(
                 status.get(constants.UNREACHABLE)
                 for status in amphorae_status.values()):
@@ -599,6 +605,18 @@ class ApplyL7PolicyActivation(BaseAmphoraTask):
             return False
         expected = request['policies']
         selected = [p for p in policies if p.id in expected]
+        if listener.protocol == constants.PROTOCOL_TCP:
+            driver = driver_factory.get_driver(lb.provider)
+            if not driver_utils.l7policy_batch_activation_available(
+                    driver, listener):
+                return False
+            if any(rule.enabled and
+                   rule.compare_type == constants.L7RULE_COMPARE_TYPE_ENDS_WITH
+                   for policy in selected for rule in policy.l7rules):
+                try:
+                    driver_utils.require_tls_sni_suffix(driver)
+                except exceptions.ProviderUnsupportedOptionError:
+                    return False
         return (
             graph.graph_revision == request['graph_revision'] and
             [p.id for p in policies] == request['order'] and
@@ -776,7 +794,10 @@ class AmphoraIndexListenersReload(BaseAmphoraTask):
         session = db_apis.get_session()
         with session.begin():
             db_lb = self.loadbalancer_repo.get(session, id=loadbalancer_id)
-        strict = bool(utils.active_http_retry_backoff_policies(db_lb))
+        strict = (
+            utils.active_http_retry_backoff_policies(db_lb) or
+            utils.has_tls_sni_passthrough_weighted_policies(
+                db_lb, active=False))
         if amphora_status.get(constants.UNREACHABLE):
             if strict:
                 raise driver_except.ListenerProvisioningError()

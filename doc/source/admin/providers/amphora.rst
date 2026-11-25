@@ -511,6 +511,53 @@ This listener mode is chosen at creation. Use a different listener for TLS
 passthrough. Plaintext targets have ``protocol=TCP`` and
 ``tls_enabled=false``.
 
+Weighted TLS passthrough pools
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Enroll Amphora after updating the regional API, workers, and each eligible
+Amphora agent. The agent checks its own HAProxy binary for the required
+ClientHello and weighted selection support. The worker checks the Amphorae
+that can serve the load balancer and reads back the installed generation from
+each active HAProxy worker before acknowledging activation. Use HAProxy 2.2
+or newer, or HAProxy 3.0 or newer for mixed TLS routing.
+
+.. code-block:: ini
+
+   [api_settings]
+   allow_tls_terminated_listeners = true
+   enabled_tcp_tls_termination_providers = amphora
+   enabled_tls_sni_weighted_pool_providers = amphora
+   enabled_tls_sni_providers = amphora
+   enabled_tls_sni_passthrough_weighted_pool_providers = amphora
+
+These settings advertise ``tls_sni_passthrough_weighted_pools_v1``.
+A pure passthrough listener works without an Octavia certificate.
+Omit both ``tcp_tls_termination`` on the listener and
+``tcp_tls_passthrough`` on its policies. For mixed mode, enroll Amphora
+separately in ``enabled_tcp_tls_mixed_mode_providers``, configure the
+listener certificate, and set ``tcp_tls_passthrough=true`` on each
+passthrough policy when creating it. Enable ``enabled_tls_sni_suffix_providers``
+for wildcard passthrough selectors.
+
+A ``WEIGHTED_TARGETS`` policy with ``TLS_SNI`` rules draws one target per
+connection. Each target specifies an existing TCP pool and a weight of
+0 to 1,000,000. All target pools must use ``tls_enabled=false`` so the
+origin negotiates TLS with the client. Use an empty TCP pool for a share
+that must close. A disabled or unavailable target also closes its share.
+Broader policies and default pools can handle other connections.
+
+To withdraw enrollment, remove the provider from
+``enabled_tls_sni_passthrough_weighted_pool_providers``. Already installed
+selectors can continue serving. New weighted passthrough policies,
+positive-target changes, and reopening require enrollment. Operators can
+disable or delete an admitted policy, drain members, and remove zero-weight
+targets. A pending grouped activation can be read and replayed after
+withdrawal to restore its disabled policies. If a serving Amphora cannot
+confirm the configuration, Octavia applies closures to the reachable
+Amphorae and reports the update as unconfirmed. A failover must confirm the
+configuration before proceeding. Drain and remove weighted passthrough
+policies before downgrading workers or Amphorae.
+
 Authenticated TLS backends on terminating TCP listeners
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

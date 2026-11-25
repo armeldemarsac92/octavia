@@ -439,12 +439,20 @@ class PoolsController(base.BaseController):
         elif (driver_utils.uses_tls_sni_policy_path(
                 driver, current.protocol) and
                 policy_repo.get_policy_using_pool(session, pool_id)):
+            if reopening and policy_repo.has_active_tls_sni_weighted_pool(
+                    session, pool_id, passthrough=True):
+                driver_utils.require_tls_sni_weighted_pools(
+                    driver, passthrough=True)
             validate.validate_tcp_redirect_pool_protocol(
                 current.protocol, tls_enabled)
             driver_utils.require_tls_sni_passthrough(driver)
-            if policy_repo.has_enabled_tls_sni_suffix_rule(
+            if (policy_repo.has_enabled_tls_sni_suffix_rule(
                     session, redirect_pool_id=pool_id,
-                    tcp_tls_termination=False):
+                    tcp_tls_termination=False) or
+                    (reopening and
+                     policy_repo.has_active_tls_sni_weighted_pool(
+                         session, pool_id, passthrough=True, compare_type=(
+                             constants.L7RULE_COMPARE_TYPE_ENDS_WITH)))):
                 driver_utils.require_tls_sni_suffix(driver)
 
     def _validate_pool_request_for_udp_sctp(self, request):

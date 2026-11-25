@@ -275,6 +275,15 @@ def gateway_capabilities(driver):
                 is True):
             capabilities.append(
                 constants.GATEWAY_CAPABILITY_TCP_TLS_MIXED_MODE)
+    passthrough_providers = (
+        api_settings.enabled_tls_sni_passthrough_weighted_pool_providers)
+    if (constants.GATEWAY_CAPABILITY_TLS_SNI_WEIGHTED_POOLS in capabilities and
+            constants.GATEWAY_CAPABILITY_TLS_SNI in capabilities and
+            driver.name in passthrough_providers and
+            getattr(driver, 'supports_tls_sni_passthrough_weighted_pools',
+                    False) is True):
+        capabilities.append(
+            constants.GATEWAY_CAPABILITY_TLS_SNI_PASSTHROUGH_WEIGHTED_POOLS)
     https_isolation_providers = (
         api_settings.enabled_https_listener_isolation_providers)
     if (driver.name in https_isolation_providers and
@@ -547,6 +556,22 @@ def uses_tls_sni_policy_path(driver, protocol, tcp_tls_termination=False):
         getattr(driver, 'supports_tls_sni_passthrough', False) is True)
 
 
+def l7policy_batch_activation_available(driver, listener):
+    capabilities = gateway_capabilities(driver)
+    if (constants.GATEWAY_CAPABILITY_L7POLICY_BATCH_ACTIVATION not in
+            capabilities):
+        return False
+    if listener.protocol in (constants.PROTOCOL_HTTP,
+                             constants.PROTOCOL_TERMINATED_HTTPS):
+        return True
+    weighted_passthrough = (
+        constants.GATEWAY_CAPABILITY_TLS_SNI_PASSTHROUGH_WEIGHTED_POOLS)
+    return (listener.protocol == constants.PROTOCOL_TCP and
+            weighted_passthrough in capabilities and
+            (not listener.tcp_tls_mixed_mode or
+             constants.GATEWAY_CAPABILITY_TCP_TLS_MIXED_MODE in capabilities))
+
+
 def require_tcp_tls_termination(driver):
     if (constants.GATEWAY_CAPABILITY_TCP_TLS_TERMINATION not in
             gateway_capabilities(driver)):
@@ -556,12 +581,37 @@ def require_tcp_tls_termination(driver):
                 'provider.'))
 
 
-def require_tls_sni_weighted_pools(driver):
-    if (constants.GATEWAY_CAPABILITY_TLS_SNI_WEIGHTED_POOLS not in
-            gateway_capabilities(driver)):
+def require_tls_sni_weighted_pools(driver, *, passthrough=False):
+    capability = (
+        constants.GATEWAY_CAPABILITY_TLS_SNI_PASSTHROUGH_WEIGHTED_POOLS
+        if passthrough else
+        constants.GATEWAY_CAPABILITY_TLS_SNI_WEIGHTED_POOLS)
+    if capability not in gateway_capabilities(driver):
         raise exceptions.ProviderUnsupportedOptionError(
             prov=driver.name, user_msg=_(
                 'Weighted TLS SNI pools are unavailable for this provider.'))
+
+
+def require_active_tls_sni_weighted_policies(
+        driver, policy_repo, session, listener_id=None, **scope):
+    policies = policy_repo.get_active_tls_sni_weighted_policies(
+        session, listener_id, **scope)
+    for policy in policies:
+        listener = policy.listener
+        passthrough = policy.tcp_tls_passthrough
+        require_gateway_policy_action(
+            driver, policy.action, listener.protocol,
+            tcp_tls_termination=listener.tcp_tls_termination,
+            tcp_tls_mixed_mode=listener.tcp_tls_mixed_mode,
+            tcp_tls_passthrough=passthrough, targets=policy.targets)
+        if ((passthrough or not listener.tcp_tls_termination) and
+                policy_repo.has_enabled_tls_sni_suffix_rule(
+                    session, policy_id=policy.id)):
+            require_tls_sni_suffix(driver)
+        validate_tcp_policy_targets(
+            driver, policy_repo, session, listener, policy.action,
+            policy.redirect_pool_id, policy.targets, passthrough,
+            active_targets_only=True)
 
 
 def require_tcp_tls_backend_auth(driver):
@@ -722,6 +772,7 @@ def require_gateway_policy_action(driver, action, protocol, *,
                                   request_header_operations=None,
                                   tcp_tls_termination=False,
                                   tcp_tls_passthrough=False,
+                                  tcp_tls_mixed_mode=False,
                                   response_header_operations=None,
                                   request_url_rewrite=None, targets=None,
                                   request_cors=None,
@@ -742,11 +793,11 @@ def require_gateway_policy_action(driver, action, protocol, *,
         require_fixed_http_responses(driver)
     elif action == constants.L7POLICY_ACTION_WEIGHTED_TARGETS:
         if protocol == constants.PROTOCOL_TCP:
-            validate.validate_tls_sni_weighted_policy(
-                tcp_tls_termination, tcp_tls_passthrough)
+            passthrough = validate.tls_sni_weighted_passthrough(
+                tcp_tls_termination, tcp_tls_mixed_mode, tcp_tls_passthrough)
             if targets is not None:
                 validate.tls_sni_weighted_targets(targets)
-            require_tls_sni_weighted_pools(driver)
+            require_tls_sni_weighted_pools(driver, passthrough=passthrough)
         else:
             validate.validate_weighted_l7policy_protocol(protocol)
             require_weighted_targets(driver)

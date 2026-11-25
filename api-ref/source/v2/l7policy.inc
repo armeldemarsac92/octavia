@@ -197,8 +197,8 @@ contains the policy and rule IDs. Before enabling the policy with PUT, read
 back the policy and its rule list, confirm that both the policy and every rule
 are ``ACTIVE``, and verify that the full rule set matches the intended scope.
 This workflow also applies to a weighted TLS SNI policy when the provider
-advertises both ``l7policy_initial_rules_v1`` and
-``tls_sni_weighted_pools_v1``.
+advertises ``l7policy_initial_rules_v1`` and the corresponding weighted
+TLS SNI capability for the listener mode.
 
 L7 policies with ``action`` of ``REDIRECT_TO_URL`` will return the default HTTP
 ``Found (302)`` response code with the ``redirect_url``. Also, specify
@@ -255,6 +255,11 @@ to ``false``.
 On the terminating side of a TCP TLS listener, a provider advertising
 ``tls_sni_weighted_pools_v1`` accepts ``WEIGHTED_TARGETS`` with
 ``TLS_SNI`` rules and ``targets`` containing ``pool_id`` and ``weight``.
+A provider advertising ``tls_sni_passthrough_weighted_pools_v1`` also
+accepts this action on a pure TCP TLS passthrough listener and in the
+passthrough branch of a mixed-mode listener. On a pure passthrough listener,
+omit ``tcp_tls_passthrough``. On a mixed listener, set it to ``true``.
+Passthrough targets require TCP pools with ``tls_enabled: false``.
 Create the load balancer, listener and TCP pools before posting the policy.
 This policy body uses the IDs of the existing resources.
 

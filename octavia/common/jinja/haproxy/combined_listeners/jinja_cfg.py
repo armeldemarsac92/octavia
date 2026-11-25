@@ -213,7 +213,8 @@ class JinjaTemplater:
     def build_config(self, host_amphora, listeners, tls_certs,
                      haproxy_versions, amp_details, socket_path=None,
                      otlp_tls_certs=None, http_cookie_results=None,
-                     otlp_publication=None, http_retry_backoff_results=None):
+                     otlp_publication=None, http_retry_backoff_results=None,
+                     weighted_passthrough_degraded=False):
         """Convert a logical configuration to the HAProxy version
 
         :param host_amphora: The Amphora this configuration is hosted on
@@ -248,6 +249,8 @@ class JinjaTemplater:
             amp_details=amp_details, haproxy_version=version,
             otlp_tls_certs=otlp_tls_certs,
             otlp_publication=otlp_publication,
+            **({'weighted_passthrough_degraded': True}
+               if weighted_passthrough_degraded else {}),
             **({'http_retry_backoff_results': http_retry_backoff_results}
                if http_retry_backoff_results is not None else {}),
             **({'http_cookie_results': http_cookie_results}
@@ -293,7 +296,8 @@ class JinjaTemplater:
                                 haproxy_version=None, otlp_tls_certs=None,
                                 http_cookie_results=None,
                                 otlp_publication=None,
-                                http_retry_backoff_results=None):
+                                http_retry_backoff_results=None,
+                                weighted_passthrough_degraded=False):
         """Renders a templated configuration from a load balancer object
 
         :param host_amphora: The Amphora this configuration is hosted on
@@ -305,6 +309,12 @@ class JinjaTemplater:
         :return: Rendered configuration
         """
         feature_compatibility = dict(feature_compatibility or {})
+        weighted_passthrough = (
+            constants.GATEWAY_CAPABILITY_TLS_SNI_PASSTHROUGH_WEIGHTED_POOLS)
+        feature_compatibility[weighted_passthrough] = (
+            (amp_details or {}).get(weighted_passthrough) is True)
+        if weighted_passthrough_degraded:
+            feature_compatibility['weighted_passthrough_degraded'] = True
         cookie_capability = (
             constants.GATEWAY_CAPABILITY_HTTP_COOKIE_ABSOLUTE_TIMEOUT)
         path_capability = constants.GATEWAY_CAPABILITY_HTTP_COOKIE_PATH
@@ -813,6 +823,7 @@ class JinjaTemplater:
 
         pools = []
         tcp_weighted_pool_ids = set()
+        raw_weighted_pool_ids = set()
         pool_gen = (pool for pool in listener.pools if
                     pool.provisioning_status != constants.PENDING_DELETE)
         for pool in pool_gen:
@@ -856,14 +867,23 @@ class JinjaTemplater:
                 # Keep the matched route closed without falling back.
                 rendered_pool['closed'] = True
             pools.append(rendered_pool)
-            if (tcp_tls_termination and
+            if (listener.protocol == constants.PROTOCOL_TCP and
+                    pool.protocol == constants.PROTOCOL_TCP and
                     getattr(pool, 'load_balancer_id', None) ==
                     loadbalancer.id and
                     getattr(pool, 'project_id', None) ==
                     listener.project_id and
                     pool.provisioning_status != constants.DELETED and
                     isinstance(pool.tls_enabled, bool)):
-                tcp_weighted_pool_ids.add(pool.id)
+                if tcp_tls_termination:
+                    tcp_weighted_pool_ids.add(pool.id)
+                if not pool.tls_enabled and hostname is None:
+                    if (not feature_compatibility.get(
+                            'weighted_passthrough_degraded') or
+                            (pool.provisioning_status == constants.ACTIVE and
+                             all(member.provisioning_status == constants.ACTIVE
+                                 for member in pool.members))):
+                        raw_weighted_pool_ids.add(pool.id)
         ret_value['pools'] = pools
         https_sections = None
         if listener.https_virtual_hosts is not None:
@@ -933,8 +953,9 @@ class JinjaTemplater:
                     ret_value['enabled'] = False
                     continue
                 transformed = self._transform_tls_sni_weighted_policy(
-                    policy, rules, tcp_tls_termination,
+                    policy, rules, tcp_tls_termination, mixed_mode,
                     tcp_weighted_pool_ids & available_pool_ids,
+                    raw_weighted_pool_ids & available_pool_ids,
                     feature_compatibility)
                 l7policies.append(transformed)
                 primary_pool_ids.update(
@@ -1497,8 +1518,8 @@ class JinjaTemplater:
             for rule in policy['l7rules'])
 
     def _transform_tls_sni_weighted_policy(self, policy, rules,
-                                           tcp_tls_termination,
-                                           available_pool_ids,
+                                           tcp_tls_termination, mixed_mode,
+                                           terminated_pool_ids, raw_pool_ids,
                                            feature_compatibility):
         passthrough = getattr(policy, 'tcp_tls_passthrough', False)
         rendered = {
@@ -1521,15 +1542,24 @@ class JinjaTemplater:
                         'response_header_operations', 'request_mirrors')):
             return rendered
         try:
-            validate.validate_tls_sni_weighted_policy(
-                tcp_tls_termination, passthrough)
+            raw_tls = validate.tls_sni_weighted_passthrough(
+                tcp_tls_termination, mixed_mode, passthrough)
             targets = validate.tls_sni_weighted_targets(policy.targets)
         except (exceptions.InvalidL7PolicyArgs, exceptions.ValidationException,
                 TypeError, ValueError):
             # Keep the match and close it ahead of any less specific route.
             return rendered
-        intervals, total = self._transform_weighted_targets(
-            targets, available_pool_ids)
+        capability = (
+            constants.GATEWAY_CAPABILITY_TLS_SNI_PASSTHROUGH_WEIGHTED_POOLS)
+        if raw_tls and (
+                not feature_compatibility.get(capability) or
+                (feature_compatibility.get('weighted_passthrough_degraded') and
+                 (policy.provisioning_status != constants.ACTIVE or
+                  any(rule.provisioning_status != constants.ACTIVE
+                      for rule in rules)))):
+            return rendered
+        pool_ids = raw_pool_ids if raw_tls else terminated_pool_ids
+        intervals, total = self._transform_weighted_targets(targets, pool_ids)
         for interval in intervals:
             interval.pop('status_code', None)
         rendered.update(tcp_weighted_targets=intervals, total_weight=total)

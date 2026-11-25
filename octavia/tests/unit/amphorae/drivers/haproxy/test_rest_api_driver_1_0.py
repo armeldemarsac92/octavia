@@ -322,7 +322,7 @@ class TestHaproxyAmphoraLoadBalancerDriverTest(base.TestCase):
                              l7policies=[])
         tcp_listener = mock.Mock(
             enabled=True, protocol=constants.PROTOCOL_TCP,
-            tcp_tls_termination=True, pools=[tcp_pool])
+            tcp_tls_termination=True, pools=[tcp_pool], l7policies=[])
         lb = mock.Mock(enabled=True, listeners=[listener, tcp_listener],
                        amphorae=amphorae)
         sans = constants.GATEWAY_CAPABILITY_BACKEND_TLS_SUBJECT_ALT_NAMES
@@ -787,6 +787,67 @@ class TestHaproxyAmphoraLoadBalancerDriverTest(base.TestCase):
         listener = listener._replace(default_pool=pool, load_balancer=graph)
         graph.listeners[:] = [listener]
         return graph, listener
+
+    def test_weighted_passthrough_requires_all_amphorae_and_reload_receipts(
+            self):
+        graph, sample = self._guarded_udp_graph()
+        rule = data_models.L7Rule(type=constants.L7RULE_TYPE_TLS_SNI,
+                                  enabled=True)
+        route = data_models.L7Policy(
+            action=constants.L7POLICY_ACTION_WEIGHTED_TARGETS,
+            enabled=True, l7rules=[rule])
+        listener = sample._replace(protocol=constants.PROTOCOL_TCP,
+                                   default_pool=None, pools=[],
+                                   l7policies=[route])
+        graph.listeners[:] = [listener]
+        capability = (
+            constants.GATEWAY_CAPABILITY_TLS_SNI_PASSTHROUGH_WEIGHTED_POOLS)
+        client = self.driver.clients[API_VERSION]
+        supported = {capability: True}
+        self.driver.jinja_combo.build_config.return_value = 'the_config'
+
+        def acknowledge(*args, otlp_publication, **kwargs):
+            return SimpleNamespace(status_code=202, headers={
+                constants.HAPROXY_OTLP_PUBLICATION_HEADER: otlp_publication})
+
+        client.reload_listener.side_effect = acknowledge
+        client.get_details.side_effect = [supported, requests.ConnectionError]
+        self.assertRaises(driver_except.ListenerProvisioningError,
+                          self.driver.update, graph, l7policy_activation=True)
+        client.upload_config.assert_called_once_with(
+            graph.amphorae[0], graph.id, 'the_config', timeout_dict=None)
+        self.assertTrue(self.driver.jinja_combo.build_config.call_args.kwargs[
+            'weighted_passthrough_degraded'])
+        client.reload_listener.assert_called_once()
+
+        # Restoration also retains ownership when the saved policy is
+        # disabled and only one peer can confirm the new config.
+        route.enabled = False
+        client.reset_mock()
+        client.get_details.side_effect = [supported, requests.ConnectionError]
+        self.assertRaises(
+            driver_except.ListenerProvisioningError, self.driver.update, graph,
+            l7policy_activation=True, l7policy_restoration=True)
+        client.reload_listener.assert_called_once()
+
+        route.enabled = True
+        client.get_details.side_effect = None
+        client.get_details.return_value = supported
+        client.reload_listener.side_effect = None
+        client.reload_listener.return_value = requests.Response()
+        self.assertRaises(driver_except.ListenerProvisioningError,
+                          self.driver.update, graph, l7policy_activation=True)
+
+        client.reset_mock()
+        client.reload_listener.side_effect = acknowledge
+        self.driver.update(graph, l7policy_activation=True)
+        self.assertEqual(2, client.reload_listener.call_count)
+        self.assertEqual(
+            {amp.id for amp in graph.amphorae},
+            {call.args[0].id
+             for call in client.reload_listener.call_args_list})
+        self.assertTrue(all(call.kwargs.get('otlp_publication')
+                            for call in client.reload_listener.call_args_list))
 
     def test_udp_batch_prepares_every_amphora_before_reload(self):
         graph, listener = self._guarded_udp_graph()

@@ -144,6 +144,8 @@ GATEWAY_CAPABILITY_TCP_TLS_MIXED_MODE = 'tcp_tls_mixed_mode_v1'
 GATEWAY_CAPABILITY_TLS_SNI = 'tls_sni_passthrough_v1'
 GATEWAY_CAPABILITY_TLS_SNI_SUFFIX = 'tls_sni_suffix_v1'
 GATEWAY_CAPABILITY_TLS_SNI_WEIGHTED_POOLS = 'tls_sni_weighted_pools_v1'
+GATEWAY_CAPABILITY_TLS_SNI_PASSTHROUGH_WEIGHTED_POOLS = (
+    'tls_sni_passthrough_weighted_pools_v1')
 GATEWAY_CAPABILITY_HTTPS_LISTENER_ISOLATION = 'https_listener_isolation_v1'
 GATEWAY_CAPABILITY_FRONTEND_CLIENT_AUTH_INSECURE_FALLBACK = (
     'frontend_client_auth_insecure_fallback_v1')
