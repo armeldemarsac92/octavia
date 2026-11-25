@@ -114,6 +114,7 @@ class HAProxyCompatTestCase(base.TestCase):
         h2_alpn = constants.GATEWAY_CAPABILITY_BACKEND_TLS_H2_ALPN
         sans = constants.GATEWAY_CAPABILITY_BACKEND_TLS_SUBJECT_ALT_NAMES
         policy = constants.GATEWAY_CAPABILITY_HTTP_REQUEST_POLICY
+        mirror = constants.GATEWAY_CAPABILITY_HTTP_REQUEST_MIRROR
         strict_dns = 'HAProxy version 3.0.19-ade9c1262-octavia-strict-dns-v1'
         for version, expected in (
                 ('HAProxy version 3.0.19-ade9c1262 ', {}),
@@ -124,7 +125,11 @@ class HAProxyCompatTestCase(base.TestCase):
                  {hostname: True, tcp_auth: True, h2_alpn: True, sans: True}),
                 (f'{strict_dns}-h2-alpn-v1-backend-sans-v1-http-policy-v1 ',
                  {hostname: True, tcp_auth: True, h2_alpn: True, sans: True,
-                  policy: True})):
+                  policy: True}),
+                (f'{strict_dns}-h2-alpn-v1-backend-sans-v1-http-policy-v1'
+                 '-http-mirror-v1 ',
+                 {hostname: True, tcp_auth: True, h2_alpn: True, sans: True,
+                  policy: True, mirror: True})):
             with self.subTest(version=version):
                 check_output.return_value = version
                 result = haproxy_compatibility.get_haproxy_capabilities()

@@ -913,6 +913,168 @@ class TestInitialL7Rules(base.BaseAPITest):
         self.assertIsNone(worker_policy.http_request_policy)
         self.assertNotIn(field, self.get(path).json['l7policy'])
 
+    @mock.patch.object(amphora_noop.NoopAmphoraLoadBalancerDriver, 'update')
+    def test_request_mirrors_round_trip_scope_and_withdrawal(self, update):
+        field = 'request_mirrors'
+        capability = constants.GATEWAY_CAPABILITY_HTTP_REQUEST_MIRROR
+        caps_path = self.PROVIDERS_PATH + '/amphora/gateway_capabilities'
+        primary = self.create_pool(self.lb_id, 'HTTP', 'ROUND_ROBIN')['pool']
+        self.set_lb_status(self.lb_id)
+        copy = self.create_pool(self.lb_id, 'HTTP', 'ROUND_ROBIN')['pool']
+        self.set_lb_status(self.lb_id)
+        tcp = self.create_pool(self.lb_id, 'TCP', 'ROUND_ROBIN')['pool']
+        self.set_lb_status(self.lb_id)
+        other_lb = self.create_load_balancer(
+            uuidutils.generate_uuid(), provider='amphora')['loadbalancer']
+        self.set_lb_status(other_lb['id'])
+        foreign = self.create_pool(
+            other_lb['id'], 'HTTP', 'ROUND_ROBIN')['pool']
+        self.rpc.cast.reset_mock()
+        mirror = dict(pool_id=copy['id'], numerator=7, denominator=13)
+        first = dict(mirror, phase='before_transforms')
+        self.conf.config(group='api_settings',
+                         enabled_gateway_action_providers=['amphora'])
+        target = dict(weight=3, pool_id=primary['id'])
+        post = dict(action='WEIGHTED_TARGETS', redirect_prefix=None,
+                    targets=[dict(target, request_mirrors=[mirror])])
+        self.assertNotIn(capability,
+                         self.get(caps_path).json['gateway_capabilities'])
+        self._post_policy(status=501, **post)
+        self.conf.config(group='api_settings',
+                         enabled_http_request_mirror_providers=['amphora'])
+        self.assertIn(capability,
+                      self.get(caps_path).json['gateway_capabilities'])
+        with mock.patch.object(
+                driver_utils, 'HTTP_REQUEST_MIRROR_PAYLOAD_AVAILABLE', False):
+            self.assertNotIn(capability,
+                             self.get(caps_path).json['gateway_capabilities'])
+        for bad in ({'numerator': True}, {'numerator': '7'},
+                    {'denominator': 0}, {'numerator': 14},
+                    {'denominator': 2**31}, {'phase': None},
+                    {'pool_id': 'not-a-uuid'}, {'address': '192.0.2.4'}):
+            with self.subTest(bad=bad):
+                self._post_policy(
+                    status=400, request_mirrors=[dict(mirror, **bad)], **post)
+        self._post_policy(status=400, request_mirrors=[mirror, first], **post)
+        self._post_policy(status=404, request_mirrors=[
+            dict(mirror, pool_id=foreign['id'], numerator=0)], **post)
+        self._post_policy(status=400, request_mirrors=[
+            dict(mirror, pool_id=tcp['id'], numerator=0)], **post)
+        self.rpc.cast.assert_not_called()
+
+        policy = self._post_policy(**post)['l7policy']
+        self.assertEqual([], policy[field])
+        self.assertEqual(post['targets'], policy['targets'])
+        payload = self.rpc.cast.call_args.kwargs[constants.L7POLICY]
+        self.assertEqual(policy['targets'], payload['targets'])
+        self._dispatch('create_l7policy')
+        listed, = self.get(self.L7POLICIES_PATH).json['l7policies']
+        self.assertEqual([], listed[field])
+        self.assertEqual(policy['targets'], listed['targets'])
+
+        path = self.L7POLICY_PATH.format(l7policy_id=policy['id'])
+        self.assertEqual([], self.get(path).json['l7policy'][field])
+        mirrors = [first, mirror, mirror]
+        self.put(path, {'l7policy': {'admin_state_up': True, field: mirrors}})
+        self._dispatch('update_l7policy')
+        snapshot, = update.call_args.args
+        self.assertIn(copy['id'], [pool.id for pool in
+                                   snapshot.listeners[0].pools])
+        self.assertEqual(mirrors,
+                         snapshot.listeners[0].l7policies[0].request_mirrors)
+        pool_path = self.POOL_PATH.format(pool_id=copy['id'])
+        self.delete(pool_path, status=409)
+
+        self.conf.config(group='api_settings',
+                         enabled_http_request_mirror_providers=[])
+        self.put(pool_path, {'pool': {'admin_state_up': False}})
+        self._dispatch('update_pool')
+        self.put(pool_path, {'pool': {'admin_state_up': True}}, status=501)
+        self.rpc.cast.assert_not_called()
+        self.put(path, {'l7policy': {
+            field: [first], 'targets': [target]}})
+        self._dispatch('update_l7policy')
+        retained = self.get(path).json['l7policy']
+        self.assertEqual([first], retained[field])
+        self.assertEqual([target], retained['targets'])
+        self.delete(pool_path, status=409)
+        self.put(path, {'l7policy': {field: None}})
+        self._dispatch('update_l7policy')
+        self.assertEqual([], self.get(path).json['l7policy'][field])
+        self.delete(pool_path)
+
+    def test_fixed_response_request_transforms_with_mirrors(self):
+        self.conf.config(
+            group='api_settings', enabled_gateway_action_providers=['amphora'],
+            enabled_http_request_mirror_providers=['amphora'],
+            enabled_request_header_operation_providers=['amphora'],
+            enabled_request_url_rewrite_providers=['amphora'])
+        pool = self.create_pool(self.lb_id, 'HTTP', 'ROUND_ROBIN')['pool']
+        self.set_lb_status(self.lb_id)
+        self.rpc.cast.reset_mock()
+        headers = [{'operation': 'SET', 'name': 'x-copy', 'value': 'rule'}]
+        rewrite = {'replace_full_path': '/copy'}
+        fixed = dict(action='FIXED_RESPONSE', redirect_prefix=None,
+                     fixed_response={'status_code': 500})
+        mirror = {'pool_id': pool['id'], 'numerator': 1, 'denominator': 1}
+        filters = dict(request_header_operations=headers,
+                       request_url_rewrite=rewrite)
+        self._post_policy(status=400, **fixed, **filters)
+        self.rpc.cast.assert_not_called()
+        policy = self._post_policy(
+            request_mirrors=[mirror], **fixed, **filters)['l7policy']
+        self._dispatch('create_l7policy')
+        path = self.L7POLICY_PATH.format(l7policy_id=policy['id'])
+
+        for primary in (
+                {'action': 'REDIRECT_TO_POOL', 'redirect_pool_id': pool['id']},
+                {'action': 'WEIGHTED_TARGETS', 'targets': [
+                    {'weight': 1, 'fixed_response': {'status_code': 500}}]}):
+            with self.subTest(action=primary['action']):
+                self.put(path, {'l7policy': primary})
+                self._dispatch('update_l7policy')
+                self.put(path, {'l7policy': fixed})
+                self._dispatch('update_l7policy')
+                stored = self.get(path).json['l7policy']
+                self.assertEqual([mirror], stored['request_mirrors'])
+                self.assertEqual(headers, stored['request_header_operations'])
+                self.assertEqual(rewrite, stored['request_url_rewrite'])
+
+        self.put(path, {'l7policy': {'request_mirrors': []}})
+        self._dispatch('update_l7policy')
+        self.put(path, {'l7policy': {'name': 'retained'}})
+        self._dispatch('update_l7policy')
+        stored = self.get(path).json['l7policy']
+        self.assertEqual([], stored['request_mirrors'])
+        self.assertEqual(headers, stored['request_header_operations'])
+        self.assertEqual(rewrite, stored['request_url_rewrite'])
+
+    def test_batch_activation_validates_request_mirrors(self):
+        primary = self.create_pool(self.lb_id, 'HTTP', 'ROUND_ROBIN')['pool']
+        self.set_lb_status(self.lb_id)
+        copy = self.create_pool(self.lb_id, 'HTTP', 'ROUND_ROBIN')['pool']
+        self.set_lb_status(self.lb_id)
+        self.conf.config(group='api_settings',
+                         enabled_http_request_mirror_providers=['amphora'])
+        mirrors = [dict(pool_id=copy['id'], numerator=0, denominator=1)]
+        path, request = self._prepare_activation_group(
+            action='REDIRECT_TO_POOL', redirect_prefix=None,
+            redirect_pool_id=primary['id'], request_mirrors=mirrors)
+        graph = self.get(path).json['l7policy_activation']
+        self.assertCountEqual({primary['id'], copy['id']},
+                              [item['pool']['id'] for item in graph['pools']])
+        self.conf.config(group='api_settings',
+                         enabled_http_request_mirror_providers=[])
+        self.post(path, request, status=501)
+        self.rpc.cast.assert_not_called()
+        self.conf.config(group='api_settings',
+                         enabled_http_request_mirror_providers=['amphora'])
+        self.post(path, request, status=204)
+        self._dispatch('activate_l7policies')
+        self.assertEqual([True, True, False], [
+            policy['admin_state_up'] for policy in
+            self._activation_policies(path)])
+
     @mock.patch.object(driver_utils, 'REQUEST_CORS_PAYLOAD_AVAILABLE', False)
     def test_cors_cleanup_with_pre_cors_provider_payload(self):
         self.conf.config(group='api_settings',
@@ -3181,6 +3343,32 @@ class TestL7Policy(base.BaseAPITest):
                     }],
                 }}, status=status)
                 create_vip.assert_not_called()
+
+    def test_nested_mirrors_checked_before_vip_allocation(self):
+        self.conf.config(
+            group='api_settings', enabled_gateway_action_providers=['amphora'],
+            enabled_http_request_mirror_providers=['amphora'])
+        mirror = {'pool_id': self.pool_id, 'numerator': 0, 'denominator': 1}
+        rule = {'action': 'FIXED_RESPONSE',
+                'fixed_response': {'status_code': 500},
+                'request_mirrors': [mirror]}
+        weighted = {'action': 'WEIGHTED_TARGETS', 'targets': [
+            {'weight': 1, 'pool_id': self.pool_id,
+             'request_mirrors': [mirror]}]}
+        with mock.patch(
+                'octavia.api.drivers.amphora_driver.v2.driver.'
+                'AmphoraProviderDriver.create_vip_port') as create_vip:
+            for policy_data in (rule, weighted):
+                with self.subTest(action=policy_data['action']):
+                    self.post(self.LBS_PATH, {'loadbalancer': {
+                        'project_id': self.project_id, 'provider': 'amphora',
+                        'vip_subnet_id': uuidutils.generate_uuid(),
+                        'listeners': [{
+                            'protocol': 'HTTP', 'protocol_port': 80,
+                            'l7policies': [policy_data],
+                        }],
+                    }}, status=400)
+            create_vip.assert_not_called()
 
     def test_create_redirect_to_pool(self):
         api_l7policy = self.create_l7policy(

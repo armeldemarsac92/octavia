@@ -16,8 +16,8 @@ Build the binary on the target image distribution and architecture::
         /path/to/haproxy-3.0.19.tar.gz /path/to/haproxy
 
 The script checks the HAProxy 3.0.19 tarball and each patch by SHA-256. It
-applies the strict DNS, required HTTP/2 ALPN, explicit SAN and HTTP policy
-patches, in that order, with zero fuzz.
+applies the strict DNS, required HTTP/2 ALPN, explicit SAN, HTTP policy and
+HTTP mirror patches, in that order, with zero fuzz.
 
 Set ``DIB_OCTAVIA_HAPROXY_BINARY`` to the absolute path of the resulting binary
 when running Octavia's ``diskimage-create.sh``. The element checks the binary in
@@ -79,3 +79,53 @@ sending starts.
 After final response bytes reach the client protocol, expiration interrupts that
 response without sending another status. A successful HTTP upgrade ends the
 HTTP budget when the handshake response is handed to the client protocol.
+
+Streaming HTTP request mirrors
+==============================
+
+The ``http_request_mirror_v1`` build supports a filter and HTTP request rule
+for a matched Octavia policy::
+
+    filter octavia-mirror /run/octavia/mirror
+    http-request octavia-mirror <pool-uuid> <numerator> <denominator> if ...
+
+The denominator is a positive decimal integer up to INT_MAX. The numerator
+is between zero and the denominator. Each rule samples independently. A
+selected rule snapshots the request line and end-to-end headers as they
+appear at that point, then copies body data and trailers as they arrive.
+The action can run in the HTTP backend selected by a frontend that has
+the filter. Filters within one HAProxy process share the socket directory.
+An already complete request can be mirrored when a later rule issues a
+local reply.
+The copy uses HTTP/1.1 on the private hop. A dedicated PROXYv2 TLV carries the
+HTTP/2 scheme and the client TLS SNI. The delivery listener reads it on the
+mode 600 UNIX socket after verifying the peer has the worker UID. CONNECT
+and HTTP Upgrade tunnels are excluded.
+
+The delivery pool is a dedicated HTTP ``listen`` section with its own server
+configuration and a single private bind::
+
+    bind /run/octavia/mirror/<pool-uuid>.sock user nobody mode 600 octavia-mirror-socket
+    option abortonclose
+    retries 0
+    http-request disable-l7-retry
+
+The listener uses the pool's configured members, balance algorithm and
+backend TLS settings. The action accepts only pool UUIDs, and configuration
+validation requires the corresponding private listener for each nonzero
+ratio. The DIB element installs a systemd-tmpfiles entry for the socket
+directory. The worker UID must be able to connect to the socket.
+
+Each HAProxy worker process can run up to 128 copies with eight waiting
+``tune.bufsize`` buffers and one HTTP client input buffer per copy. The
+private listener does not consume the public connection quota. Connecting
+to the UNIX socket has a two-second timeout, and the copy has a five-second
+inactivity timeout and a 30-second total deadline. A copy can be dropped if
+resources are scarce, the source upload is interrupted or its receiver falls
+behind. Only a complete upload gets an end-of-message marker. The active
+count and drop counters are available through ``show octavia mirrors`` on the
+HAProxy stats socket.
+
+Run the loopback qualification with OpenSSL, Python and the ``h2`` package::
+
+    python elements/haproxy-octavia/test-request-mirror.py /path/to/haproxy -v

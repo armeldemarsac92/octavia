@@ -331,6 +331,18 @@ class HTTPRequestPolicy(wtypes.UserType):
             raise ValueError(str(e)) from e
 
 
+class HTTPRequestMirrors(wtypes.UserType):
+    basetype = object
+    name = 'request_mirrors'
+
+    @staticmethod
+    def validate(value):
+        try:
+            return validate.http_request_mirrors(value)
+        except exceptions.InvalidL7PolicyArgs as e:
+            raise ValueError(str(e)) from e
+
+
 class HTTPRequestCORS(wtypes.UserType):
     basetype = object
     name = 'request_cors'

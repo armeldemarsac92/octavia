@@ -31,7 +31,7 @@ class BaseL7PolicyType(types.BaseType):
         for field in ('request_header_operations',
                       'response_header_operations', 'redirect_request',
                       'request_url_rewrite', 'request_cors',
-                      'http_request_policy'):
+                      'http_request_policy', 'request_mirrors'):
             if getattr(self, field) is wtypes.Unset:
                 data.pop(field, None)
         return data
@@ -55,6 +55,7 @@ class L7PolicyResponse(BaseL7PolicyType):
     request_url_rewrite = wtypes.wsattr(types.HTTPRequestURLRewrite())
     request_cors = wtypes.wsattr(types.HTTPRequestCORS())
     http_request_policy = wtypes.wsattr(types.HTTPRequestPolicy())
+    request_mirrors = wtypes.wsattr(types.HTTPRequestMirrors())
     targets = wtypes.wsattr(types.WeightedL7PolicyTargets())
     request_header_operations = wtypes.wsattr(types.RequestHeaderOperations())
     response_header_operations = wtypes.wsattr(
@@ -92,6 +93,7 @@ class L7PolicyResponse(BaseL7PolicyType):
                 setattr(result, field, wtypes.Unset)
         if not db_obj.targets:
             result.targets = wtypes.Unset
+        result.request_mirrors = getattr(db_obj, 'request_mirrors', None) or []
 
         if cls._full_response():
             result.rules = [
@@ -141,6 +143,7 @@ class L7PolicyPOST(BaseL7PolicyType):
     request_url_rewrite = wtypes.wsattr(types.HTTPRequestURLRewrite())
     request_cors = wtypes.wsattr(types.HTTPRequestCORS())
     http_request_policy = wtypes.wsattr(types.HTTPRequestPolicy())
+    request_mirrors = wtypes.wsattr(types.HTTPRequestMirrors())
     targets = wtypes.wsattr(types.WeightedL7PolicyTargets())
     request_header_operations = wtypes.wsattr(types.RequestHeaderOperations())
     response_header_operations = wtypes.wsattr(
@@ -201,6 +204,7 @@ class L7PolicyPUT(BaseL7PolicyType):
     request_url_rewrite = wtypes.wsattr(types.HTTPRequestURLRewrite())
     request_cors = wtypes.wsattr(types.HTTPRequestCORS())
     http_request_policy = wtypes.wsattr(types.HTTPRequestPolicy())
+    request_mirrors = wtypes.wsattr(types.HTTPRequestMirrors())
     targets = wtypes.wsattr(types.WeightedL7PolicyTargets())
     request_header_operations = wtypes.wsattr(types.RequestHeaderOperations())
     response_header_operations = wtypes.wsattr(
@@ -235,6 +239,7 @@ class L7PolicySingleCreate(BaseL7PolicyType):
     request_url_rewrite = wtypes.wsattr(types.HTTPRequestURLRewrite())
     request_cors = wtypes.wsattr(types.HTTPRequestCORS())
     http_request_policy = wtypes.wsattr(types.HTTPRequestPolicy())
+    request_mirrors = wtypes.wsattr(types.HTTPRequestMirrors())
     targets = wtypes.wsattr(types.WeightedL7PolicyTargets())
     request_header_operations = wtypes.wsattr(types.RequestHeaderOperations())
     response_header_operations = wtypes.wsattr(

@@ -537,11 +537,80 @@ def validate_weighted_l7policy_protocol(protocol):
 
 TARGET_REQUEST_FILTER_FIELDS = (
     'request_header_operations', 'request_url_rewrite')
+REQUEST_MIRROR_PHASES = ('before_transforms', 'after_headers', 'after_rewrite')
+REQUEST_MIRROR_DEFAULT_PHASE = REQUEST_MIRROR_PHASES[-1]
+REQUEST_MIRROR_ACTIONS = (
+    constants.L7POLICY_ACTION_REDIRECT_TO_POOL,
+    constants.L7POLICY_ACTION_WEIGHTED_TARGETS,
+    constants.L7POLICY_ACTION_FIXED_RESPONSE)
 
 
 def target_request_filters(target):
     return {field: target[field] for field in TARGET_REQUEST_FILTER_FIELDS
             if target.get(field)}
+
+
+def http_request_mirrors(mirrors):
+    if mirrors is None:
+        return []
+    if not isinstance(mirrors, list) or len(mirrors) > 16:
+        raise exceptions.InvalidL7PolicyArgs(
+            msg=_('request_mirrors must be an array of up to 16 entries.'))
+
+    normalized = []
+    last_phase = 0
+    required = {'pool_id', 'numerator', 'denominator'}
+    for mirror in mirrors:
+        if (not isinstance(mirror, dict) or
+                not required <= mirror.keys() or
+                mirror.keys() - required - {'phase'}):
+            raise exceptions.InvalidL7PolicyArgs(
+                msg=_('Each mirror requires pool_id, numerator and '
+                      'denominator and accepts an optional phase.'))
+        try:
+            pool_id = str(uuid.UUID(mirror['pool_id']))
+        except (AttributeError, TypeError, ValueError) as e:
+            raise exceptions.InvalidL7PolicyArgs(
+                msg=_('Mirror pool_id must be a UUID.')) from e
+        numerator, denominator = mirror['numerator'], mirror['denominator']
+        if (type(numerator) is not int or type(denominator) is not int or
+                not 1 <= denominator <= 2**31 - 1 or
+                not 0 <= numerator <= denominator):
+            raise exceptions.InvalidL7PolicyArgs(
+                msg=_('Each mirror requires an integer ratio with '
+                      '0 <= numerator <= denominator <= 2147483647 '
+                      'and denominator > 0.'))
+        phase = mirror.get('phase', REQUEST_MIRROR_DEFAULT_PHASE)
+        if phase not in REQUEST_MIRROR_PHASES:
+            raise exceptions.InvalidL7PolicyArgs(
+                msg=_('Invalid request mirror phase.'))
+        phase_index = REQUEST_MIRROR_PHASES.index(phase)
+        if phase_index < last_phase:
+            raise exceptions.InvalidL7PolicyArgs(
+                msg=_('Request mirror phases must follow request '
+                      'transformation order.'))
+        last_phase = phase_index
+        result = dict(pool_id=pool_id, numerator=numerator,
+                      denominator=denominator)
+        if phase != REQUEST_MIRROR_DEFAULT_PHASE:
+            result['phase'] = phase
+        normalized.append(result)
+    return normalized
+
+
+def validate_request_mirror_protocol(protocol):
+    if protocol not in (constants.PROTOCOL_HTTP,
+                        constants.PROTOCOL_TERMINATED_HTTPS):
+        raise exceptions.ValidationException(detail=_(
+            'Request mirrors require an HTTP or TERMINATED_HTTPS listener.'))
+
+
+def request_mirror_pool_ids(mirrors, targets):
+    pool_ids = {mirror['pool_id'] for mirror in mirrors or []}
+    for target in targets or []:
+        pool_ids.update(mirror['pool_id']
+                        for mirror in target.get('request_mirrors', []))
+    return pool_ids
 
 
 def weighted_l7policy_targets(targets):
@@ -554,7 +623,8 @@ def weighted_l7policy_targets(targets):
     for target in targets:
         if (not isinstance(target, dict) or
                 (target.keys() != {'weight', 'fixed_response'} and
-                 target.keys() - set(TARGET_REQUEST_FILTER_FIELDS) !=
+                 target.keys() - {*TARGET_REQUEST_FILTER_FIELDS,
+                                  'request_mirrors'} !=
                  {'weight', 'pool_id'})):
             raise exceptions.InvalidL7PolicyArgs(
                 msg=_('Each target requires weight and exactly one of '
@@ -583,6 +653,9 @@ def weighted_l7policy_targets(targets):
             if 'request_url_rewrite' in target:
                 result['request_url_rewrite'] = http_request_url_rewrite(
                     target['request_url_rewrite'])
+            mirrors = http_request_mirrors(target.get('request_mirrors'))
+            if mirrors:
+                result['request_mirrors'] = mirrors
             normalized.append(result)
         else:
             status = fixed_http_status_code(target['fixed_response'])
@@ -1060,21 +1133,37 @@ def sanitize_l7policy_api_args(l7policy, create=False, old_policy=None):
 
     forwarding_actions = (constants.L7POLICY_ACTION_REDIRECT_TO_POOL,
                           constants.L7POLICY_ACTION_WEIGHTED_TARGETS)
-    rewrite = l7policy.get('request_url_rewrite',
-                           getattr(old_policy, 'request_url_rewrite', None))
+    effective_action = l7policy.get('action', old_action)
+    if 'request_mirrors' in l7policy:
+        l7policy['request_mirrors'] = http_request_mirrors(
+            l7policy['request_mirrors'])
+    mirrors = l7policy.get('request_mirrors',
+                           getattr(old_policy, 'request_mirrors', None))
+    if mirrors and effective_action not in REQUEST_MIRROR_ACTIONS:
+        raise exceptions.InvalidL7PolicyArgs(msg=_(
+            'request_mirrors requires REDIRECT_TO_POOL, WEIGHTED_TARGETS '
+            'or FIXED_RESPONSE.'))
+    fixed_mirror = effective_action == fixed_action and bool(mirrors)
+    # Keep admitted transforms on a fixed policy when its mirrors are cleared.
+    retaining_fixed = effective_action == fixed_action == old_action
+    old_rewrite = getattr(old_policy, 'request_url_rewrite', None)
+    rewrite = l7policy.get('request_url_rewrite', old_rewrite)
     if rewrite is not None:
-        if l7policy.get('action', old_action) not in forwarding_actions:
-            raise exceptions.InvalidL7PolicyArgs(
-                msg=_('request_url_rewrite requires REDIRECT_TO_POOL or '
-                      'WEIGHTED_TARGETS.'))
         if 'request_url_rewrite' in l7policy:
-            l7policy['request_url_rewrite'] = http_request_url_rewrite(rewrite)
+            rewrite = http_request_url_rewrite(rewrite)
+            l7policy['request_url_rewrite'] = rewrite
+        if (effective_action not in forwarding_actions and
+                not fixed_mirror and
+                not (retaining_fixed and rewrite == old_rewrite)):
+            raise exceptions.InvalidL7PolicyArgs(
+                msg=_('request_url_rewrite requires a forwarding policy or '
+                      'FIXED_RESPONSE with request_mirrors.'))
     previous_request_policy = getattr(
         old_policy, 'http_request_policy', None)
     request_policy = l7policy.get(
         'http_request_policy', previous_request_policy)
     if request_policy is not None:
-        if l7policy.get('action', old_action) not in forwarding_actions:
+        if effective_action not in forwarding_actions:
             raise exceptions.InvalidL7PolicyArgs(
                 msg=_('http_request_policy requires REDIRECT_TO_POOL or '
                       'WEIGHTED_TARGETS.'))
@@ -1084,7 +1173,7 @@ def sanitize_l7policy_api_args(l7policy, create=False, old_policy=None):
     cors = l7policy.get('request_cors',
                         getattr(old_policy, 'request_cors', None))
     if cors is not None:
-        if l7policy.get('action', old_action) not in forwarding_actions:
+        if effective_action not in forwarding_actions:
             raise exceptions.InvalidL7PolicyArgs(
                 msg=_('request_cors requires REDIRECT_TO_POOL or '
                       'WEIGHTED_TARGETS.'))
@@ -1096,12 +1185,15 @@ def sanitize_l7policy_api_args(l7policy, create=False, old_policy=None):
              (*forwarding_actions, constants.L7POLICY_ACTION_FIXED_RESPONSE))):
         if field in l7policy:
             l7policy[field] = header_operations(l7policy[field], field)
-        operations = l7policy.get(field, getattr(old_policy, field, None))
-        if operations and l7policy.get('action', old_action) not in actions:
+        old_operations = getattr(old_policy, field, None)
+        operations = l7policy.get(field, old_operations)
+        if (operations and effective_action not in actions and
+                not fixed_mirror and
+                not (retaining_fixed and operations == old_operations)):
             raise exceptions.InvalidL7PolicyArgs(
                 msg=_('%s is unavailable for this policy action.') % field)
 
-    if l7policy.get('action', old_action) == weighted_action:
+    if effective_action == weighted_action:
         validate_target_request_filter_composition(
             l7policy.get('targets', getattr(old_policy, 'targets', None)),
             l7policy.get('request_header_operations', getattr(

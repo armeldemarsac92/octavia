@@ -40,10 +40,12 @@ def get_haproxy_capabilities():
         ] = True
     strict_dns = 'HAProxy version 3.0.19-ade9c1262-octavia-strict-dns-v1'
     backend_sans = f'{strict_dns}-h2-alpn-v1-backend-sans-v1'
-    http_request_policy_build = f'{backend_sans}-http-policy-v1 '
+    http_request_policy = f'{backend_sans}-http-policy-v1'
+    http_request_mirror_build = f'{http_request_policy}-http-mirror-v1 '
     strict_dns_builds = (
         f'{strict_dns} ', f'{strict_dns}-h2-alpn-v1 ',
-        f'{backend_sans} ', http_request_policy_build,
+        f'{backend_sans} ', f'{http_request_policy} ',
+        http_request_mirror_build,
     )
     if not output.startswith(strict_dns_builds):
         return capabilities
@@ -54,8 +56,10 @@ def get_haproxy_capabilities():
     if output.startswith(strict_dns_builds[2:]):
         capabilities[
             constants.GATEWAY_CAPABILITY_BACKEND_TLS_SUBJECT_ALT_NAMES] = True
-    if output.startswith(http_request_policy_build):
+    if output.startswith(strict_dns_builds[3:]):
         capabilities[constants.GATEWAY_CAPABILITY_HTTP_REQUEST_POLICY] = True
+    if output.startswith(http_request_mirror_build):
+        capabilities[constants.GATEWAY_CAPABILITY_HTTP_REQUEST_MIRROR] = True
     return capabilities
 
 

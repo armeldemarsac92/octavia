@@ -230,6 +230,7 @@ class JinjaTemplater:
         san_capability = (
             constants.GATEWAY_CAPABILITY_BACKEND_TLS_SUBJECT_ALT_NAMES)
         policy_capability = constants.GATEWAY_CAPABILITY_HTTP_REQUEST_POLICY
+        mirror_capability = constants.GATEWAY_CAPABILITY_HTTP_REQUEST_MIRROR
         fallback_capability = (
             constants.GATEWAY_CAPABILITY_FRONTEND_CLIENT_AUTH_INSECURE_FALLBACK)
         loadbalancer = self._transform_loadbalancer(
@@ -269,6 +270,7 @@ class JinjaTemplater:
                     raise driver_except.AmpVersionUnsupported(
                         version=f'HAProxy {haproxy_version}; CORS requires 2.2')
         if loadbalancer['enabled']:
+            supports_mirrors = (amp_details or {}).get(mirror_capability)
             for listener in loadbalancer['listeners']:
                 if not listener['enabled']:
                     continue
@@ -277,6 +279,10 @@ class JinjaTemplater:
                         is not True):
                     raise driver_except.AmpVersionUnsupported(
                         version='HAProxy lacks HTTP request policy support')
+                if (listener.get('request_mirror_pools') and
+                        supports_mirrors is not True):
+                    raise driver_except.AmpVersionUnsupported(
+                        version='HAProxy lacks HTTP request mirror support')
                 if (listener.get('client_auth_insecure_fallback') and
                         (amp_details or {}).get(fallback_capability)
                         is not True):
@@ -295,7 +301,13 @@ class JinjaTemplater:
                     raise driver_except.AmpVersionUnsupported(
                         version=f'HAProxy {haproxy_version}; mixed TLS '
                                 'routing requires 3.0')
+                active_mirrors = {pool['id'] for pool in
+                                  listener.get('request_mirror_pools', [])}
+                inactive_mirrors = listener.get(
+                    'mirror_only_pool_ids', set()).difference(active_mirrors)
                 for pool in listener['pools']:
+                    if pool['id'] in inactive_mirrors:
+                        continue
                     hostname = pool.get('backend_tls_hostname')
                     require_h2 = pool.get('backend_tls_require_h2')
                     sans = pool.get('backend_tls_subject_alt_names')
@@ -455,6 +467,14 @@ class JinjaTemplater:
                 host_amphora, feature_compatibility),
             'amphorae': loadbalancer.amphorae
         }
+        mirror_pools = {}
+        for listener in listener_transforms:
+            if listener['enabled']:
+                for pool in listener.get('request_mirror_pools', []):
+                    mirror_pools[pool['id']] = pool
+        if mirror_pools:
+            ret_value['request_mirror_pools'] = [
+                mirror_pools[pool_id] for pool_id in sorted(mirror_pools)]
         # NOTE(sbalukoff): Global connection limit should be a sum of all
         # listeners' connection limits.
         connection_limit_sum = 0
@@ -672,6 +692,14 @@ class JinjaTemplater:
             pool['id'] for pool in pools
             if pool['enabled'] or (tcp_tls_termination and pool.get('closed'))
         }
+        available_mirror_pool_ids = {
+            pool['id'] for pool in pools
+            if pool['enabled'] and pool['protocol'] == 'http' and
+            listener.protocol in (constants.PROTOCOL_HTTP,
+                                  constants.PROTOCOL_TERMINATED_HTTPS)
+        }
+        primary_pool_ids = {getattr(listener.default_pool, 'id', None)}
+        configured_mirror_pool_ids = set()
         if listener.protocol == constants.PROTOCOL_TCP:
             policy_gen = (policy for policy in policy_gen
                           if self._is_routable_sni_policy(
@@ -695,7 +723,13 @@ class JinjaTemplater:
                 continue
             transformed = self._transform_l7policy(
                 policy, feature_compatibility, tls_enabled, tls_certs,
-                available_pool_ids)
+                available_pool_ids, available_mirror_pool_ids)
+            primary_pool_ids.add(getattr(policy.redirect_pool, 'id', None))
+            targets = getattr(policy, 'targets', None) or []
+            primary_pool_ids.update(
+                target.get('pool_id') for target in targets)
+            configured_mirror_pool_ids.update(validate.request_mirror_pool_ids(
+                getattr(policy, 'request_mirrors', None), targets))
             if https_sections is not None:
                 transformed['https_section'] = https_sections[hostname]
             if mixed_mode:
@@ -748,6 +782,8 @@ class JinjaTemplater:
         rewrites_by_pool = {}
         http_request_policies_by_pool = {}
         target_filters_by_pool = {}
+        mirrored_rules_by_backend = {}
+        mirror_pool_ids = set()
         for policy in l7policies:
             request_ops = policy.get('request_header_operations')
             response_ops = policy.get('response_header_operations')
@@ -764,6 +800,8 @@ class JinjaTemplater:
                         if target.get('request_filters'):
                             target_filters_by_pool.setdefault(
                                 pool_id, []).append((policy['id'], target))
+                        mirror_pool_ids.update(
+                            target.get('mirror_pool_ids', []))
                     else:
                         code = target["status_code"]
                         fixed_responses.add(f'weighted-{code}')
@@ -777,14 +815,30 @@ class JinjaTemplater:
                 elif cors is not None and redirect_pool.get('closed'):
                     cors_by_backend.setdefault(('pool', pool_id), []).append(
                         (policy['id'], cors))
+            mirrors = policy.get('request_mirrors', [])
+            if mirrors:
+                backends = [('pool', pool_id) for pool_id in sorted(pool_ids)]
+                backends.extend(('fixed', response_id)
+                                for response_id in sorted(fixed_responses))
+                if policy['redirect_pool'] and policy['redirect_pool'].get(
+                        'closed'):
+                    backends.append(('pool', policy['redirect_pool']['id']))
+                if backends:
+                    operations = self._transform_request_pipeline(
+                        request_ops or [], rewrite or [], mirrors)
+                    mirror_pool_ids.update(mirror['pool_id']
+                                           for mirror in mirrors)
+                    for backend in backends:
+                        mirrored_rules_by_backend.setdefault(
+                            backend, []).append((policy['id'], operations))
             for pool_id in pool_ids:
                 if request_policy is not None:
                     http_request_policies_by_pool.setdefault(
                         pool_id, []).append((policy['id'], request_policy))
-                if rewrite:
+                if rewrite and not mirrors:
                     rewrites_by_pool.setdefault(pool_id, []).append(
                         (policy['id'], rewrite))
-                if request_ops:
+                if request_ops and not mirrors:
                     requests_by_pool.setdefault(pool_id, []).append(
                         (policy['id'], request_ops))
                 if response_ops:
@@ -805,6 +859,15 @@ class JinjaTemplater:
                                               []).append((policy['id'], cors))
         if target_filters_by_pool:
             ret_value['target_filters_by_pool'] = target_filters_by_pool
+        if mirrored_rules_by_backend:
+            ret_value['mirrored_rules_by_backend'] = mirrored_rules_by_backend
+        if mirror_pool_ids:
+            ret_value['request_mirror_pools'] = [
+                pool for pool in pools
+                if pool['id'] in mirror_pool_ids]
+        if configured_mirror_pool_ids - primary_pool_ids:
+            ret_value['mirror_only_pool_ids'] = (
+                configured_mirror_pool_ids - primary_pool_ids)
         if requests_by_pool:
             ret_value['request_header_operations_by_pool'] = requests_by_pool
         if http_request_policies_by_pool:
@@ -1028,7 +1091,8 @@ class JinjaTemplater:
 
     def _transform_l7policy(self, l7policy, feature_compatibility,
                             listener_tls_enabled, tls_certs=None,
-                            available_pool_ids=()):
+                            available_pool_ids=(),
+                            available_mirror_pool_ids=()):
         """Transforms an L7 policy into an object that will
 
             be processed by the templating system
@@ -1071,7 +1135,8 @@ class JinjaTemplater:
                     validate.fixed_http_status_code(l7policy.fixed_response))
             elif l7policy.action == constants.L7POLICY_ACTION_WEIGHTED_TARGETS:
                 targets, total = self._transform_weighted_targets(
-                    l7policy.targets, available_pool_ids)
+                    l7policy.targets, available_pool_ids,
+                    available_mirror_pool_ids)
                 ret_value['weighted_targets'] = targets
                 ret_value['total_weight'] = total
             elif l7policy.action == constants.L7POLICY_ACTION_REDIRECT_REQUEST:
@@ -1083,6 +1148,11 @@ class JinjaTemplater:
                 ret_value['request_url_rewrite'] = (
                     self._transform_request_url_rewrite(
                         l7policy.request_url_rewrite))
+            mirrors = self._active_mirrors(
+                getattr(l7policy, 'request_mirrors', None),
+                available_mirror_pool_ids)
+            if mirrors:
+                ret_value['request_mirrors'] = mirrors
             request_policy = getattr(l7policy, 'http_request_policy', None)
             if (request_policy is not None and l7policy.action in
                     (constants.L7POLICY_ACTION_REDIRECT_TO_POOL,
@@ -1286,7 +1356,24 @@ class JinjaTemplater:
             transformed.append(line)
         return transformed
 
-    def _transform_weighted_targets(self, targets, available_pool_ids):
+    @staticmethod
+    def _active_mirrors(mirrors, available_pool_ids):
+        return [mirror for mirror in validate.http_request_mirrors(mirrors)
+                if mirror['numerator'] and
+                mirror['pool_id'] in available_pool_ids]
+
+    @staticmethod
+    def _transform_request_pipeline(headers, rewrites, mirrors):
+        phases = {phase: [] for phase in validate.REQUEST_MIRROR_PHASES}
+        for mirror in mirrors:
+            phase = mirror.get('phase', validate.REQUEST_MIRROR_DEFAULT_PHASE)
+            phases[phase].append('octavia-mirror {pool_id} {numerator} '
+                                 '{denominator}'.format(**mirror))
+        return (phases['before_transforms'] + headers +
+                phases['after_headers'] + rewrites + phases['after_rewrite'])
+
+    def _transform_weighted_targets(self, targets, available_pool_ids,
+                                    available_mirror_pool_ids=()):
         intervals = []
         total = 0
         for target in targets:
@@ -1303,11 +1390,19 @@ class JinjaTemplater:
             elif target['pool_id'] in available_pool_ids:
                 interval['pool_id'] = target['pool_id']
                 operations = target.get('request_header_operations', [])
-                request_filters = self._transform_header_operations(
+                headers = self._transform_header_operations(
                     operations, 'request_header_operations')
+                rewrites = []
                 if 'request_url_rewrite' in target:
-                    request_filters.extend(self._transform_request_url_rewrite(
-                        target['request_url_rewrite']))
+                    rewrites = self._transform_request_url_rewrite(
+                        target['request_url_rewrite'])
+                mirrors = self._active_mirrors(
+                    target.get('request_mirrors'), available_mirror_pool_ids)
+                if mirrors:
+                    interval['mirror_pool_ids'] = [
+                        mirror['pool_id'] for mirror in mirrors]
+                request_filters = self._transform_request_pipeline(
+                    headers, rewrites, mirrors)
                 if request_filters:
                     interval['request_filters'] = request_filters
             else:

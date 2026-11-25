@@ -134,6 +134,11 @@ api_opts = [
                        'HTTP deadlines and retries. Enable after upgrading '
                        'the database, API, provider library and workers '
                        'and qualifying all eligible Amphora images.')),
+    cfg.ListOpt('enabled_http_request_mirror_providers', default=[],
+                help=_('Providers whose regional fleets support HTTP request '
+                       'mirroring. Enable after upgrading the database, '
+                       'provider library, API, workers and eligible '
+                       'Amphora images.')),
     cfg.ListOpt('enabled_l7policy_initial_rules_providers', default=[],
                 help=_('Provider driver names that can create a disabled HTTP '
                        'L7 policy with its initial rules in one operation. '
