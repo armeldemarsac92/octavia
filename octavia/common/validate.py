@@ -782,6 +782,34 @@ def _valid_cors_origin(origin):
     return port is None or 1 <= int(port) <= constants.MAX_PORT_NUMBER
 
 
+def backend_retry_budget(budget):
+    """Validate the complete pool-level Service budget without coercion."""
+    bounds = {
+        'budget_percent': (0, 100),
+        'budget_interval_ms': (1000, 3600000),
+        'min_retry_count': (1, 1000000),
+        'min_retry_interval_ms': (1, 3600000),
+    }
+    if (not isinstance(budget, dict) or
+            budget.keys() != (bounds.keys() | {'service_uid'})):
+        raise exceptions.ValidationException(detail=_(
+            'backend_retry_budget requires service_uid, budget_percent, '
+            'budget_interval_ms, min_retry_count and min_retry_interval_ms.'))
+    uid = budget['service_uid']
+    if (not isinstance(uid, str) or
+            not re.fullmatch(r'[A-Za-z0-9._-]{1,128}', uid)):
+        raise exceptions.ValidationException(detail=_(
+            'backend_retry_budget.service_uid is invalid.'))
+    for field, (minimum, maximum) in bounds.items():
+        value = budget[field]
+        if type(value) is not int or not minimum <= value <= maximum:
+            raise exceptions.ValidationException(detail=_(
+                'backend_retry_budget.%(field)s must be an integer from '
+                '%(minimum)s to %(maximum)s.') % {
+                    'field': field, 'minimum': minimum, 'maximum': maximum})
+    return budget
+
+
 def http_request_policy(policy):
     """Validate per-route budgets and retries without coercing JSON values."""
     durations = ('request_timeout_ms', 'backend_request_timeout_ms')

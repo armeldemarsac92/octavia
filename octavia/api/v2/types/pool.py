@@ -71,6 +71,18 @@ class BackendTLSSubjectAltNames(wtypes.UserType):
             raise ValueError(str(error)) from error
 
 
+class BackendRetryBudget(wtypes.UserType):
+    basetype = object
+    name = 'backend_retry_budget'
+
+    @staticmethod
+    def validate(value):
+        try:
+            return validate.backend_retry_budget(value)
+        except exceptions.ValidationException as error:
+            raise ValueError(str(error)) from error
+
+
 class BasePoolType(types.BaseType):
     _type_to_db_map = {'admin_state_up': 'enabled',
                        'healthmonitor': 'health_monitor',
@@ -110,6 +122,7 @@ class PoolResponse(BasePoolType):
     backend_tls_require_h2 = wtypes.wsattr(bool)
     backend_tls_subject_alt_names = wtypes.wsattr(
         BackendTLSSubjectAltNames())
+    backend_retry_budget = wtypes.wsattr(BackendRetryBudget())
     tls_ciphers = wtypes.wsattr(wtypes.StringType())
     tls_versions = wtypes.wsattr(wtypes.ArrayType(wtypes.StringType()))
     alpn_protocols = wtypes.wsattr(wtypes.ArrayType(types.AlpnProtocolType()))
@@ -119,6 +132,8 @@ class PoolResponse(BasePoolType):
         result = super().from_db_obj(db_obj)
         if result.backend_tls_subject_alt_names is None:
             result.backend_tls_subject_alt_names = wtypes.Unset
+        if result.backend_retry_budget is None:
+            result.backend_retry_budget = wtypes.Unset
 
         result.listeners = [
             types.IdOnlyType.from_db_obj(listener)
@@ -210,6 +225,7 @@ class PoolPOST(BasePoolType):
     backend_tls_require_h2 = wtypes.wsattr(bool, default=False)
     backend_tls_subject_alt_names = wtypes.wsattr(
         BackendTLSSubjectAltNames())
+    backend_retry_budget = wtypes.wsattr(BackendRetryBudget())
     tls_ciphers = wtypes.wsattr(wtypes.StringType(max_length=2048))
     tls_versions = wtypes.wsattr(wtypes.ArrayType(wtypes.StringType(
         max_length=32)))
@@ -238,6 +254,7 @@ class PoolPUT(BasePoolType):
     backend_tls_require_h2 = wtypes.wsattr(bool)
     backend_tls_subject_alt_names = wtypes.wsattr(
         BackendTLSSubjectAltNames())
+    backend_retry_budget = wtypes.wsattr(BackendRetryBudget())
     tls_ciphers = wtypes.wsattr(wtypes.StringType(max_length=2048))
     tls_versions = wtypes.wsattr(wtypes.ArrayType(wtypes.StringType(
         max_length=32)))
@@ -271,6 +288,7 @@ class PoolSingleCreate(BasePoolType):
     backend_tls_require_h2 = wtypes.wsattr(bool)
     backend_tls_subject_alt_names = wtypes.wsattr(
         BackendTLSSubjectAltNames())
+    backend_retry_budget = wtypes.wsattr(BackendRetryBudget())
     tls_ciphers = wtypes.wsattr(wtypes.StringType(max_length=2048))
     tls_versions = wtypes.wsattr(wtypes.ArrayType(wtypes.StringType(
         max_length=32)))

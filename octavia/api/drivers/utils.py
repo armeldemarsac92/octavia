@@ -39,6 +39,8 @@ HTTP_REQUEST_REDIRECT_PAYLOAD_AVAILABLE = hasattr(
 REQUEST_URL_REWRITE_PAYLOAD_AVAILABLE = hasattr(
     driver_dm.L7Policy(), 'request_url_rewrite')
 REQUEST_CORS_PAYLOAD_AVAILABLE = hasattr(driver_dm.L7Policy(), 'request_cors')
+BACKEND_RETRY_BUDGET_PAYLOAD_AVAILABLE = hasattr(
+    driver_dm.Pool(), 'backend_retry_budget')
 HTTP_REQUEST_POLICY_PAYLOAD_AVAILABLE = hasattr(
     driver_dm.L7Policy(), 'http_request_policy')
 HTTP_REQUEST_MIRROR_PAYLOAD_AVAILABLE = hasattr(
@@ -112,6 +114,11 @@ def gateway_capabilities(driver):
             driver.name in api_settings.enabled_request_cors_providers and
             getattr(driver, 'supports_request_cors', False) is True):
         capabilities.append(constants.GATEWAY_CAPABILITY_REQUEST_CORS)
+    budget_providers = api_settings.enabled_backend_retry_budget_providers
+    if (BACKEND_RETRY_BUDGET_PAYLOAD_AVAILABLE and
+            driver.name in budget_providers and
+            getattr(driver, 'supports_backend_retry_budget', False) is True):
+        capabilities.append(constants.GATEWAY_CAPABILITY_BACKEND_RETRY_BUDGET)
     policy_providers = api_settings.enabled_http_request_policy_providers
     if (HTTP_REQUEST_POLICY_PAYLOAD_AVAILABLE and
             driver.name in policy_providers and
@@ -306,6 +313,17 @@ def require_request_cors(driver, protocol):
         raise exceptions.ProviderUnsupportedOptionError(
             prov=driver.name, user_msg=_(
                 'L7 policy CORS is unavailable for this provider.'))
+
+
+def require_backend_retry_budget(driver, protocol):
+    if protocol != constants.PROTOCOL_HTTP:
+        raise exceptions.ValidationException(detail=_(
+            'backend_retry_budget requires an HTTP pool.'))
+    if (constants.GATEWAY_CAPABILITY_BACKEND_RETRY_BUDGET not in
+            gateway_capabilities(driver)):
+        raise exceptions.ProviderUnsupportedOptionError(
+            prov=driver.name, user_msg=_(
+                'Backend retry budgets are unavailable for this provider.'))
 
 
 def require_http_request_policy(driver, protocol):
@@ -982,6 +1000,11 @@ def pool_dict_to_provider_dict(pool_dict, for_delete=False, for_update=False):
     if (not BACKEND_TLS_SUBJECT_ALT_NAMES_PAYLOAD_AVAILABLE or
             sans is None or (sans == [] and not for_update)):
         new_pool_dict.pop('backend_tls_subject_alt_names', None)
+
+    if (not BACKEND_RETRY_BUDGET_PAYLOAD_AVAILABLE or
+            (new_pool_dict.get('backend_retry_budget') is None and
+             not for_update)):
+        new_pool_dict.pop('backend_retry_budget', None)
 
     # Pull the certs out of the certificate manager to pass to the provider
     if 'tls_certificate_id' in new_pool_dict:

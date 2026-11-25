@@ -129,6 +129,10 @@ api_opts = [
                 help=_('Providers whose regional fleets support L7 policy '
                        'CORS. Enable after upgrading the database, API, '
                        'provider library, workers and Amphora images.')),
+    cfg.ListOpt('enabled_backend_retry_budget_providers', default=[],
+                help=_('Providers whose regional fleets support Service '
+                       'retry budgets. Enable after upgrading the database, '
+                       'API, provider library, workers and Amphora images.')),
     cfg.ListOpt('enabled_http_request_policy_providers', default=[],
                 help=_('Providers whose regional fleets support per-route '
                        'HTTP deadlines and retries. Enable after upgrading '

@@ -200,8 +200,9 @@ class PoolsController(base.BaseController):
         sans = pool_dict.get('backend_tls_subject_alt_names', [])
         if sans is None:
             validate.backend_tls_subject_alt_names(sans)
+        budget = pool_dict.get('backend_retry_budget')
         if (pool_dict.get('backend_h2c') or hostname is not None or
-                require_h2 or sans):
+                require_h2 or sans or budget is not None):
             if driver is None:
                 # Fully populated load balancer creation uses this path too.
                 provider = self._get_db_lb(
@@ -221,6 +222,10 @@ class PoolsController(base.BaseController):
         if sans:
             _validate_backend_tls_subject_alt_names(
                 driver, pool_dict['protocol'], hostname, enrolling=True)
+
+        if budget is not None:
+            driver_utils.require_backend_retry_budget(
+                driver, pool_dict['protocol'])
 
         # Make sure we have a client CA if they specify a CRL
         if (pool_dict.get('crl_container_id') and
@@ -780,6 +785,10 @@ class PoolsController(base.BaseController):
             current = self.repositories.pool.get_transport_for_update(
                 context.session, id)
             self._validate_backend_transport_update(pool, current, driver)
+            if (pool.backend_retry_budget is not wtypes.Unset and
+                    pool.backend_retry_budget is not None):
+                driver_utils.require_backend_retry_budget(
+                    driver, current.protocol)
             listener_repo = self.repositories.listener
             if (pool.tls_enabled is True or pool.backend_h2c is True or
                     (pool.tags is not wtypes.Unset and

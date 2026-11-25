@@ -1852,8 +1852,11 @@ class TestHaproxyCfg(base.TestCase):
         first_pool, second_pool = listener.pools
         copy_id = '8f388635-d55a-4f89-9937-a7550b72e710'
         unused_id = '8f388635-d55a-4f89-9937-a7550b72e711'
+        budget = dict(service_uid='service-uid', budget_percent=20,
+                      budget_interval_ms=10000, min_retry_count=10,
+                      min_retry_interval_ms=1000)
         copy = SimpleNamespace(**dict(second_pool._asdict(), id=copy_id),
-                               backend_h2c=True)
+                               backend_h2c=True, backend_retry_budget=budget)
         unused = second_pool._replace(id=unused_id)
         mirror = dict(pool_id=copy_id, numerator=7, denominator=13)
         before = dict(mirror, numerator=1, denominator=1,
@@ -1886,9 +1889,15 @@ class TestHaproxyCfg(base.TestCase):
             self.jinja_cfg.build_config(
                 amp, [listener], None, haproxy_versions=['3', '0', '19'],
                 amp_details={})
+        with self.assertRaisesRegex(driver_except.AmpVersionUnsupported,
+                                    'lacks backend retry budget'):
+            self.jinja_cfg.build_config(
+                amp, [listener], None, haproxy_versions=['3', '0', '19'],
+                amp_details={capability: True})
+        retry_budget = constants.GATEWAY_CAPABILITY_BACKEND_RETRY_BUDGET
         rendered = self.jinja_cfg.build_config(
             amp, [listener], None, haproxy_versions=['3', '0', '19'],
-            amp_details={capability: True})
+            amp_details={capability: True, retry_budget: True})
         self.assertEqual(1, rendered.count('filter octavia-mirror'))
         self.assertEqual(1, rendered.count('rand(6)'))
         self.assertNotIn(unused_id, rendered)
@@ -1921,6 +1930,9 @@ class TestHaproxyCfg(base.TestCase):
                       'mode 600 octavia-mirror-socket', private)
         self.assertIn('retries 0', private)
         self.assertIn('http-request disable-l7-retry', private)
+        rule = 'http-request octavia-retry-budget service-uid 20 10000 10 1000'
+        self.assertIn(rule, private)
+        self.assertEqual(1, rendered.count(rule))
         self.assertIn('option abortonclose', private)
         self.assertIn(' proto h2', private)
         self.assertNotIn('http-request octavia-mirror', private)
@@ -2119,6 +2131,27 @@ class TestHaproxyCfg(base.TestCase):
                        'del-header "x-old"'):
             self.assertIn(f'http-request {action} {guard}', backends)
         self.assertEqual(3, backends.count(guard))
+
+    def test_backend_retry_budget_requires_native_amphora_support(self):
+        listener = sample_configs_combined.sample_listener_tuple(proto='HTTP')
+        budget = dict(service_uid='service-uid', budget_percent=20,
+                      budget_interval_ms=10000, min_retry_count=10,
+                      min_retry_interval_ms=1000)
+        pool = SimpleNamespace(**listener.default_pool._asdict(),
+                               backend_retry_budget=budget)
+        listener = listener._replace(default_pool=pool, pools=[pool])
+        amphora = sample_configs_combined.sample_amphora_tuple()
+        version = ['3', '0', '19']
+        self.assertRaises(driver_except.AmpVersionUnsupported,
+                          self.jinja_cfg.build_config, amphora, [listener],
+                          None, version, {})
+        capability = constants.GATEWAY_CAPABILITY_BACKEND_RETRY_BUDGET
+        config = self.jinja_cfg.build_config(
+            amphora, [listener], None, version, {capability: True})
+        _, backend = config.split('\nbackend ', 1)
+        self.assertIn(
+            'http-request octavia-retry-budget service-uid 20 10000 10 1000',
+            backend)
 
     def test_http_request_policy_in_selected_forwarding_backends(self):
         amphora = sample_configs_combined.sample_amphora_tuple()
