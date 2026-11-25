@@ -132,25 +132,29 @@ def _requires_target_filter_capability(previous, targets, expands_scope,
     return False
 
 
-def _expands_grpc_binary_target_metadata(previous, targets, expands_scope):
+def _expanded_target_header_operations(previous, targets, expands_scope,
+                                       *, field, select=None):
+    def operations(target):
+        values = target.get(field) or []
+        return select(values) if select else values
+
     if previous == targets and not expands_scope:
-        return False
+        return
     # Match each retained occurrence once, including when a sibling was
     # removed. An occurrence cannot inherit a wider share of the draw.
     retained = [
-        (draw, validate.grpc_binary_metadata_lists(
-            draw[0].get('request_header_operations')))
+        (draw, operations(draw[0]))
         for draw in _weighted_draws(previous or [])]
     draws = sorted(_weighted_draws(targets or []),
                    key=lambda draw: draw[0]['weight'] == 0)
     for draw in draws:
         target = draw[0]
-        metadata = validate.grpc_binary_metadata_lists(
-            target.get('request_header_operations'))
+        metadata = operations(target)
         if not metadata:
             continue
         if target['weight'] and expands_scope:
-            return True
+            yield metadata
+            continue
         for index, (old, old_metadata) in enumerate(retained):
             same_pool = old[0].get('pool_id') == target.get('pool_id')
             retains_metadata = all(op in old_metadata for op in metadata)
@@ -160,8 +164,7 @@ def _expands_grpc_binary_target_metadata(previous, targets, expands_scope):
                 retained.pop(index)
                 break
         else:
-            return True
-    return False
+            yield metadata
 
 
 def _expands_weighted_forwarding(previous, targets):
@@ -368,6 +371,11 @@ class L7PolicyActivationController(base.BaseController):
             driver_utils.require_grpc_request_metadata(
                 driver, protocol, policy.request_header_operations,
                 policy.targets)
+            driver_utils.require_grpc_target_response_metadata(
+                driver, protocol, policy.targets)
+            for target in policy.targets:
+                validate.validate_grpc_target_response_headers(
+                    target.get('response_header_operations'))
         driver_utils.require_gateway_policy_action(
             driver, policy.action, protocol,
             tcp_tls_termination=listener.tcp_tls_termination,
@@ -634,6 +642,8 @@ class L7PolicyController(base.BaseController):
                     driver, listener.protocol,
                     l7policy_dict.get('request_header_operations'),
                     l7policy_dict.get('targets'))
+                driver_utils.require_grpc_target_response_metadata(
+                    driver, listener.protocol, l7policy_dict.get('targets'))
             db_l7policy = self._validate_create_l7policy(
                 lock_session, l7policy_dict)
             if rules:
@@ -924,16 +934,34 @@ class L7PolicyController(base.BaseController):
                                      old_targets, targets)))
             requires_binary_metadata = (
                 new_binary_ops or binary_forwarding_expanded or
-                _expands_grpc_binary_target_metadata(
-                    old_targets, targets, binary_scope_expanded))
+                any(_expanded_target_header_operations(
+                    old_targets, targets, binary_scope_expanded,
+                    field='request_header_operations',
+                    select=validate.grpc_binary_metadata_lists)))
+            target_response_field = 'response_header_operations'
+            expanded_target_response = list(_expanded_target_header_operations(
+                old_targets, targets, binary_scope_expanded,
+                field=target_response_field))
+            if expanded_target_response:
+                driver_utils.require_weighted_target_response_headers(
+                    driver, listener.protocol)
             if ((requires_binary_metadata or changed_request_ops or
-                 response_ops or updated_targets) and
+                 response_ops or updated_targets or
+                 expanded_target_response) and
                     policy_repo.has_enabled_l7rule(
                         lock_session, constants.L7RULE_TYPE_GRPC_CONTENT_TYPE,
                         policy_id=id)):
                 if requires_binary_metadata:
                     driver_utils.require_grpc_binary_request_metadata(
                         driver, listener.protocol)
+                if any(_expanded_target_header_operations(
+                        old_targets, targets, binary_scope_expanded,
+                        field=target_response_field,
+                        select=validate.grpc_binary_metadata_lists)):
+                    driver_utils.require_grpc_binary_response_metadata(
+                        driver, listener.protocol)
+                for operations in expanded_target_response:
+                    validate.validate_grpc_target_response_headers(operations)
                 # An existing occurrence can retain a legacy literal list.
                 # A duplicate in the new array consumes a separate occurrence.
                 retained = list(old_targets or [])

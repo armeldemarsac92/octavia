@@ -113,6 +113,16 @@ def gateway_capabilities(driver):
                     False) is True):
         capabilities.append(
             constants.GATEWAY_CAPABILITY_RESPONSE_HEADER_OPERATIONS)
+        target_providers = (
+            api_settings.enabled_weighted_target_response_header_providers)
+        if (WEIGHTED_TARGET_PAYLOAD_AVAILABLE and
+                driver.name in target_providers and
+                constants.GATEWAY_CAPABILITY_WEIGHTED_HTTP_TARGETS in
+                capabilities and getattr(
+                    driver, 'supports_weighted_target_response_headers',
+                    False) is True):
+            capabilities.append(
+                constants.GATEWAY_CAPABILITY_WEIGHTED_TARGET_RESPONSE_HEADERS)
     redirect_providers = api_settings.enabled_http_request_redirect_providers
     if (HTTP_REQUEST_REDIRECT_PAYLOAD_AVAILABLE and
             driver.name in redirect_providers and
@@ -570,6 +580,16 @@ def require_weighted_target_request_filters(driver, protocol):
                 'for this provider.'))
 
 
+def require_weighted_target_response_headers(driver, protocol):
+    validate.validate_weighted_l7policy_protocol(protocol)
+    if (constants.GATEWAY_CAPABILITY_WEIGHTED_TARGET_RESPONSE_HEADERS
+            not in gateway_capabilities(driver)):
+        raise exceptions.ProviderUnsupportedOptionError(
+            prov=driver.name, user_msg=_(
+                'Response headers on weighted pool targets are unavailable '
+                'for this provider.'))
+
+
 def require_grpc_binary_request_metadata(driver, protocol):
     validate.validate_header_protocol(protocol)
     if (constants.GATEWAY_CAPABILITY_GRPC_BINARY_REQUEST_METADATA not in
@@ -588,15 +608,44 @@ def require_grpc_request_metadata(driver, protocol, request, targets):
         require_grpc_binary_request_metadata(driver, protocol)
 
 
-def require_no_active_grpc_request_metadata(driver, policy_repo, session,
-                                            *, policy_id, listener_id):
-    if (constants.GATEWAY_CAPABILITY_GRPC_BINARY_REQUEST_METADATA not in
+def require_grpc_binary_response_metadata(driver, protocol):
+    validate.validate_header_protocol(protocol)
+    if (constants.GATEWAY_CAPABILITY_GRPC_BINARY_RESPONSE_METADATA not in
+            gateway_capabilities(driver)):
+        raise exceptions.ProviderUnsupportedOptionError(
+            prov=driver.name, user_msg=_(
+                'Binary gRPC response metadata lists are unavailable for '
+                'this provider.'))
+
+
+def require_grpc_target_response_metadata(driver, protocol, targets):
+    if any(validate.grpc_binary_metadata_lists(
+            target.get('response_header_operations'))
+            for target in targets or []):
+        require_grpc_binary_response_metadata(driver, protocol)
+
+
+def require_no_active_grpc_metadata(driver, policy_repo, session,
+                                    *, policy_id, listener_id):
+    for transform, require in _withdrawn_grpc_metadata(
             gateway_capabilities(driver)):
         for row in policy_repo.get_active_request_transforms(
-                session, transform='grpc_binary_request_metadata',
-                listener_id=listener_id):
+                session, transform=transform, listener_id=listener_id):
             if row.id == policy_id:
-                require_grpc_binary_request_metadata(driver, row.protocol)
+                require(driver, row.protocol)
+
+
+def _withdrawn_grpc_metadata(capabilities):
+    if (constants.GATEWAY_CAPABILITY_GRPC_BINARY_REQUEST_METADATA not in
+            capabilities):
+        yield ('grpc_binary_request_metadata',
+               require_grpc_binary_request_metadata)
+    if (constants.GATEWAY_CAPABILITY_WEIGHTED_TARGET_RESPONSE_HEADERS
+            in capabilities and
+            constants.GATEWAY_CAPABILITY_GRPC_BINARY_RESPONSE_METADATA
+            not in capabilities):
+        yield ('grpc_binary_target_response_metadata',
+               require_grpc_binary_response_metadata)
 
 
 def _withdrawn_request_transforms(driver):
@@ -606,6 +655,10 @@ def _withdrawn_request_transforms(driver):
     if (constants.GATEWAY_CAPABILITY_WEIGHTED_TARGET_FILTERS not in
             capabilities):
         yield 'target_filters', require_weighted_target_request_filters
+    if (constants.GATEWAY_CAPABILITY_WEIGHTED_TARGET_RESPONSE_HEADERS
+            not in capabilities):
+        yield ('target_response_headers',
+               require_weighted_target_response_headers)
     if constants.GATEWAY_CAPABILITY_REQUEST_CORS not in capabilities:
         yield 'request_cors', require_request_cors
     if constants.GATEWAY_CAPABILITY_HTTP_REQUEST_POLICY not in capabilities:
@@ -614,10 +667,7 @@ def _withdrawn_request_transforms(driver):
         yield 'http_retry_backoff', require_http_retry_backoff
     if constants.GATEWAY_CAPABILITY_HTTP_REQUEST_MIRROR not in capabilities:
         yield 'request_mirrors', require_http_request_mirror
-    if (constants.GATEWAY_CAPABILITY_GRPC_BINARY_REQUEST_METADATA not in
-            capabilities):
-        yield ('grpc_binary_request_metadata',
-               require_grpc_binary_request_metadata)
+    yield from _withdrawn_grpc_metadata(capabilities)
 
 
 def require_no_exposed_request_transforms(driver, policy_repo, session,
@@ -915,6 +965,9 @@ def require_gateway_policy_action(driver, action, protocol, *,
             if any(validate.target_request_filters(target)
                    for target in targets or []):
                 require_weighted_target_request_filters(driver, protocol)
+            if any(target.get('response_header_operations')
+                   for target in targets or []):
+                require_weighted_target_response_headers(driver, protocol)
     elif action == constants.L7POLICY_ACTION_REDIRECT_REQUEST:
         validate.validate_http_request_redirect_protocol(protocol)
         require_http_request_redirect(driver)

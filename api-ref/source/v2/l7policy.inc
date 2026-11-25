@@ -225,6 +225,11 @@ capabilities for the timeout and retry semantics.
 The additional ``http_retry_backoff_v1`` capability enables
 ``http_request_policy.retry.backoff_ms`` on these policies.
 
+A provider advertising ``weighted_http_target_response_headers_v1``
+accepts ``response_header_operations`` on individual weighted pool
+targets. Each target's operations apply to upstream responses forwarded
+from that occurrence, followed by the policy-level response operations.
+
 The regional ``http_request_mirror_v1`` capability enables
 ``request_mirrors`` for ``REDIRECT_TO_POOL``, ``WEIGHTED_TARGETS`` and
 ``FIXED_RESPONSE`` policies on HTTP and ``TERMINATED_HTTPS`` listeners.

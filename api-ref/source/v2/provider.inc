@@ -456,6 +456,15 @@ than once with different filters. A target with zero weight does not receive
 requests. A local fixed response or an unavailable target runs no request
 filter.
 
+``weighted_http_target_response_headers_v1`` accepts
+``response_header_operations`` on each weighted ``pool_id`` target.
+Operations use the same format and framing restrictions as the corresponding
+policy field. A response from the selected pool occurrence receives these
+operations before the policy's response operations. Other occurrences of
+that pool do not inherit them. A local error receives the applicable
+policy operations. To clear a target's operations, replace the ordered
+``targets`` list with those operations omitted.
+
 A rule and its filtered target can each rewrite a different part of the URL.
 Two path rewrites, two hostname rewrites, or a hostname rewrite combined
 with an operation on the Host header return HTTP 400. Header operations

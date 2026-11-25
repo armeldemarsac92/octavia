@@ -1072,6 +1072,8 @@ class L7Policy(base_models.BASE, base_models.IdMixin, base_models.ProjectMixin,
             row.status_code = response['status_code'] if response else None
             filters = validate.target_request_filters(target)
             row.request_filters = filters or None
+            row.response_header_operations = target.get(
+                'response_header_operations') or None
         del self._targets[len(targets):]
 
     def __str__(self):
@@ -1105,13 +1107,18 @@ class L7PolicyTarget(base_models.BASE):
         index=True)
     status_code = sa.Column(sa.Integer)
     request_filters = sa.Column(sa.JSON(none_as_null=True))
+    response_header_operations = sa.Column(sa.JSON(none_as_null=True))
     l7policy = orm.relationship("L7Policy", back_populates="_targets")
     pool = orm.relationship("Pool", back_populates="_l7policy_targets")
 
     def as_target(self):
         if self.pool_id is not None:
-            return dict(self.request_filters or {}, weight=self.weight,
-                        pool_id=self.pool_id)
+            target = dict(self.request_filters or {}, weight=self.weight,
+                          pool_id=self.pool_id)
+            if self.response_header_operations:
+                target['response_header_operations'] = (
+                    self.response_header_operations)
+            return target
         return {'weight': self.weight,
                 'fixed_response': {'status_code': self.status_code}}
 
