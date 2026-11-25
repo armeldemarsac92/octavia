@@ -1008,8 +1008,12 @@ class L7Policy(base_models.BASE, base_models.IdMixin, base_models.ProjectMixin,
         if self.redirect_pool is not None:
             pools.append(self.redirect_pool)
         if self.action == constants.L7POLICY_ACTION_WEIGHTED_TARGETS:
-            pools.extend(target.pool for target in self._targets
-                         if target.pool is not None)
+            pools.extend(
+                target.pool for target in self._targets
+                if (target.pool is not None and
+                    target.pool.project_id == self.listener.project_id and
+                    target.pool.load_balancer_id ==
+                    self.listener.load_balancer_id))
         return pools
 
     def _replace_mirrors(self, mirrors, targets, pools):

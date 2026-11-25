@@ -365,15 +365,17 @@ class PoolsController(base.BaseController):
         hostname = (current.backend_tls_hostname
                     if changes.backend_tls_hostname is wtypes.Unset
                     else changes.backend_tls_hostname)
-        identity_changed = hostname != current.backend_tls_hostname
+        ca_ref = (current.ca_tls_certificate_id
+                  if changes.ca_tls_container_ref is wtypes.Unset
+                  else changes.ca_tls_container_ref)
+        identity_changed = (hostname != current.backend_tls_hostname or
+                            (hostname is not None and
+                             ca_ref != current.ca_tls_certificate_id))
         if not (identity_changed or reopening or changes.tls_enabled is True):
             return
         tls_enabled = (current.tls_enabled
                        if changes.tls_enabled is wtypes.Unset
                        else changes.tls_enabled)
-        ca_ref = (current.ca_tls_certificate_id
-                  if changes.ca_tls_container_ref is wtypes.Unset
-                  else changes.ca_tls_container_ref)
         policy_repo = self.repositories.l7policy
         listener_repo = self.repositories.listener
         if reopening and policy_repo.get_policy_using_pool(
@@ -394,6 +396,10 @@ class PoolsController(base.BaseController):
                 hostname=hostname, ca_ref=ca_ref)
             if reopening:
                 driver_utils.require_tcp_tls_termination(driver)
+            if ((reopening or identity_changed) and
+                    policy_repo.has_active_tls_sni_weighted_pool(
+                        session, pool_id)):
+                driver_utils.require_tls_sni_weighted_pools(driver)
 
         if hostname is not None and (identity_changed or reopening):
             if (listener_repo.has_default_pool_listener(

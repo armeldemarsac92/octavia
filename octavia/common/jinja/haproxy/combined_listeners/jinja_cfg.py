@@ -343,6 +343,12 @@ class JinjaTemplater:
                 not versionutils.is_compatible("2.2.0", haproxy_version,
                                                same_major=False)):
             for listener in loadbalancer['listeners']:
+                if listener['enabled'] and any(
+                        policy.get('tcp_weighted_targets')
+                        for policy in listener['l7policies']):
+                    raise driver_except.AmpVersionUnsupported(
+                        version=f'HAProxy {haproxy_version}; weighted TLS SNI '
+                                'pools require 2.2')
                 if listener['enabled'] and (
                         'default_http_status_code' in listener or any(
                             'fixed_http_status_code' in policy
@@ -778,9 +784,13 @@ class JinjaTemplater:
                 ret_value['hsts_directives'] = hsts_directives
 
         pools = []
+        tcp_weighted_pool_ids = set()
         pool_gen = (pool for pool in listener.pools if
                     pool.provisioning_status != constants.PENDING_DELETE)
         for pool in pool_gen:
+            if (tcp_tls_termination and
+                    pool.protocol != constants.PROTOCOL_TCP):
+                continue
             pool_certs = (tls_certs or {}).get(pool.id)
             hostname = getattr(pool, 'backend_tls_hostname', None)
             if tcp_tls_termination and active and pool.enabled:
@@ -802,6 +812,14 @@ class JinjaTemplater:
                 # Keep the matched route closed without falling back.
                 rendered_pool['closed'] = True
             pools.append(rendered_pool)
+            if (tcp_tls_termination and
+                    getattr(pool, 'load_balancer_id', None) ==
+                    loadbalancer.id and
+                    getattr(pool, 'project_id', None) ==
+                    listener.project_id and
+                    pool.provisioning_status != constants.DELETED and
+                    isinstance(pool.tls_enabled, bool)):
+                tcp_weighted_pool_ids.add(pool.id)
         ret_value['pools'] = pools
         https_sections = None
         if listener.https_virtual_hosts is not None:
@@ -844,17 +862,41 @@ class JinjaTemplater:
         configured_mirror_pool_ids = set()
         if listener.protocol == constants.PROTOCOL_TCP:
             policy_gen = (policy for policy in policy_gen
-                          if self._is_routable_sni_policy(
-                              policy, available_pool_ids,
-                              tcp_tls_termination) and
-                          (mixed_mode or not getattr(
-                              policy, 'tcp_tls_passthrough', False)))
+                          if (policy.action ==
+                              constants.L7POLICY_ACTION_WEIGHTED_TARGETS or
+                              (self._is_routable_sni_policy(
+                                  policy, available_pool_ids,
+                                  tcp_tls_termination) and
+                               (mixed_mode or not getattr(
+                                   policy, 'tcp_tls_passthrough', False)))))
         else:
             policy_gen = (policy for policy in policy_gen if not any(
                 rule.enabled and rule.type == constants.L7RULE_TYPE_TLS_SNI
                 for rule in policy.l7rules))
         l7policies = []
         for policy in policy_gen:
+            if (listener.protocol == constants.PROTOCOL_TCP and
+                    policy.action ==
+                    constants.L7POLICY_ACTION_WEIGHTED_TARGETS):
+                if not policy.enabled or policy.provisioning_status in (
+                        constants.PENDING_DELETE, constants.DELETED):
+                    continue
+                rules = self._active_l7rules(policy)
+                if not rules:
+                    continue
+                if not all(validate.is_tls_sni_rule(rule) for rule in rules):
+                    # An unreadable selector has no safe hostname scope.
+                    ret_value['enabled'] = False
+                    continue
+                transformed = self._transform_tls_sni_weighted_policy(
+                    policy, rules, tcp_tls_termination,
+                    tcp_weighted_pool_ids & available_pool_ids,
+                    feature_compatibility)
+                l7policies.append(transformed)
+                primary_pool_ids.update(
+                    target.get('pool_id')
+                    for target in transformed['tcp_weighted_targets'])
+                continue
             hostname = policy.https_listener_hostname
             if https_sections is None:
                 if hostname is not None:
@@ -902,8 +944,9 @@ class JinjaTemplater:
             if tcp_tls_termination:
                 pools_by_id = {pool['id']: pool for pool in pools}
                 for policy in l7policies:
-                    pool_id = policy['redirect_pool']['id']
-                    policy['redirect_pool'] = pools_by_id[pool_id]
+                    if policy['redirect_pool']:
+                        pool_id = policy['redirect_pool']['id']
+                        policy['redirect_pool'] = pools_by_id[pool_id]
             if mixed_mode or (l7policies and not tcp_tls_termination):
                 ret_value['inspect_tls_sni'] = True
                 if not ret_value['timeout_tcp_inspect']:
@@ -911,9 +954,11 @@ class JinjaTemplater:
                         constants.DEFAULT_TLS_SNI_INSPECT_TIMEOUT)
         if mixed_mode:
             ret_value['mixed_tls_termination'] = any(
-                not policy['tcp_tls_passthrough'] for policy in l7policies)
+                not policy['tcp_tls_passthrough'] and
+                policy.get('tcp_weighted_targets') != []
+                for policy in l7policies)
             ret_value['mixed_tls_reject'] = any(
-                policy['tcp_tls_passthrough'] and
+                policy['redirect_pool'] and policy['tcp_tls_passthrough'] and
                 (policy['redirect_pool']['tls_enabled'] or
                  policy['redirect_pool'].get('backend_tls_hostname'))
                 for policy in l7policies)
@@ -1382,6 +1427,45 @@ class JinjaTemplater:
             (0, 0) if rule['compare_type'] == exact
             else (1, -len(rule['value']))
             for rule in policy['l7rules'])
+
+    def _transform_tls_sni_weighted_policy(self, policy, rules,
+                                           tcp_tls_termination,
+                                           available_pool_ids,
+                                           feature_compatibility):
+        passthrough = getattr(policy, 'tcp_tls_passthrough', False)
+        rendered = {
+            'id': policy.id,
+            'action': policy.action,
+            'enabled': True,
+            'redirect_pool': None,
+            'tcp_tls_passthrough': passthrough is True,
+            'l7rules': [self._transform_l7rule(rule, feature_compatibility)
+                        for rule in rules],
+            'tcp_weighted_targets': [],
+        }
+        if any(getattr(policy, field, None) is not None for field in (
+                'redirect_pool', 'redirect_pool_id', 'redirect_url',
+                'redirect_prefix', 'redirect_http_code', 'redirect_request',
+                'fixed_response', 'request_url_rewrite', 'request_cors',
+                'http_request_policy', 'https_listener_hostname')) or any(
+                    getattr(policy, field, None) for field in (
+                        'request_header_operations',
+                        'response_header_operations', 'request_mirrors')):
+            return rendered
+        try:
+            validate.validate_tls_sni_weighted_policy(
+                tcp_tls_termination, passthrough)
+            targets = validate.tls_sni_weighted_targets(policy.targets)
+        except (exceptions.InvalidL7PolicyArgs, exceptions.ValidationException,
+                TypeError, ValueError):
+            # Keep the match and close it ahead of any less specific route.
+            return rendered
+        intervals, total = self._transform_weighted_targets(
+            targets, available_pool_ids)
+        for interval in intervals:
+            interval.pop('status_code', None)
+        rendered.update(tcp_weighted_targets=intervals, total_weight=total)
+        return rendered
 
     def _transform_l7policy(self, l7policy, feature_compatibility,
                             listener_tls_enabled, tls_certs=None,

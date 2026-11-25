@@ -326,7 +326,7 @@ def is_tls_sni_rule(rule):
         return is_exact_sni_name(rule.value)
     if rule.compare_type == constants.L7RULE_COMPARE_TYPE_ENDS_WITH:
         value = rule.value
-        return (bool(value) and len(value) <= 253 and
+        return (isinstance(value, str) and len(value) <= 253 and
                 value.startswith('*.') and is_exact_sni_name(value[2:]))
     return False
 
@@ -337,6 +337,22 @@ def validate_tcp_tls_backend_listener(tcp_tls_termination, protocol, hostname):
         raise exceptions.ValidationException(detail=_(
             'A TCP pool with backend TLS hostname authentication requires '
             'a TCP listener that terminates TLS.'))
+
+
+def validate_tls_sni_weighted_policy(tcp_tls_termination, passthrough):
+    if tcp_tls_termination is not True or passthrough is not False:
+        raise exceptions.ValidationException(detail=_(
+            'Weighted TLS SNI pools require TLS termination on a TCP '
+            'listener with tcp_tls_passthrough set to false.'))
+
+
+def tls_sni_weighted_targets(targets):
+    if (not isinstance(targets, list) or
+            any(not isinstance(target, dict) or
+                target.keys() != {'pool_id', 'weight'} for target in targets)):
+        raise exceptions.InvalidL7PolicyArgs(msg=_(
+            'A weighted TLS SNI target requires only pool_id and weight.'))
+    return weighted_l7policy_targets(targets)
 
 
 def validate_tcp_tls_mixed_default_pool(pool):

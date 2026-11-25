@@ -160,6 +160,7 @@ def validate_policy_options_on_create(
         driver_utils.require_gateway_policy_action(
             driver, checked['action'], protocol,
             tcp_tls_termination=tcp_tls_termination,
+            tcp_tls_passthrough=passthrough,
             request_url_rewrite=checked.get('request_url_rewrite'),
             targets=checked.get('targets'),
             request_cors=checked.get('request_cors'),
@@ -836,6 +837,15 @@ class ListenersController(base.BaseController):
                     session, listener_id=listener.id,
                     tcp_tls_passthrough=True)):
                 driver_utils.require_tls_sni_suffix(driver)
+            policies = policy_repo.get_active_tls_sni_weighted_policies(
+                session, listener.id)
+            if policies:
+                driver_utils.require_tls_sni_weighted_pools(driver)
+                for policy in policies:
+                    driver_utils.validate_tcp_policy_targets(
+                        driver, policy_repo, session, listener, policy.action,
+                        policy.redirect_pool_id, policy.targets,
+                        policy.tcp_tls_passthrough, active_targets_only=True)
             for pool in policy_repo.get_active_protected_tcp_policy_pools(
                     session, listener.id):
                 driver_utils.validate_tcp_pool_attachment(
@@ -1066,6 +1076,11 @@ class ListenersController(base.BaseController):
                 policies = policy_repo.get_enabled_gateway_policies(
                     context.session, id, db_listener.protocol)
                 for action, request_ops, response_ops in policies:
+                    if (db_listener.tcp_tls_termination and action ==
+                            constants.L7POLICY_ACTION_WEIGHTED_TARGETS):
+                        # The TCP reopening path checks active SNI rules
+                        # together with the target pools.
+                        continue
                     driver_utils.require_gateway_policy_action(
                         driver, action, db_listener.protocol,
                         request_header_operations=request_ops,

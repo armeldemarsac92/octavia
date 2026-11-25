@@ -196,6 +196,9 @@ operation. The policy and rules are written in one transaction. The response
 contains the policy and rule IDs. Before enabling the policy with PUT, read
 back the policy and its rule list, confirm that both the policy and every rule
 are ``ACTIVE``, and verify that the full rule set matches the intended scope.
+This workflow also applies to a weighted TLS SNI policy when the provider
+advertises both ``l7policy_initial_rules_v1`` and
+``tls_sni_weighted_pools_v1``.
 
 L7 policies with ``action`` of ``REDIRECT_TO_URL`` will return the default HTTP
 ``Found (302)`` response code with the ``redirect_url``. Also, specify
@@ -246,6 +249,29 @@ TLS SNI rule API. Exact matches precede suffix matches. Longer suffixes
 precede shorter suffixes, and policy position resolves equal specificity.
 For passthrough, the redirect pool must use TCP with ``tls_enabled`` set
 to ``false``.
+
+On the terminating side of a TCP TLS listener, a provider advertising
+``tls_sni_weighted_pools_v1`` accepts ``WEIGHTED_TARGETS`` with
+``TLS_SNI`` rules and ``targets`` containing ``pool_id`` and ``weight``.
+Create the load balancer, listener and TCP pools before posting the policy.
+This policy body uses the IDs of the existing resources.
+
+.. code-block:: json
+
+   {
+     "l7policy": {
+       "listener_id": "c3c67fd7-81aa-4ca6-9055-935b0992b387",
+       "action": "WEIGHTED_TARGETS",
+       "targets": [
+         {"pool_id": "e8837dc3-1c24-4551-98ac-69fe761a6e1d", "weight": 3},
+         {"pool_id": "a1ea9c02-0862-4860-b0bf-3ccac32f7255", "weight": 1}
+       ]
+     }
+   }
+
+Each fresh connection that matches the winning policy draws one target.
+Connections assigned to an unavailable target close. A broader SNI policy or
+the listener's default pool cannot take that target's share.
 
 .. rest_status_code:: success ../http-status.yaml
 

@@ -172,7 +172,13 @@ class MemberController(base.BaseController):
             capabilities and self.repositories.l7policy.get_policy_using_pool(
                 session, pool.id, tcp_tls_termination=None,
                 tcp_tls_mixed_mode=True))
-        if not (backend_auth_withdrawn or mixed_mode_withdrawn):
+        weighted_pools_withdrawn = (
+            constants.GATEWAY_CAPABILITY_TLS_SNI_WEIGHTED_POOLS not in
+            capabilities and
+            self.repositories.l7policy.has_active_tls_sni_weighted_pool(
+                session, pool.id))
+        if not (backend_auth_withdrawn or mixed_mode_withdrawn or
+                weighted_pools_withdrawn):
             return
         member_ids = [member_id for member_id, _ in changes if member_id]
         current = self.repositories.member.get_routing_for_update(
@@ -200,6 +206,8 @@ class MemberController(base.BaseController):
                     driver_utils.require_tcp_tls_backend_auth(driver)
                 if mixed_mode_withdrawn:
                     driver_utils.require_tcp_tls_mixed_mode(driver)
+                if weighted_pools_withdrawn:
+                    driver_utils.require_tls_sni_weighted_pools(driver)
 
     def _validate_create_member(self, lock_session, member_dict):
         """Validate creating member on pool."""
