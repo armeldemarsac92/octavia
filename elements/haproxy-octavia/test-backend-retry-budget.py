@@ -14,6 +14,7 @@
 """Exercise shared retry admission with HTTP traffic on loopback."""
 
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from http.client import HTTPConnection
 from http.server import BaseHTTPRequestHandler
 from http.server import ThreadingHTTPServer
@@ -31,6 +32,7 @@ import unittest
 class Origin(BaseHTTPRequestHandler):
     calls = Counter()
     mirror_delivered = Event()
+    delayed_response = Event()
 
     def log_message(self, *args):
         pass
@@ -40,8 +42,12 @@ class Origin(BaseHTTPRequestHandler):
         key = ('mirrored', self.path) if mirrored else self.path
         self.calls[key] += 1
         status = 200 if self.path.startswith('/ok-') else 500
+        if self.path == '/wait' and self.calls[key] > 1:
+            status = 200
         self.send_response(status)
         self.end_headers()
+        if self.path == '/wait' and status == 500:
+            self.delayed_response.set()
         if mirrored:
             self.mirror_delivered.set()
 
@@ -77,6 +83,7 @@ frontend ingress
     bind 127.0.0.1:{self.port}
     filter octavia-mirror {directory.name}
     http-request octavia-mirror {mirror_pool} 1 1 if {{ path_beg /copy- }}
+    use_backend delayed if {{ path /wait /ok-neighbor }}
     use_backend wide if {{ path_beg /ok- /wide- }}
     use_backend copy_target if {{ path_beg /mirror-target }}
     use_backend source if {{ path_beg /copy- }}
@@ -97,6 +104,11 @@ listen octavia-mirror-{mirror_pool}
 backend source
     retries 0
     server origin 127.0.0.1:{origin.server_port}
+
+backend delayed
+    timeout queue 200ms
+    http-request octavia-http-policy 1800 500 1 500 600 if {{ path /wait }}
+    server origin 127.0.0.1:{origin.server_port} maxconn 1
 """ + ''.join(
             f'\nbackend {pool}\n{budget}'
             '    http-request octavia-http-policy default default 3 500\n'
@@ -183,6 +195,16 @@ backend source
         self.assertEqual(3, Origin.calls['/mirror-target'])
         for path in paths:
             self.assertEqual(1, Origin.calls['mirrored', path])
+
+    def test_retry_wait_releases_server_for_neighbor(self):
+        Origin.delayed_response.clear()
+        with ThreadPoolExecutor(max_workers=1) as requests:
+            retried = requests.submit(self.get, '/wait')
+            self.assertTrue(Origin.delayed_response.wait(timeout=1))
+            self.assertEqual(200, self.get('/ok-neighbor'))
+            self.assertEqual(200, retried.result(timeout=2))
+        self.assertEqual(1, Origin.calls['/ok-neighbor'])
+        self.assertEqual(2, Origin.calls['/wait'])
 
 
 if __name__ == '__main__':

@@ -1130,7 +1130,9 @@ l7policy-http-request-policy:
   description: |
     Deadlines and retries for the selected HTTP forwarding policy.
     The optional fields are ``request_timeout_ms``,
-    ``backend_request_timeout_ms`` and ``retry``. Omit the field in an
+    ``backend_request_timeout_ms`` and ``retry``. With the
+    ``http_retry_backoff_v1`` capability, ``retry`` also accepts
+    ``backoff_ms``. Omit the policy field in an
     update to preserve it or send ``null`` to clear it. Responses omit
     the field when it has no stored value.
   in: body

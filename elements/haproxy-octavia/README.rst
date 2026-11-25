@@ -16,9 +16,9 @@ Build the binary on the target image distribution and architecture::
         /path/to/haproxy-3.0.19.tar.gz /path/to/haproxy
 
 The script checks the HAProxy 3.0.19 tarball and each patch by SHA-256. It
-applies the strict DNS, required HTTP/2 ALPN, explicit SAN, HTTP policy and
-HTTP mirror and listener authorization patches, in that order, with zero
-fuzz.
+applies the strict DNS, required HTTP/2 ALPN, explicit SAN, HTTP policy,
+HTTP mirror, listener authorization, retry budget and route retry backoff
+patches, in that order, with zero fuzz.
 
 Set ``DIB_OCTAVIA_HAPROXY_BINARY`` to the absolute path of the resulting binary
 when running Octavia's ``diskimage-create.sh``. The element checks the binary in
@@ -93,7 +93,7 @@ HTTP request budgets and retries
 
 The combined binary exposes this HTTP request action for a matched rule::
 
-    http-request octavia-http-policy <request-ms> <backend-ms> <retries> <codes> if ...
+    http-request octavia-http-policy <request-ms> <backend-ms> <retries> <codes> [<backoff-ms>] if ...
 
 Each of the first three arguments accepts a decimal literal or ``default``.
 Duration literals are signed 64-bit milliseconds. Zero explicitly disables a
@@ -111,6 +111,13 @@ The other accepted values are comma-separated selections of 500, 502, 503 and
 HTTP/2 REFUSED_STREAM and expiration of an attempt before final headers. A
 request deadline takes precedence over further attempts. A zero count disables
 retries.
+
+The optional fifth argument sets a fixed delay from each retryable failure to
+the next attempt. It accepts a nonnegative 64-bit signed millisecond value.
+An explicit zero starts the retry immediately. Omission or ``default`` uses
+HAProxy's native timing. The request deadline runs during the delay and can
+end the request before the next attempt. The backend deadline starts anew with
+the first request bytes of that attempt.
 
 Replaying an already-sent request requires a complete request in HAProxy's
 replay buffer. This also applies to a small body if its last bytes arrive after
@@ -213,6 +220,10 @@ process. It applies to connection retries and replayable HTTP retries
 already selected by the backend or its per-route request policy. The
 proxy returns 503 when a retry would exceed both configured allowances.
 Each Amphora process keeps its own history.
+When a route sets a positive retry delay, the backend slot is released during
+the wait. The budget admits and counts a retry once it has left any backend
+queue and is about to connect. An expiry during the delay or in the queue
+leaves the budget available for other requests.
 
 Run the loopback checks with the patched binary::
 

@@ -22,7 +22,7 @@ from octavia.db import models as db_models
 class AmphoraLoadBalancerDriver(metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def update_amphora_listeners(self, loadbalancer, amphora,
-                                 timeout_dict):
+                                 timeout_dict, *, finalizing_failover=False):
         """Update the amphora with a new configuration.
 
         :param loadbalancer: List of listeners to update.
@@ -34,6 +34,8 @@ class AmphoraLoadBalancerDriver(metaclass=abc.ABCMeta):
                              req_read_timeout, conn_max_retries,
                              conn_retry_interval
         :type timeout_dict: dict
+        :param finalizing_failover: Require successful HTTP retry backoff
+                                    configuration on the replacement.
         :returns: None
 
         Builds a new configuration, pushes it to the amphora, and reloads
