@@ -553,7 +553,7 @@ class HaproxyAmphoraLoadBalancerDriver(
                         loadbalancer, listeners_to_update, tracing_targets,
                         backend_tls_certs or {}, amp_details,
                         system_ca_results)
-                    self._record_staged_grpc_system_ca(
+                    self._record_staged_auth_system_ca(
                         loadbalancer, listeners_to_update,
                         backend_tls_certs or {}, amp_details,
                         system_ca_results)
@@ -943,7 +943,7 @@ class HaproxyAmphoraLoadBalancerDriver(
                 consts.GATEWAY_OTLP_COLLECTOR_POOL_TAG in (pool.tags or ()))
 
     @classmethod
-    def _grpc_auth_listeners(cls, loadbalancer, listeners):
+    def _external_auth_listeners(cls, loadbalancer, listeners, protocol):
         result = {}
         if not loadbalancer.enabled:
             return result
@@ -956,7 +956,8 @@ class HaproxyAmphoraLoadBalancerDriver(
                         policy.provisioning_status not in (
                             consts.PENDING_DELETE, consts.DELETED) and
                         isinstance(auth, dict) and
-                        auth.get('protocol') == 'GRPC' and
+                        auth.get('protocol', consts.PROTOCOL_HTTP) ==
+                        protocol and
                         isinstance(auth.get('pool_id'), str) and
                         policy.project_id == listener.project_id ==
                         loadbalancer.project_id):
@@ -969,10 +970,12 @@ class HaproxyAmphoraLoadBalancerDriver(
         opted_in = system_ca
         pools = {}
         collector_frontend = None
-        grpc_frontend = None
+        auth_frontend = None
         collector_listeners = {}
-        grpc_auth_listeners = cls._grpc_auth_listeners(
-            loadbalancer, loadbalancer.listeners)
+        grpc_auth_listeners = cls._external_auth_listeners(
+            loadbalancer, loadbalancer.listeners, 'GRPC')
+        http_auth_listeners = cls._external_auth_listeners(
+            loadbalancer, loadbalancer.listeners, consts.PROTOCOL_HTTP)
         for listener in loadbalancer.listeners:
             if listener.protocol in consts.LVS_PROTOCOLS:
                 continue
@@ -988,26 +991,28 @@ class HaproxyAmphoraLoadBalancerDriver(
             if system_ca and cls._is_live_http_listener(listener):
                 # The Gateway can hold the first listener disabled until
                 # its authorizer has a verified trust bundle.
-                grpc_frontend = grpc_frontend or listener
+                auth_frontend = auth_frontend or listener
                 if listener.enabled:
                     collector_frontend = collector_frontend or listener
                     tracing = getattr(listener, 'otlp_tracing', None)
                     if isinstance(tracing, dict):
                         collector_listeners[tracing.get(
                             'collector_pool_id')] = listener
-        if grpc_auth_listeners:
-            for pool in loadbalancer.pools:
+        for pool in loadbalancer.pools:
+            tags = getattr(pool, 'tags', None) or ()
+            listener = None
+            if consts.GATEWAY_GRPC_AUTH_POOL_TAG in tags:
                 listener = grpc_auth_listeners.get(pool.id)
-                if (listener and pool.tls_enabled and pool.enabled and
-                        pool.project_id == loadbalancer.project_id and
-                        pool.load_balancer_id == loadbalancer.id and
-                        consts.GATEWAY_GRPC_AUTH_POOL_TAG in
-                        (pool.tags or ()) and
-                        pool.provisioning_status not in (
-                            consts.PENDING_DELETE, consts.DELETED)):
-                    opted_in = True
-                    pools.setdefault(pool.id, (listener, pool))
-        if grpc_frontend is not None and loadbalancer.enabled:
+            elif consts.GATEWAY_HTTP_AUTH_TLS_POOL_TAG in tags:
+                listener = http_auth_listeners.get(pool.id)
+            if (listener and pool.tls_enabled and pool.enabled and
+                    pool.project_id == loadbalancer.project_id and
+                    pool.load_balancer_id == loadbalancer.id and
+                    pool.provisioning_status not in (
+                        consts.PENDING_DELETE, consts.DELETED)):
+                opted_in = True
+                pools.setdefault(pool.id, (listener, pool))
+        if auth_frontend is not None and loadbalancer.enabled:
             for pool in loadbalancer.pools:
                 system_trust = getattr(pool, 'backend_tls_system_ca', False)
                 if (system_trust is not True or not pool.enabled or
@@ -1021,32 +1026,47 @@ class HaproxyAmphoraLoadBalancerDriver(
                         collector_listeners.get(pool.id, collector_frontend),
                         pool))
                 elif (pool.project_id == loadbalancer.project_id and
-                      pool.load_balancer_id == loadbalancer.id and
-                      listener_request_filters.valid_pool(pool, 'GRPC')):
-                    pools.setdefault(pool.id, (grpc_frontend, pool))
+                      pool.load_balancer_id == loadbalancer.id):
+                    protocol = (
+                        consts.PROTOCOL_HTTP
+                        if listener_request_filters.is_http_tls_authorizer(
+                            pool) else 'GRPC')
+                    if listener_request_filters.valid_pool(
+                            pool, protocol, rule=True):
+                        pools.setdefault(pool.id, (auth_frontend, pool))
         return opted_in, pools
 
     @classmethod
-    def _record_staged_grpc_system_ca(cls, lb, listeners, certs, details,
+    def _record_staged_auth_system_ca(cls, lb, listeners, certs, details,
                                       results):
-        cap = consts.GATEWAY_CAPABILITY_L7POLICY_GRPC_EXTERNAL_AUTH
-        if (not lb.enabled or (details or {}).get(cap) is not True or
-                not any(cls._is_live_http_listener(listener)
-                        for listener in listeners)):
+        if not lb.enabled or not any(cls._is_live_http_listener(listener)
+                                     for listener in listeners):
             return
-        attached = cls._grpc_auth_listeners(lb, listeners)
-        for pool in lb.pools:
-            digest = certs.get(pool.id, {}).get('system_ca_sha256')
-            if (digest and pool.id not in attached and pool.enabled and
-                    pool.provisioning_status not in (
-                        consts.PENDING_DELETE, consts.DELETED) and
-                    pool.project_id == lb.project_id and
-                    pool.load_balancer_id == lb.id and
-                    getattr(pool, 'backend_tls_system_ca', False) is True and
-                    listener_request_filters.valid_pool(pool, 'GRPC')):
-                # An empty detached authorizer waits for this acknowledgement
-                # before the controller attaches its first policy and members.
-                results[pool.id] = digest
+        grpc_cap = consts.GATEWAY_CAPABILITY_L7POLICY_GRPC_EXTERNAL_AUTH
+        profiles = (
+            ('GRPC', consts.GATEWAY_GRPC_AUTH_POOL_TAG,
+             (details or {}).get(grpc_cap) is True),
+            (consts.PROTOCOL_HTTP, consts.GATEWAY_HTTP_AUTH_TLS_POOL_TAG,
+             jinja_combo.http_auth_tls_supported(lb, details)),
+        )
+        for protocol, tag, supported in profiles:
+            if not supported:
+                continue
+            attached = cls._external_auth_listeners(lb, listeners, protocol)
+            for pool in lb.pools:
+                digest = certs.get(pool.id, {}).get('system_ca_sha256')
+                if (digest and pool.id not in attached and pool.enabled and
+                        pool.provisioning_status not in (
+                            consts.PENDING_DELETE, consts.DELETED) and
+                        pool.project_id == lb.project_id and
+                        pool.load_balancer_id == lb.id and
+                        tag in (getattr(pool, 'tags', None) or ()) and
+                        getattr(pool, 'backend_tls_system_ca', False) is
+                        True and listener_request_filters.valid_pool(
+                            pool, protocol, rule=True)):
+                    # A detached authorizer needs an acknowledgement before
+                    # the controller attaches its first policy and members.
+                    results[pool.id] = digest
 
     @classmethod
     def _record_staged_otlp_system_ca(
@@ -1255,6 +1275,9 @@ class HaproxyAmphoraLoadBalancerDriver(
                 system_ca_pools.add(pool_id)
                 required.append(
                     consts.GATEWAY_CAPABILITY_BACKEND_TLS_SYSTEM_CA)
+            if listener_request_filters.is_http_tls_authorizer(pool):
+                required.append(
+                    consts.GATEWAY_CAPABILITY_LISTENER_REQUEST_FILTERS)
             if pool.protocol == consts.PROTOCOL_TCP:
                 required.append(consts.GATEWAY_CAPABILITY_TCP_TLS_BACKEND_AUTH)
             if getattr(pool, 'backend_tls_require_h2', False) is True:

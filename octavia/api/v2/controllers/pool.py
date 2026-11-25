@@ -292,6 +292,18 @@ class PoolsController(base.BaseController):
             validate.backend_tls_subject_alt_names(sans)
         budget = pool_dict.get('backend_retry_budget')
         persistence = pool_dict.get('session_persistence')
+        tls_authorizer = constants.GATEWAY_HTTP_AUTH_TLS_POOL_TAG in (
+            pool_dict.get('tags') or ())
+        if tls_authorizer:
+            if listener_id:
+                listener_request_filters.require_non_http_tls_authorizer(
+                    pool_dict['tags'])
+            if not listener_request_filters.valid_pool(
+                    data_models.Pool(protocol=pool_dict['protocol']),
+                    tags=pool_dict['tags'], changes=pool_dict, rule=True):
+                raise exceptions.ValidationException(detail=_(
+                    'An HTTP TLS authorizer pool requires verified '
+                    'HTTP/1.1 over TLS and its own authorization role.'))
         named_http_cookie = _has_named_http_cookie(persistence)
         http_header_persistence = persistence and (
             persistence.get('type') ==
@@ -309,12 +321,15 @@ class PoolsController(base.BaseController):
         if (pool_dict.get('backend_h2c') or hostname is not None or
                 system_ca or require_h2 or sans or budget is not None or
                 named_http_cookie or custom_cookie_path or
-                http_header_persistence):
+                http_header_persistence or tls_authorizer):
             if driver is None:
                 # Fully populated load balancer creation uses this path too.
                 provider = self._get_db_lb(
                     lock_session, pool_dict['load_balancer_id']).provider
                 driver = driver_factory.get_driver(provider)
+        if tls_authorizer:
+            driver_utils.require_l7policy_http_external_auth_tls(
+                driver, constants.PROTOCOL_HTTP)
         if pool_dict.get('backend_h2c'):
             _validate_backend_h2c(driver, pool_dict['protocol'],
                                   pool_dict['tls_enabled'], enrolling=True)
@@ -826,20 +841,21 @@ class PoolsController(base.BaseController):
                 'tags', 'tls_enabled', 'backend_h2c',
                 'backend_tls_require_h2', 'backend_tls_hostname',
                 'ca_tls_certificate_id', 'backend_tls_system_ca',
-                'alpn_protocols'}:
+                'crl_container_id', 'alpn_protocols'}:
             return
+        previous_tags = self.repositories.pool.get_tags_for_update(
+            session, pool_id)
+        tags = changes.get('tags', previous_tags) or ()
+        role = constants.GATEWAY_HTTP_AUTH_TLS_POOL_TAG
+        if (role in previous_tags) != (role in tags):
+            raise exceptions.ValidationException(detail=_(
+                'The HTTP TLS authorizer role is set when the pool is '
+                'created.'))
         listener_id = (self.repositories.listener
                        .get_request_filter_listener_using_pool(
                            session, pool_id))
         policies = (self.repositories.l7policy
                     .get_external_auth_policies_using_pool(session, pool_id))
-        if not listener_id and not policies:
-            return
-        tags = changes.get('tags')
-        if 'tags' not in changes:
-            tags = self.repositories.pool.get_tags_for_update(
-                session, pool_id)
-        tags = tags or ()
         if listener_id and not listener_request_filters.valid_pool(
                 current, tags=tags, changes=changes):
             raise exceptions.PoolInUseByListenerRequestFilter(
@@ -848,9 +864,15 @@ class PoolsController(base.BaseController):
             protocol = ('GRPC' if validate.is_grpc_external_auth(
                 policy.external_auth) else constants.PROTOCOL_HTTP)
             if not listener_request_filters.valid_pool(
-                    current, protocol=protocol, tags=tags, changes=changes):
+                    current, protocol=protocol, tags=tags, changes=changes,
+                    rule=True):
                 raise exceptions.PoolInUseByL7Policy(
                     id=pool_id, l7policy_id=policy.l7policy_id)
+        if role in tags and not listener_request_filters.valid_pool(
+                current, tags=tags, changes=changes, rule=True):
+            raise exceptions.ValidationException(detail=_(
+                'An HTTP TLS authorizer pool requires verified '
+                'HTTP/1.1 over TLS and its own authorization role.'))
 
     def _validate_pool_persistence_update(self, session, pool_id, pool,
                                           current, driver):
