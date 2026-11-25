@@ -42,12 +42,14 @@ class AmphoraLoadBalancerDriver(metaclass=abc.ABCMeta):
 
     @abc.abstractmethod
     def update(self, loadbalancer, *, l7policy_activation=False,
-               l7policy_restoration=False):
+               l7policy_restoration=False, tcp_member_batch=False):
         """Update the amphora with a new configuration.
 
         :param loadbalancer: loadbalancer object, need to use its
                              vip.ip_address property
         :type loadbalancer: octavia.db.models.LoadBalancer
+        :param tcp_member_batch: Prepare and publish the combined HAProxy
+                                 configuration for a TCP member batch.
         :param l7policy_activation: Update the combined HAProxy configuration
                                     for a group activation, failing if any
                                     of its listeners cannot be rendered.

@@ -231,6 +231,11 @@ api_opts = [
                        'support explicit backend TLS subject alternative '
                        'names. Enable after upgrading octavia-lib, the '
                        'database, API, workers and all Amphora images.')),
+    cfg.ListOpt('enabled_tcp_connection_rejection_providers', default=[],
+                help=_('Provider drivers whose regional Amphora fleets '
+                       'support proportional TCP connection rejection. '
+                       'Enable after upgrading the database, API, workers '
+                       'and all Amphora images to a compatible HAProxy.')),
     cfg.IntOpt('udp_connect_min_interval_health_monitor',
                default=3,
                help=_("The minimum health monitor delay interval for the "

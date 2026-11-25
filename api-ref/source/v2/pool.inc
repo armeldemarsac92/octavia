@@ -52,6 +52,7 @@ Response Parameters
    - backend_tls_require_h2: backend-tls-require-h2
    - backend_tls_subject_alt_names: backend-tls-subject-alt-names
    - backend_retry_budget: backend-retry-budget
+   - tcp_connection_rejection: tcp-connection-rejection
    - ca_tls_container_ref: ca_tls_container_ref
    - created_at: created_at
    - crl_container_ref: crl_container_ref
@@ -282,6 +283,7 @@ Response Parameters
    - backend_tls_require_h2: backend-tls-require-h2
    - backend_tls_subject_alt_names: backend-tls-subject-alt-names
    - backend_retry_budget: backend-retry-budget
+   - tcp_connection_rejection: tcp-connection-rejection
    - ca_tls_container_ref: ca_tls_container_ref
    - created_at: created_at
    - crl_container_ref: crl_container_ref
@@ -361,6 +363,7 @@ Response Parameters
    - backend_tls_require_h2: backend-tls-require-h2
    - backend_tls_subject_alt_names: backend-tls-subject-alt-names
    - backend_retry_budget: backend-retry-budget
+   - tcp_connection_rejection: tcp-connection-rejection
    - ca_tls_container_ref: ca_tls_container_ref
    - created_at: created_at
    - crl_container_ref: crl_container_ref
@@ -468,6 +471,7 @@ Response Parameters
    - backend_tls_require_h2: backend-tls-require-h2
    - backend_tls_subject_alt_names: backend-tls-subject-alt-names
    - backend_retry_budget: backend-retry-budget
+   - tcp_connection_rejection: tcp-connection-rejection
    - ca_tls_container_ref: ca_tls_container_ref
    - created_at: created_at
    - crl_container_ref: crl_container_ref

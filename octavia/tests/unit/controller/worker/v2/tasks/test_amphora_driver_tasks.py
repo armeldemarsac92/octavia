@@ -94,6 +94,10 @@ class TestAmphoraDriverTasks(base.TestCase):
         self.render_lock = render_lock.start()
         self.render_lock.return_value.__enter__.return_value = True
         self.addCleanup(render_lock.stop)
+        guard = mock.patch.object(repo.LoadBalancerRepository,
+                                  'batch_owns_graph', return_value=False)
+        self.batch_guard = guard.start()
+        self.addCleanup(guard.stop)
 
     @mock.patch('octavia.db.repositories.LoadBalancerRepository.get')
     def test_amp_listeners_update(self,
@@ -238,6 +242,10 @@ class TestAmphoraDriverTasks(base.TestCase):
 
         listeners_update_obj.execute(None)
         mock_driver.update.assert_not_called()
+        self.batch_guard.return_value = True
+        listeners_update_obj.execute(lb.id)
+        mock_driver.update.assert_not_called()
+        self.batch_guard.return_value = False
 
         mock_session = mock_get_session_ctx().begin().__enter__()
 
@@ -259,7 +267,8 @@ class TestAmphoraDriverTasks(base.TestCase):
         mock_lb_get.side_effect = None
         mock_lb_get.return_value = lb
         with mock.patch.object(repo.LoadBalancerRepository,
-                               'batch_owns_graph') as owns_graph:
+                               'batch_owns_graph',
+                               return_value=False) as owns_graph:
             self.render_lock.reset_mock()
             lock_context = self.render_lock.return_value
             lock_context.__enter__.side_effect = [False, True]
@@ -276,7 +285,8 @@ class TestAmphoraDriverTasks(base.TestCase):
             mock_driver.update.assert_called_once_with(lb)
             published_lb = mock_driver.update.call_args.args[0]
             self.assertIsNone(published_lb.listeners[0].otlp_tracing)
-            owns_graph.assert_not_called()
+            owns_graph.assert_called_once_with(
+                mock_get_session.return_value, lb.id)
 
             mock_driver.update.reset_mock()
             lock_context.__enter__.side_effect = [False, False]

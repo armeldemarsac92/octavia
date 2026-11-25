@@ -17,6 +17,8 @@ from unittest import mock
 from octavia.amphorae.driver_exceptions import exceptions as driver_except
 from octavia.amphorae.drivers.haproxy import exceptions as exc
 from octavia.amphorae.drivers.haproxy import rest_api_driver
+from octavia.common import constants
+from octavia.common import data_models
 import octavia.tests.unit.base as base
 
 
@@ -49,6 +51,52 @@ class TestHAProxyAmphoraDriver(base.TestCase):
     def setUp(self):
         super().setUp()
         self.driver = rest_api_driver.HaproxyAmphoraLoadBalancerDriver()
+
+    def test_tcp_batch_prepares_all_peers_before_reload(self):
+        amps = [
+            data_models.Amphora(id=amp_id,
+                                status=constants.AMPHORA_ALLOCATED)
+            for amp_id in ('first', 'second')
+        ]
+        for amp in amps:
+            amp.api_version = '1.0'
+        loadbalancer = data_models.LoadBalancer(
+            id='loadbalancer', enabled=True, amphorae=amps,
+            listeners=[
+                data_models.Listener(protocol=constants.PROTOCOL_TCP),
+                data_models.Listener(protocol=constants.PROTOCOL_HTTP),
+                data_models.Listener(protocol=constants.PROTOCOL_UDP),
+            ])
+        client = self.driver.clients['1.0'] = mock.Mock()
+        client.get_info.return_value = {'haproxy_version': '3.0.19'}
+        with (mock.patch.object(self.driver.jinja_combo, 'build_config',
+                                return_value='combined-config'),
+              mock.patch.object(self.driver, '_process_listener_tls_certs',
+                                return_value={}) as certificates):
+            certificates.side_effect = [{}, {}, RuntimeError('TLS prep')]
+            self.assertRaises(RuntimeError, self.driver.update,
+                              loadbalancer, tcp_member_batch=True)
+            client.upload_config.assert_not_called()
+            client.reload_listener.assert_not_called()
+
+            certificates.side_effect = None
+            client.upload_config.side_effect = [None, RuntimeError('upload')]
+            self.assertRaises(RuntimeError, self.driver.update,
+                              loadbalancer, tcp_member_batch=True)
+            client.reload_listener.assert_not_called()
+
+            client.reset_mock(side_effect=True)
+            self.driver.update(loadbalancer, tcp_member_batch=True)
+            self.assertEqual([
+                mock.call.upload_config(amps[0], loadbalancer.id,
+                                        'combined-config'),
+                mock.call.upload_config(amps[1], loadbalancer.id,
+                                        'combined-config'),
+                mock.call.reload_listener(amps[0], loadbalancer.id),
+                mock.call.reload_listener(amps[1], loadbalancer.id),
+            ], [call for call in client.mock_calls
+                if call[0] in ('upload_config', 'reload_listener')])
+            client.upload_udp_config.assert_not_called()
 
     @mock.patch('octavia.amphorae.drivers.haproxy.rest_api_driver.'
                 'HaproxyAmphoraLoadBalancerDriver.'

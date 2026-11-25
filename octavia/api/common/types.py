@@ -57,6 +57,18 @@ class CidrType(wtypes.UserType):
             raise ValueError(error) from e
 
 
+class TCPConnectionRejection(wtypes.UserType):
+    basetype = object
+    name = 'tcp_connection_rejection'
+
+    @staticmethod
+    def validate(value):
+        try:
+            return validate.tcp_connection_rejection(value)
+        except exceptions.ValidationException as error:
+            raise ValueError(str(error)) from error
+
+
 class AlpnProtocolType(wtypes.UserType):
     basetype = str
     name = 'alpn_protocol'

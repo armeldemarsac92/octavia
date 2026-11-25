@@ -23,7 +23,31 @@ from octavia.controller.worker.v2.tasks import lifecycle_tasks
 from octavia.controller.worker.v2.tasks import network_tasks
 
 
+def _member_network_tasks(*, additions_only=False):
+    return (
+        network_tasks.CalculateDelta(
+            requires=(constants.LOADBALANCER, constants.AVAILABILITY_ZONE),
+            provides=constants.DELTAS,
+            inject={'additions_only': additions_only}),
+        network_tasks.HandleNetworkDeltas(
+            requires=(constants.DELTAS, constants.LOADBALANCER),
+            provides=constants.UPDATED_PORTS),
+        network_tasks.GetAmphoraeNetworkConfigs(
+            requires=constants.LOADBALANCER_ID,
+            provides=constants.AMPHORAE_NETWORK_CONFIG),
+        amphora_driver_tasks.AmphoraePostNetworkPlug(
+            requires=(constants.LOADBALANCER, constants.UPDATED_PORTS,
+                      constants.AMPHORAE_NETWORK_CONFIG)),
+    )
+
+
 class MemberFlows:
+
+    def get_apply_tcp_member_batch_flow(self):
+        network_flow = linear_flow.Flow('prepare_tcp_member_networks')
+        network_flow.add(*_member_network_tasks(additions_only=True))
+        return linear_flow.Flow('apply_tcp_member_batch').add(
+            amphora_driver_tasks.ApplyTCPMemberBatch(network_flow))
 
     def get_create_member_flow(self):
         """Create a flow to create a member
@@ -93,7 +117,7 @@ class MemberFlows:
         delete_member_flow.add(database_tasks.DeleteMemberInDB(
             requires=constants.MEMBER))
         delete_member_flow.add(database_tasks.DecrementMemberQuota(
-            requires=constants.PROJECT_ID))
+            requires=(constants.PROJECT_ID, constants.LOADBALANCER_ID)))
         delete_member_flow.add(database_tasks.MarkPoolActiveInDB(
             requires=constants.POOL_ID))
         delete_member_flow.add(database_tasks.
@@ -155,7 +179,7 @@ class MemberFlows:
                 name=f'{constants.DELETE_MEMBER_INDB}-'
                      f'{m[constants.MEMBER_ID]}'))
             unordered_members_flow.add(database_tasks.DecrementMemberQuota(
-                requires=constants.PROJECT_ID,
+                requires=(constants.PROJECT_ID, constants.LOADBALANCER_ID),
                 name=f'{constants.DECREMENT_MEMBER_QUOTA_FLOW}-'
                      f'{m[constants.MEMBER_ID]}'))
 
@@ -187,20 +211,7 @@ class MemberFlows:
 
         batch_update_members_flow.add(unordered_members_flow)
 
-        # Done, do real updates
-        batch_update_members_flow.add(network_tasks.CalculateDelta(
-            requires=(constants.LOADBALANCER, constants.AVAILABILITY_ZONE),
-            provides=constants.DELTAS))
-        batch_update_members_flow.add(network_tasks.HandleNetworkDeltas(
-            requires=(constants.DELTAS, constants.LOADBALANCER),
-            provides=constants.UPDATED_PORTS))
-        batch_update_members_flow.add(network_tasks.GetAmphoraeNetworkConfigs(
-            requires=constants.LOADBALANCER_ID,
-            provides=constants.AMPHORAE_NETWORK_CONFIG))
-        batch_update_members_flow.add(
-            amphora_driver_tasks.AmphoraePostNetworkPlug(
-                requires=(constants.LOADBALANCER, constants.UPDATED_PORTS,
-                          constants.AMPHORAE_NETWORK_CONFIG)))
+        batch_update_members_flow.add(*_member_network_tasks())
 
         # Update the Listener (this makes the changes active on the Amp)
         batch_update_members_flow.add(amphora_driver_tasks.ListenersUpdate(

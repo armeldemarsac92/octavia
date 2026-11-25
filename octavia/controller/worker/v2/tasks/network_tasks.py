@@ -175,7 +175,7 @@ class CalculateDelta(BaseNetworkTask):
 
     default_provides = constants.DELTAS
 
-    def execute(self, loadbalancer, availability_zone):
+    def execute(self, loadbalancer, availability_zone, additions_only=False):
         """Compute which NICs need to be plugged
 
         for the amphora to become operational.
@@ -200,6 +200,10 @@ class CalculateDelta(BaseNetworkTask):
 
             delta = calculate_amp.execute(loadbalancer, amphora.to_dict(),
                                           availability_zone)
+            if additions_only:
+                # Old HAProxy processes can still have established sessions.
+                delta[constants.DELETE_NICS] = []
+                delta[constants.DELETE_SUBNETS] = []
             deltas[amphora.id] = delta
         return deltas
 

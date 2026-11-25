@@ -262,6 +262,23 @@ backend-tls-require-h2:
   in: body
   required: false
   type: boolean
+tcp-connection-rejection:
+  description: |
+    The Amphora TCP pool's requested fraction of new connections to reject.
+    The pool shows the desired fraction during provisioning and returns null
+    when no fraction is configured.
+  in: body
+  required: false
+  type: object
+tcp-connection-rejection-request:
+  description: |
+    Set the TCP rejection fraction as part of a full member batch. The two
+    required integers satisfy 0 <= reject_weight <= total_weight and
+    1 <= total_weight <= 16000000. Zero disables rejection. Pass null to
+    clear the fraction or omit the field to preserve it.
+  in: body
+  required: false
+  type: object
 backend-retry-budget:
   description: |
     The Service retry budget for this HTTP pool. Provide the five fields

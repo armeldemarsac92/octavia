@@ -321,6 +321,23 @@ on HTTP pools with ``HTTP_COOKIE`` persistence. The load balancer generates
 the cookie and uses it to select a member after selecting the pool. See
 :ref:`session_persistence` for the name and update rules.
 
+``tcp_connection_rejection_v1`` enables a per-connection rejection fraction
+on Amphora TCP pools. Operators enable it by setting
+``[api_settings] enabled_tcp_connection_rejection_providers`` after upgrading
+the database, API, every worker and the Amphora fleet. Keep it disabled during
+a rolling worker upgrade. The HAProxy rules have been qualified with 3.0.19.
+Each new connection to the selected TCP backend is
+rejected before connecting to a server with probability
+``reject_weight / total_weight``. The remaining connections use the pool's
+normal member selection. A graceful reload lets established connections
+drain, and the batch leaves existing member networks attached for them.
+Octavia prepares and uploads the combined configuration to all participating
+Amphorae before requesting any reload. An upload can leave a validated file
+on disk even if a later upload fails. Reloads are acknowledged by individual
+Amphorae. A partial reload can temporarily leave peers on different
+configurations, and the pool remains in ``ERROR`` until a replacement batch
+completes.
+
 ``backend_retry_budget_v1`` enables ``backend_retry_budget`` on HTTP
 pools forwarding ingress on HTTP and ``TERMINATED_HTTPS`` listeners. It
 shares request and retry history among participating pools with the same
