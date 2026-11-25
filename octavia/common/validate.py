@@ -867,9 +867,11 @@ def is_valid_http_header_absolute_timeout(value):
 
 
 def header_operations(operations, field):
-    if not isinstance(operations, list) or len(operations) > 48:
+    limit = constants.MAX_L7POLICY_HEADER_OPERATIONS
+    if not isinstance(operations, list) or len(operations) > limit:
         raise exceptions.InvalidL7PolicyArgs(
-            msg=_('%s must be an array of up to 48 entries.') % field)
+            msg=_('%(field)s must be an array of up to %(limit)s entries.') %
+            {'field': field, 'limit': limit})
 
     names = set()
     normalized = []
@@ -906,6 +908,20 @@ def header_operations(operations, field):
             result['value'] = value
         normalized.append(result)
     return normalized
+
+
+def grpc_response_header_field_count(operations):
+    return sum(1 + item['value'].count(',')
+               if item['name'].endswith('-bin') else 1
+               for item in operations or [] if item['operation'] != 'REMOVE')
+
+
+def validate_grpc_response_header_fields(operations):
+    limit = constants.MAX_L7POLICY_HEADER_OPERATIONS
+    if grpc_response_header_field_count(operations) > limit:
+        raise exceptions.InvalidL7PolicyArgs(msg=_(
+            'gRPC response metadata can set or add at most %d fields after '
+            'expanding binary values.') % limit)
 
 
 def validate_header_protocol(protocol):
@@ -1452,6 +1468,12 @@ def sanitize_l7policy_api_args(l7policy, create=False, old_policy=None):
                 not (retaining_fixed and operations == old_operations)):
             raise exceptions.InvalidL7PolicyArgs(
                 msg=_('%s is unavailable for this policy action.') % field)
+
+    response_operations = l7policy.get('response_header_operations')
+    if response_operations and any(
+            rule['type'] == constants.L7RULE_TYPE_GRPC_CONTENT_TYPE and
+            rule.get('enabled', True) for rule in l7policy.get('rules') or []):
+        validate_grpc_response_header_fields(response_operations)
 
     if effective_action == weighted_action:
         validate_target_request_filter_composition(

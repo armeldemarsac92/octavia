@@ -195,6 +195,10 @@ class L7RuleController(base.BaseController):
                 tcp_tls_termination=tcp_tls_termination)
             tcp_policy = driver_utils.uses_tls_sni_policy_path(
                 driver, protocol, tcp_tls_termination)
+            if (l7rule_dict['enabled'] and
+                    l7rule.type == constants.L7RULE_TYPE_GRPC_CONTENT_TYPE):
+                validate.validate_grpc_response_header_fields(
+                    db_l7policy.response_header_operations)
             if l7rule_dict['enabled'] or tcp_policy:
                 driver_utils.require_gateway_policy_action(
                     driver, db_l7policy.action, db_l7policy.listener.protocol,
@@ -399,6 +403,9 @@ class L7RuleController(base.BaseController):
                 driver, protocol, tcp_tls_termination)
             if ((enabled and (not db_l7rule.enabled or match_changed)) or
                     (tcp_policy and match_changed)):
+                if rule_type == constants.L7RULE_TYPE_GRPC_CONTENT_TYPE:
+                    validate.validate_grpc_response_header_fields(
+                        db_l7policy.response_header_operations)
                 if db_l7policy.https_listener_hostname is not None:
                     driver_utils.require_https_listener_isolation(driver)
                 driver_utils.require_gateway_policy_action(

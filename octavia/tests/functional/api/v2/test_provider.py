@@ -20,6 +20,7 @@ from oslo_config import cfg
 from oslo_config import fixture as oslo_fixture
 from oslo_utils import uuidutils
 
+from octavia.api.drivers.amphora_driver.v2 import driver as amphora_driver
 from octavia.api.drivers import utils as driver_utils
 from octavia.common import constants
 from octavia.tests.functional.api.v2 import base
@@ -104,6 +105,27 @@ class TestGatewayCapabilities(base.BaseAPITest):
                          self.get(self.capabilities_path()).json)
         self.assertEqual(empty,
                          self.get(self.capabilities_path('noop_driver')).json)
+
+    def test_grpc_binary_metadata_capability_requires_both_features(self):
+        providers = ['amphora', 'noop_driver']
+        path = self.capabilities_path()
+        self.conf.config(
+            group='api_settings',
+            enabled_response_header_operation_providers=providers)
+        self.assertEqual(['response_header_operations_v1'],
+                         self.get(path).json['gateway_capabilities'])
+        self.conf.config(group='api_settings',
+                         enabled_grpc_content_type_providers=providers)
+        ordinary = ['response_header_operations_v1', 'grpc_content_type_v1']
+        with mock.patch.object(amphora_driver.AmphoraProviderDriver,
+                               'supports_grpc_binary_response_metadata',
+                               False):
+            self.assertCountEqual(ordinary,
+                                  self.get(path).json['gateway_capabilities'])
+        self.assertCountEqual(ordinary + ['grpc_binary_response_metadata_v1'],
+                              self.get(path).json['gateway_capabilities'])
+        self.assertEqual([], self.get(self.capabilities_path('noop_driver'))
+                         .json['gateway_capabilities'])
 
     def test_http_request_redirect_capability_requires_compatible_opt_in(self):
         empty = {'gateway_capabilities': []}

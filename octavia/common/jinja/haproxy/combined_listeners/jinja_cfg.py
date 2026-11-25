@@ -1760,12 +1760,18 @@ class JinjaTemplater:
                     (constants.L7POLICY_ACTION_REDIRECT_TO_POOL,
                      constants.L7POLICY_ACTION_WEIGHTED_TARGETS)):
                 ret_value['request_cors'] = self._transform_request_cors(cors)
+            grpc_policy = any(
+                rule['type'] == constants.L7RULE_TYPE_GRPC_CONTENT_TYPE
+                for rule in l7rules)
             for field in ('request_header_operations',
                           'response_header_operations'):
                 operations = getattr(l7policy, field)
                 if operations:
+                    grpc_policy_id = (l7policy.id if grpc_policy and
+                                      field == 'response_header_operations'
+                                      else None)
                     ret_value[field] = self._transform_header_operations(
-                        operations, field)
+                        operations, field, grpc_policy_id=grpc_policy_id)
         return ret_value
 
     @staticmethod
@@ -1955,24 +1961,40 @@ class JinjaTemplater:
         return operations
 
     @staticmethod
-    def _transform_header_operations(operations, field):
+    def _transform_header_operations(operations, field, grpc_policy_id=None):
         actions = {'SET': 'set-header', 'ADD': 'add-header',
                    'REMOVE': 'del-header'}
 
+        operations = validate.header_operations(operations, field)
+        if (grpc_policy_id is not None and
+                validate.grpc_response_header_field_count(operations) >
+                constants.MAX_L7POLICY_HEADER_OPERATIONS):
+            LOG.warning('Omitting response metadata for gRPC L7 policy %s '
+                        'because its expanded field count exceeds the limit.',
+                        grpc_policy_id)
+            return []
+
         transformed = []
-        for operation in validate.header_operations(operations, field):
+        for operation in operations:
             action = actions[operation['operation']]
             name = _quote_config_arg(operation['name'])
-            if 'value' in operation:
+            if 'value' not in operation:
+                transformed.append(f'{action} {name}')
+                continue
+            value = operation['value']
+            values = [value]
+            if (grpc_policy_id is not None and
+                    operation['name'].endswith('-bin') and ',' in value):
+                # gRPC clients decode each binary metadata field separately.
+                values = [item.strip(' \t') for item in value.split(',')]
+            for value in values:
                 # HAProxy parses a log-format expression after the config
                 # parser. Double percent signs denote literal percent signs.
-                value = operation['value'].replace('%', '%%')
+                value = value.replace('%', '%%')
                 # HAProxy treats a zero-length argument as a missing one.
                 argument = _quote_config_arg(value or '%[str()]')
-                line = f'{action} {name} {argument}'
-            else:
-                line = f'{action} {name}'
-            transformed.append(line)
+                transformed.append(f'{action} {name} {argument}')
+                action = 'add-header'
         return transformed
 
     @staticmethod

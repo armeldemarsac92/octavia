@@ -124,6 +124,18 @@ winning L7 policy modifies its responses, including a programmed fixed
 response. Operators can disable the option and clear existing lists.
 Request and response header options can be enabled independently.
 
+For lists of gRPC binary response metadata, upgrade the provider's
+rendering workers and API replicas before enabling both
+``enabled_response_header_operation_providers`` and
+``enabled_grpc_content_type_providers`` for Amphora. The provider then
+advertises ``grpc_binary_response_metadata_v1``. An L7 policy with a
+native ``GRPC_CONTENT_TYPE`` rule emits each comma-separated base64 value
+of a ``-bin`` response header in its own field. Each policy can set or add
+up to 48 fields after expansion. If an existing gRPC policy exceeds this
+limit, the renderer logs a warning and omits that policy's response header
+operations while continuing to route traffic. Correct or clear the stored
+operations to resume applying the modifier.
+
 
 Structured HTTP redirects in L7 policies
 ---------------------------------------

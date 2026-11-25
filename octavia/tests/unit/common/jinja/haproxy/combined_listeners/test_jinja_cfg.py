@@ -2744,6 +2744,51 @@ class TestHaproxyCfg(base.TestCase):
             {backend.splitlines()[0] for backend in backends
              if line in (entry.strip() for entry in backend.splitlines())})
 
+    def test_grpc_binary_response_metadata_uses_separate_selected_fields(self):
+        amp = sample_configs_combined.sample_amphora_tuple()
+        listener = sample_configs_combined.sample_listener_tuple(l7=True)
+        ordinary = listener.l7policies[0]
+        rule = sample_configs_combined.sample_l7rule_tuple
+        operations = [
+            {'operation': 'SET', 'name': 'wire-bin', 'value': 'YQ==, Yg'},
+            {'operation': 'ADD', 'name': 'more-bin', 'value': 'Yw, ZA=='},
+            {'operation': 'SET', 'name': 'simple-bin', 'value': 'ZQ=='},
+            {'operation': 'ADD', 'name': 'text', 'value': 'one, two'},
+            {'operation': 'REMOVE', 'name': 'old-bin'},
+        ]
+        grpc = ordinary._replace(id='grpc', l7rules=[rule(
+            'media', type='GRPC_CONTENT_TYPE', compare_type='EQUAL_TO',
+            value='application/grpc')], response_header_operations=operations)
+        ordinary = ordinary._replace(id='http',
+                                     response_header_operations=operations[:1])
+        oversized = grpc._replace(
+            id='oversized', l7rules=[
+                grpc.l7rules[0]._replace(id='oversized-media'),
+                rule('oversized-path', value='/oversized')],
+            response_header_operations=[
+                dict(operations[0], value=', '.join(['YQ=='] * 48)),
+                operations[1]])
+        listener = listener._replace(l7policies=[oversized, grpc, ordinary])
+        config = self.jinja_cfg.build_config(
+            amp, [listener], None, haproxy_versions=['3', '0', '19'],
+            amp_details=None)
+        stages = {
+            'grpc': ['set-header "wire-bin" "YQ=="',
+                     'add-header "wire-bin" "Yg"',
+                     'add-header "more-bin" "Yw"',
+                     'add-header "more-bin" "ZA=="',
+                     'set-header "simple-bin" "ZQ=="',
+                     'add-header "text" "one, two"', 'del-header "old-bin"'],
+            'http': ['set-header "wire-bin" "YQ==, Yg"'],
+        }
+        self.assertIn('set-var(txn.octavia_l7_policy) str(oversized)', config)
+        self.assertEqual([
+            f'http-after-response {stage} '
+            f'if {{ var(txn.octavia_l7_policy) -m str {policy} }}'
+            for policy, actions in stages.items() for stage in actions
+        ], [line.strip() for line in config.splitlines()
+            if line.lstrip().startswith('http-after-response ')])
+
     def test_weighted_policy_keeps_unavailable_targets_in_its_range(self):
         amp = sample_configs_combined.sample_amphora_tuple()
         listener = sample_configs_combined.sample_listener_tuple(l7=True)

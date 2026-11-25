@@ -92,6 +92,8 @@ GATEWAY_CAPABILITY_WEIGHTED_TARGET_FILTERS = (
     'weighted_http_target_request_filters_v1')
 GATEWAY_CAPABILITY_REQUEST_HEADER_OPERATIONS = 'request_header_operations_v1'
 GATEWAY_CAPABILITY_RESPONSE_HEADER_OPERATIONS = 'response_header_operations_v1'
+GATEWAY_CAPABILITY_GRPC_BINARY_RESPONSE_METADATA = (
+    'grpc_binary_response_metadata_v1')
 GATEWAY_CAPABILITY_HTTP_REQUEST_REDIRECT = 'http_request_redirect_v1'
 GATEWAY_CAPABILITY_REQUEST_URL_REWRITE = 'request_url_rewrite_v1'
 GATEWAY_CAPABILITY_REQUEST_CORS = 'request_cors_v1'
@@ -393,6 +395,7 @@ MAX_POLICY_POSITION = 2147483647
 # Testing showed haproxy config failed to parse after more than
 # 53 rules per policy
 MAX_L7RULES_PER_L7POLICY = 50
+MAX_L7POLICY_HEADER_OPERATIONS = 48
 
 # See RFCs 2616, 2965, 6265, 7230: Should match characters valid in a
 # http header or cookie name.
