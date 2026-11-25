@@ -1345,6 +1345,41 @@ def validate_listener_pool_protocol(listener_protocol, pool_protocol):
                 'listener_protocol': listener_protocol})
 
 
+def http_external_auth(auth):
+    if not isinstance(auth, dict) or auth.keys() - {
+            'pool_id', 'path_prefix', 'allowed_request_headers',
+            'allowed_response_headers'}:
+        raise exceptions.ValidationException(detail=_(
+            'Invalid HTTP ExternalAuth options.'))
+    pool_id = auth.get('pool_id')
+    try:
+        if not isinstance(pool_id, str) or str(uuid.UUID(pool_id)) != pool_id:
+            raise ValueError()
+    except ValueError as exc:
+        raise exceptions.ValidationException(detail=_(
+            'HTTP ExternalAuth requires a pool UUID.')) from exc
+    result = {'pool_id': pool_id}
+    path = auth.get('path_prefix', '')
+    if (not isinstance(path, str) or
+            path and (len(path) > 1024 or
+                      not HTTP_URL_PATH_RE.fullmatch(path))):
+        raise exceptions.ValidationException(detail=_(
+            'Invalid HTTP ExternalAuth path prefix.'))
+    if path:
+        result['path_prefix'] = path
+    for field in ('allowed_request_headers', 'allowed_response_headers'):
+        headers = auth.get(field, [])
+        if (not isinstance(headers, list) or len(headers) > 64 or
+                any(not isinstance(name, str) or
+                    not _HEADER_NAME_RE.fullmatch(name)
+                    for name in headers)):
+            raise exceptions.ValidationException(detail=_(
+                'Invalid HTTP ExternalAuth header list.'))
+        if headers:
+            result[field] = sorted({name.lower() for name in headers})
+    return result
+
+
 def sanitize_l7policy_api_args(l7policy, create=False, old_policy=None):
     """Validate and make consistent L7Policy API arguments.
 
@@ -1576,6 +1611,37 @@ def sanitize_l7policy_api_args(l7policy, create=False, old_policy=None):
             l7policy.get('request_header_operations', getattr(
                 old_policy, 'request_header_operations', None)),
             rewrite)
+
+    if 'external_auth' in l7policy and l7policy['external_auth'] is not None:
+        l7policy['external_auth'] = http_external_auth(
+            l7policy['external_auth'])
+    auth = l7policy.get('external_auth',
+                        getattr(old_policy, 'external_auth', None))
+    if auth is not None:
+        if effective_action not in forwarding_actions:
+            raise exceptions.InvalidL7PolicyArgs(msg=_(
+                'external_auth requires REDIRECT_TO_POOL or '
+                'WEIGHTED_TARGETS.'))
+        targets = l7policy.get('targets', getattr(old_policy, 'targets', None))
+        if (rewrite or request_policy or cors or
+                request_mirror_pool_ids(mirrors, targets) or any(
+                    l7policy.get(field, getattr(old_policy, field, None))
+                    for field in ('request_header_operations',
+                                  'response_header_operations')) or
+                any(target_request_filters(target) or
+                    target.get('response_header_operations')
+                    for target in targets or [])):
+            raise exceptions.InvalidL7PolicyArgs(msg=_(
+                'external_auth cannot be combined with policy or weighted '
+                'target request or response filters.'))
+        destination_ids = {
+            l7policy.get('redirect_pool_id',
+                         getattr(old_policy, 'redirect_pool_id', None)),
+            *(target.get('pool_id') for target in targets or [])}
+        auth_pool_id = auth.get('pool_id') if isinstance(auth, dict) else None
+        if isinstance(auth_pool_id, str) and auth_pool_id in destination_ids:
+            raise exceptions.InvalidL7PolicyArgs(msg=_(
+                'The external_auth pool cannot also be a forwarding target.'))
 
     # If we are creating, we need an action at this point
     if create and 'action' not in l7policy.keys():

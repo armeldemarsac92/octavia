@@ -382,6 +382,8 @@ class Pool(base_models.BASE, base_models.IdMixin, base_models.ProjectMixin,
                                   back_populates="redirect_pool")
     _l7policy_targets = orm.relationship(
         "L7PolicyTarget", back_populates="pool", passive_deletes="all")
+    _l7policy_auth_refs = orm.relationship(
+        "L7PolicyExternalAuthPool", viewonly=True)
     _l7policy_mirrors = orm.relationship(
         "L7PolicyMirror", back_populates="pool", passive_deletes="all")
     _otlp_tracing_listeners = orm.relationship(
@@ -464,7 +466,12 @@ class Pool(base_models.BASE, base_models.IdMixin, base_models.ProjectMixin,
             if mirror.numerator and mirror.l7policy is not None]
         l7_listeners = [p.listener for p in l7policies
                         if len(p.l7rules) > 0 and p.enabled is True]
-        for li in (l7_listeners + self._request_filter_listeners +
+        auth_listeners = [ref.l7policy.listener
+                          for ref in self._l7policy_auth_refs
+                          if ref.l7policy.provisioning_status not in (
+                              constants.PENDING_DELETE, constants.DELETED)]
+        for li in (l7_listeners + auth_listeners +
+                   self._request_filter_listeners +
                    self._otlp_tracing_listeners):
             if li.id not in _l_ids:
                 _listeners.append(li)
@@ -642,6 +649,23 @@ class ListenerOtlpCollectorPool(base_models.BASE):
         sa.String(36), sa.ForeignKey(
             'pool.id', name='fk_listener_otlp_collector_pool_id'),
         primary_key=True, index=True)
+
+
+class L7PolicyExternalAuthPool(base_models.BASE):
+    """Reference held by a policy while its authorizer is configured."""
+
+    __tablename__ = 'l7policy_external_auth_pool'
+
+    l7policy_id = sa.Column(
+        sa.String(36), sa.ForeignKey(
+            'l7policy.id', ondelete='CASCADE',
+            name='fk_l7policy_ext_auth_l7policy_id'),
+        primary_key=True)
+    pool_id = sa.Column(
+        sa.String(36), sa.ForeignKey(
+            'pool.id', name='fk_l7policy_ext_auth_pool_id'),
+        nullable=False, index=True)
+    l7policy = orm.relationship("L7Policy", viewonly=True)
 
 
 class ListenerRequestFilterPool(base_models.BASE):
@@ -964,6 +988,7 @@ class L7Policy(base_models.BASE, base_models.IdMixin, base_models.ProjectMixin,
     request_url_rewrite = sa.Column(sa.JSON(none_as_null=True))
     request_cors = sa.Column(sa.JSON(none_as_null=True))
     http_request_policy = sa.Column(sa.JSON(none_as_null=True))
+    external_auth = sa.Column(sa.JSON(none_as_null=True))
     request_header_operations = sa.Column(sa.JSON(none_as_null=True))
     response_header_operations = sa.Column(sa.JSON(none_as_null=True))
     https_listener_hostname = sa.Column(sa.String(253), nullable=True)

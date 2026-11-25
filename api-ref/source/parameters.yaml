@@ -1159,6 +1159,24 @@ l7policy-http-request-policy:
   in: body
   required: false
   type: object
+l7policy-external-auth:
+  description: |
+    Bodyless HTTP authorization for the selected forwarding policy. The
+    object requires the authorization ``pool_id`` and accepts optional
+    ``path_prefix``, ``allowed_request_headers`` and
+    ``allowed_response_headers``. It requires a provider enrolled in
+    ``l7policy_http_external_auth_v1``, an HTTP or terminated HTTPS listener
+    and a plain HTTP authorization pool on the same load balancer and
+    project. ``REDIRECT_TO_POOL`` and ``WEIGHTED_TARGETS`` are supported.
+    Other policy and weighted target filters cannot be combined with this
+    field. Listener authorization, when configured, runs before policy
+    selection. Omit this field in an update to preserve it, or send
+    ``null`` to clear it. Enrolled providers return ``null`` when there is
+    no stored value. Configured values remain visible if enrollment is
+    withdrawn.
+  in: body
+  required: false
+  type: object
 l7policy-request-mirrors:
   description: |
     Ordered HTTP request copies sent by the selected L7 policy. Each entry

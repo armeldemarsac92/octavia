@@ -141,6 +141,7 @@ Response Parameters
    - request_cors: l7policy-request-cors
    - http_request_policy: l7policy-http-request-policy
    - request_mirrors: l7policy-request-mirrors
+   - external_auth: l7policy-external-auth
    - redirect_url: l7policy-redirect-url
    - rules: l7policy-rule-ids
    - tags: tags
@@ -321,6 +322,7 @@ Request
    - request_cors: l7policy-request-cors
    - http_request_policy: l7policy-http-request-policy
    - request_mirrors: l7policy-request-mirrors
+   - external_auth: l7policy-external-auth
    - redirect_url: l7policy-redirect-url-optional
    - rules: l7policy-initial-rules
    - tags: tags-optional
@@ -362,6 +364,7 @@ Response Parameters
    - request_cors: l7policy-request-cors
    - http_request_policy: l7policy-http-request-policy
    - request_mirrors: l7policy-request-mirrors
+   - external_auth: l7policy-external-auth
    - redirect_url: l7policy-redirect-url
    - rules: l7policy-rule-ids
    - tags: tags
@@ -436,6 +439,7 @@ Response Parameters
    - request_cors: l7policy-request-cors
    - http_request_policy: l7policy-http-request-policy
    - request_mirrors: l7policy-request-mirrors
+   - external_auth: l7policy-external-auth
    - redirect_url: l7policy-redirect-url
    - rules: l7policy-rule-ids
    - tags: tags
@@ -501,6 +505,7 @@ Request
    - request_cors: l7policy-request-cors
    - http_request_policy: l7policy-http-request-policy
    - request_mirrors: l7policy-request-mirrors
+   - external_auth: l7policy-external-auth
    - redirect_url: l7policy-redirect-url-optional
    - tags: tags-optional
 
@@ -541,6 +546,7 @@ Response Parameters
    - request_cors: l7policy-request-cors
    - http_request_policy: l7policy-http-request-policy
    - request_mirrors: l7policy-request-mirrors
+   - external_auth: l7policy-external-auth
    - redirect_url: l7policy-redirect-url
    - rules: l7policy-rule-ids
    - tags: tags

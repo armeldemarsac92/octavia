@@ -1301,6 +1301,9 @@ class PoolRepository(BaseRepository):
         query_options = (
             subqueryload(models.Pool._default_listeners),
             subqueryload(models.Pool._request_filter_listeners),
+            (subqueryload(models.Pool._l7policy_auth_refs).
+             subqueryload(models.L7PolicyExternalAuthPool.l7policy).
+             subqueryload(models.L7Policy.listener)),
             subqueryload(models.Pool._otlp_tracing_listeners),
             subqueryload(models.Pool.health_monitor),
             subqueryload(models.Pool.l7policies),
@@ -1415,8 +1418,14 @@ class ListenerRepository(BaseRepository):
 
     def validate_request_filter_pools(self, session, sections, lb_id,
                                       project_id):
+        self.validate_external_auth_pools(
+            session, listener_request_filters.pool_ids(sections), lb_id,
+            project_id)
+
+    @staticmethod
+    def validate_external_auth_pools(session, pool_ids, lb_id, project_id):
         pool = models.Pool
-        for pool_id in sorted(listener_request_filters.pool_ids(sections)):
+        for pool_id in sorted(pool_ids):
             query = session.query(
                 pool.protocol, pool.tls_enabled, pool.backend_h2c,
                 _pool_has_tag(consts.GATEWAY_LISTENER_AUTH_POOL_TAG).label(
@@ -1432,7 +1441,7 @@ class ListenerRepository(BaseRepository):
             if (row.protocol != consts.PROTOCOL_HTTP or row.tls_enabled or
                     row.backend_h2c or not row.tagged):
                 raise exceptions.ValidationException(detail=_(
-                    'Listener authorization requires a managed plain HTTP '
+                    'HTTP authorization requires a managed plain HTTP '
                     'pool.'))
 
     def get_otlp_tracing_listener_using_pool(self, session, pool_id):
@@ -2872,6 +2881,36 @@ class L7PolicyRepository(BaseRepository):
             condition &= pool.id != removed_pool
         return condition & enabled
 
+    def get_external_auth_policy_using_pool(self, session, pool_id):
+        policy = self.model_class
+        ref = models.L7PolicyExternalAuthPool
+        return (session.query(ref.l7policy_id)
+                .join(ref.l7policy).filter(
+                    ref.pool_id == pool_id,
+                    policy.provisioning_status != consts.DELETED)
+                .with_for_update().limit(1).scalar())
+
+    def _replace_external_auth_pool_ref(self, session, policy_id, listener,
+                                        project_id, auth):
+        ref = models.L7PolicyExternalAuthPool
+        row = session.get(ref, policy_id, with_for_update=True)
+        if auth is None:
+            if row is not None:
+                session.delete(row)
+            return
+        if (listener.project_id != project_id or
+                listener.load_balancer.project_id != project_id):
+            raise exceptions.ValidationException(detail=_(
+                'HTTP authorization requires a policy in the listener '
+                'and load balancer project.'))
+        pool_id = auth['pool_id']
+        ListenerRepository.validate_external_auth_pools(
+            session, {pool_id}, listener.load_balancer_id, project_id)
+        if row is None:
+            session.add(ref(l7policy_id=policy_id, pool_id=pool_id))
+        else:
+            row.pool_id = pool_id
+
     def _has_redirect_pool(self, condition):
         # Use a current read for the pool, including under REPEATABLE READ.
         pool = models.Pool
@@ -2924,6 +2963,37 @@ class L7PolicyRepository(BaseRepository):
         return ((rule_runs & policy._mirrors.any(rule_copy)) |
                 (weighted & policy._mirrors.any(target_copy)))
 
+    def _reachable_external_auth(self, *, restoring_pool, removed_pool):
+        policy = self.model_class
+        target = models.L7PolicyTarget
+        ref = models.L7PolicyExternalAuthPool
+        pool = models.Pool
+
+        def authorizer(condition):
+            return (select(ref.pool_id)
+                    .join(pool, pool.id == ref.pool_id)
+                    .where(ref.l7policy_id == policy.id, condition)
+                    .correlate(policy)
+                    .with_for_update()
+                    .exists())
+
+        available = self._active_pool(removed_pool=removed_pool)
+        scalar = policy.action == consts.L7POLICY_ACTION_REDIRECT_TO_POOL
+        weighted = policy.action == consts.L7POLICY_ACTION_WEIGHTED_TARGETS
+        # A weighted policy authorizes the request even if every share
+        # ends in a local response. A closed scalar origin returns 503
+        # before consulting the authorizer.
+        forward = (scalar & self._has_redirect_pool(available)) | weighted
+        if restoring_pool is None:
+            return authorizer(available) & forward
+        restored = self._active_pool(restoring_pool=restoring_pool)
+        newly_open = (
+            (scalar & self._has_redirect_pool(restored)) |
+            (weighted & policy._targets.any(
+                (target.weight > 0) & target.pool.has(restored))))
+        return ((authorizer(available) & newly_open) |
+                (authorizer(restored) & forward))
+
     def get_active_request_transforms(
             self, session, *, transform, listener_id=None,
             load_balancer_id=None, reopening=None, restoring_pool=None,
@@ -2954,7 +3024,12 @@ class L7PolicyRepository(BaseRepository):
         query = self._active_http_policies(session)
         if retry_backoff:
             query = query.add_columns(policy.http_request_policy)
-        if transform == 'request_mirrors':
+        if transform == 'external_auth':
+            query = query.filter(policy.external_auth.isnot(None))
+            if reopening is None:
+                query = query.filter(self._reachable_external_auth(
+                    restoring_pool=restoring_pool, removed_pool=removed_pool))
+        elif transform == 'request_mirrors':
             query = query.filter(self._active_request_mirrors(
                 restoring_pool=restoring_pool, removed_pool=removed_pool))
         elif transform == 'target_filters':
@@ -3054,13 +3129,15 @@ class L7PolicyRepository(BaseRepository):
             blockers = blockers.filter(
                 policy.id == policy_id,
                 (policy.action != consts.L7POLICY_ACTION_REDIRECT_TO_POOL) |
+                policy.external_auth.isnot(None) |
                 self._has_redirect_pool(
                     self._active_pool(include_closed=True)))
         else:
-            # A weighted policy still wins and generates 503 for an
-            # unavailable member of its target set.
+            # Weighted and protected policies still win with an unavailable
+            # origin. Their matching requests remain closed.
             blockers = blockers.filter(
                 policy.action == consts.L7POLICY_ACTION_REDIRECT_TO_POOL,
+                policy.external_auth.is_(None),
                 policy.redirect_pool_id == disabling_pool)
         for blocker in blockers.with_for_update().all():
             if not self._in_https_section(blocker):
@@ -3136,7 +3213,8 @@ class L7PolicyRepository(BaseRepository):
     def get_all_API_list(self, session, pagination_helper=None, **filters):
         query_options = (
             subqueryload(models.L7Policy.l7rules),
-            subqueryload(models.L7Policy.listener),
+            subqueryload(models.L7Policy.listener).joinedload(
+                models.Listener.load_balancer),
             subqueryload(models.L7Policy.redirect_pool),
             subqueryload(models.L7Policy._targets),
             subqueryload(models.L7Policy._mirrors),
@@ -3247,6 +3325,10 @@ class L7PolicyRepository(BaseRepository):
         model_kwargs.update(listener_id=l7policy_db.listener_id)
         model_kwargs = validate.sanitize_l7policy_api_args(
             model_kwargs, old_policy=l7policy_db)
+        if 'external_auth' in model_kwargs:
+            self._replace_external_auth_pool_ref(
+                session, id, l7policy_db.listener, l7policy_db.project_id,
+                model_kwargs['external_auth'])
         update_targets = 'targets' in model_kwargs
         targets = model_kwargs.pop('targets', None) or []
         if update_targets or 'request_mirrors' in model_kwargs:
@@ -3340,6 +3422,11 @@ class L7PolicyRepository(BaseRepository):
             l7policy._replace_mirrors(mirrors, targets or [], mirror_pools)
         session.add(l7policy)
         session.flush()
+        if l7policy.external_auth is not None:
+            self._replace_external_auth_pool_ref(
+                session, l7policy.id, listener_db, l7policy.project_id,
+                l7policy.external_auth)
+            session.flush()
 
         # Must be done outside the transaction which creates the L7Policy
         listener = (session.query(models.Listener).
