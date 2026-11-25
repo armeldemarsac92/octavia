@@ -2071,6 +2071,20 @@ weight-optional:
   type: integer
 
 
+otlp_tracing:
+  description: |
+    Optional listener OTLP/HTTP tracing settings. The object requires
+    collector_pool_id, service_name, and span_name. Null clears tracing.
+  in: body
+  required: false
+  type: object
+otlp_tracing_status:
+  description: |
+    Collector configuration publication state when listener tracing is set.
+    PENDING_UPDATE, ACTIVE, or ERROR.
+  in: body
+  required: false
+  type: string
 request_filter_sections:
   description: |
     Optional ordered HTTP request filter sections for an HTTP or

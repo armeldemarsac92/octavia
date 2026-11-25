@@ -22,9 +22,22 @@ from octavia.api.v2.types import pool as pool_types
 from octavia.common import constants
 from octavia.common import exceptions
 from octavia.common import listener_request_filters
+from octavia.common import validate
 
 
 CONF = cfg.CONF
+
+
+class OtlpTracing(wtypes.UserType):
+    basetype = object
+    name = 'otlp_tracing'
+
+    @staticmethod
+    def validate(value):
+        try:
+            return validate.otlp_tracing(value)
+        except exceptions.ValidationException as exc:
+            raise ValueError(str(exc)) from exc
 
 
 class RequestFilterSections(wtypes.UserType):
@@ -68,6 +81,9 @@ class ListenerResponse(BaseListenerType):
     default_pool_id = wtypes.wsattr(wtypes.UuidType())
     default_http_response = wtypes.wsattr(types.FixedHTTPResponse)
     request_filter_sections = wtypes.wsattr(RequestFilterSections())
+    otlp_tracing = wtypes.wsattr(OtlpTracing())
+    otlp_tracing_status = wtypes.wsattr(wtypes.Enum(
+        str, constants.PENDING_UPDATE, constants.ACTIVE, constants.ERROR))
     https_virtual_hosts = wtypes.wsattr(
         wtypes.ArrayType(wtypes.StringType(max_length=253)))
     l7policies = wtypes.wsattr([types.IdOnlyType])
@@ -95,6 +111,11 @@ class ListenerResponse(BaseListenerType):
     @classmethod
     def from_db_obj(cls, db_obj):
         result = super().from_db_obj(db_obj)
+        if (result.otlp_tracing is None and
+                not CONF.api_settings.enabled_listener_otlp_tracing_providers):
+            result.otlp_tracing = wtypes.Unset
+        if result.otlp_tracing_status is None:
+            result.otlp_tracing_status = wtypes.Unset
         sections = db_obj.request_filter_sections
         if (sections is not None or
                 CONF.api_settings.enabled_listener_request_filter_providers):
@@ -182,6 +203,7 @@ class ListenerPOST(BaseListenerType):
     default_pool_id = wtypes.wsattr(wtypes.UuidType())
     default_http_response = wtypes.wsattr(types.FixedHTTPResponse)
     request_filter_sections = wtypes.wsattr(RequestFilterSections())
+    otlp_tracing = wtypes.wsattr(OtlpTracing())
     https_virtual_hosts = wtypes.wsattr(
         wtypes.ArrayType(wtypes.StringType(max_length=253)))
     tcp_tls_termination = wtypes.wsattr(bool, default=False)
@@ -238,6 +260,7 @@ class ListenerPUT(BaseListenerType):
     default_pool_id = wtypes.wsattr(wtypes.UuidType())
     default_http_response = wtypes.wsattr(types.FixedHTTPResponse)
     request_filter_sections = wtypes.wsattr(RequestFilterSections())
+    otlp_tracing = wtypes.wsattr(OtlpTracing())
     https_virtual_hosts = wtypes.wsattr(
         wtypes.ArrayType(wtypes.StringType(max_length=253)))
     tcp_tls_termination = wtypes.wsattr(bool)
@@ -277,6 +300,8 @@ class ListenerRootPUT(types.BaseType):
 
 
 class ListenerSingleCreate(BaseListenerType):
+    otlp_tracing = wtypes.wsattr(OtlpTracing())
+
     """Defines mandatory and optional attributes of a POST request."""
     name = wtypes.wsattr(wtypes.StringType(max_length=255))
     description = wtypes.wsattr(wtypes.StringType(max_length=255))

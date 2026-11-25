@@ -365,6 +365,9 @@ class Pool(base_models.BASE, base_models.IdMixin, base_models.ProjectMixin,
         "L7PolicyTarget", back_populates="pool", passive_deletes="all")
     _l7policy_mirrors = orm.relationship(
         "L7PolicyMirror", back_populates="pool", passive_deletes="all")
+    _otlp_tracing_listeners = orm.relationship(
+        "Listener", secondary="listener_otlp_collector_pool",
+        viewonly=True)
     _request_filter_listeners = orm.relationship(
         "Listener", secondary="listener_request_filter_pool",
         viewonly=True)
@@ -407,7 +410,8 @@ class Pool(base_models.BASE, base_models.IdMixin, base_models.ProjectMixin,
             if mirror.numerator and mirror.l7policy is not None]
         l7_listeners = [p.listener for p in l7policies
                         if len(p.l7rules) > 0 and p.enabled is True]
-        for li in l7_listeners + self._request_filter_listeners:
+        for li in (l7_listeners + self._request_filter_listeners +
+                   self._otlp_tracing_listeners):
             if li.id not in _l_ids:
                 _listeners.append(li)
                 _l_ids.append(li.id)
@@ -567,6 +571,22 @@ class AdditionalVip(base_models.BASE):
     network_id = sa.Column(sa.String(36), nullable=True)
 
 
+class ListenerOtlpCollectorPool(base_models.BASE):
+    """Foreign key for the collector reference in a listener's document."""
+
+    __tablename__ = 'listener_otlp_collector_pool'
+
+    listener_id = sa.Column(
+        sa.String(36), sa.ForeignKey(
+            'listener.id', ondelete='CASCADE',
+            name='fk_listener_otlp_collector_listener_id'),
+        primary_key=True)
+    pool_id = sa.Column(
+        sa.String(36), sa.ForeignKey(
+            'pool.id', name='fk_listener_otlp_collector_pool_id'),
+        nullable=False, index=True)
+
+
 class ListenerRequestFilterPool(base_models.BASE):
     """Relational references for the ordered filter document on Listener."""
 
@@ -618,6 +638,8 @@ class Listener(base_models.BASE, base_models.IdMixin,
     default_http_response = sa.Column(sa.JSON(none_as_null=True))
     https_virtual_hosts = sa.Column(sa.JSON(none_as_null=True))
     request_filter_sections = sa.Column(sa.JSON(none_as_null=True))
+    otlp_tracing = sa.Column(sa.JSON(none_as_null=True))
+    otlp_tracing_status = sa.Column(sa.String(16))
     default_pool_id = sa.Column(
         sa.String(36),
         sa.ForeignKey("pool.id", name="fk_listener_pool_id"),

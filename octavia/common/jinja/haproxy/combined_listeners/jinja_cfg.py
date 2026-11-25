@@ -145,7 +145,8 @@ class JinjaTemplater:
             CONF.api_settings.tls1_3_supported_ciphers.split(":"))
 
     def build_config(self, host_amphora, listeners, tls_certs,
-                     haproxy_versions, amp_details, socket_path=None):
+                     haproxy_versions, amp_details, socket_path=None,
+                     otlp_tls_certs=None):
         """Convert a logical configuration to the HAProxy version
 
         :param host_amphora: The Amphora this configuration is hosted on
@@ -177,7 +178,8 @@ class JinjaTemplater:
             host_amphora, listeners, tls_certs=tls_certs,
             socket_path=socket_path,
             feature_compatibility=feature_compatibility,
-            amp_details=amp_details, haproxy_version=version)
+            amp_details=amp_details, haproxy_version=version,
+            otlp_tls_certs=otlp_tls_certs)
 
     def _get_template(self):
         """Returns the specified Jinja configuration template."""
@@ -216,7 +218,7 @@ class JinjaTemplater:
                                 tls_certs=None, socket_path=None,
                                 feature_compatibility=None,
                                 amp_details: tp.Optional[dict] = None,
-                                haproxy_version=None):
+                                haproxy_version=None, otlp_tls_certs=None):
         """Renders a templated configuration from a load balancer object
 
         :param host_amphora: The Amphora this configuration is hosted on
@@ -242,7 +244,7 @@ class JinjaTemplater:
             listeners[0].load_balancer,
             listeners,
             tls_certs,
-            feature_compatibility)
+            feature_compatibility, otlp_tls_certs=otlp_tls_certs)
         if (haproxy_version and loadbalancer['enabled'] and
                 not versionutils.is_compatible("2.2.0", haproxy_version,
                                                same_major=False)):
@@ -278,6 +280,12 @@ class JinjaTemplater:
             for listener in loadbalancer['listeners']:
                 if not listener['enabled']:
                     continue
+                if (listener.get('otlp_tracing') and
+                        (amp_details or {}).get(
+                            constants.GATEWAY_CAPABILITY_LISTENER_OTLP_TRACING)
+                        is not True):
+                    raise driver_except.AmpVersionUnsupported(
+                        version='HAProxy lacks listener OTLP tracing support')
                 if ('http_request_policies_by_pool' in listener and
                         (amp_details or {}).get(policy_capability)
                         is not True):
@@ -373,12 +381,8 @@ class JinjaTemplater:
                         validate.validate_tcp_tls_backend_monitor(
                             monitor['type'])
                     if sans:
-                        pool['backend_tls_san_options'] = [
-                            ('dns:' + entry['hostname']
-                             if entry['type'] == 'Hostname' else
-                             'uri-hex:' + entry['uri'].encode('ascii').hex())
-                            for entry in
-                            validate.backend_tls_subject_alt_names(sans)]
+                        pool['backend_tls_san_options'] = (
+                            self._backend_tls_san_options(sans))
         if not socket_path:
             socket_path = (f'{self.base_amp_path}/'
                            f'{listeners[0].load_balancer.id}.sock')
@@ -459,7 +463,8 @@ class JinjaTemplater:
             jinja_dict, constants=constants, lib_consts=lib_consts)
 
     def _transform_loadbalancer(self, host_amphora, loadbalancer, listeners,
-                                tls_certs, feature_compatibility):
+                                tls_certs, feature_compatibility,
+                                otlp_tls_certs=None):
         """Transforms a load balancer into an object that will
 
            be processed by the templating system
@@ -468,8 +473,16 @@ class JinjaTemplater:
         for listener in listeners:
             if listener.protocol in constants.LVS_PROTOCOLS:
                 continue
-            listener_transforms.append(self._transform_listener(
-                listener, tls_certs, feature_compatibility, loadbalancer))
+            transformed = self._transform_listener(
+                listener, tls_certs, feature_compatibility, loadbalancer)
+            tracing = getattr(listener, 'otlp_tracing', None)
+            if (tracing and listener.enabled and loadbalancer.enabled and
+                    listener.provisioning_status not in (
+                        constants.PENDING_DELETE, constants.DELETED)):
+                transformed['otlp_tracing'] = self._transform_otlp_tracing(
+                    listener, loadbalancer, feature_compatibility,
+                    otlp_tls_certs or {})
+            listener_transforms.append(transformed)
         additional_vips = [
             vip.ip_address for vip in loadbalancer.additional_vips]
 
@@ -516,6 +529,8 @@ class JinjaTemplater:
                 continue
             limit = listener['connection_limit']
             connection_limit_sum += limit
+            if listener.get('otlp_tracing'):
+                connection_limit_sum += 1
             if listener.get('mixed_tls_termination'):
                 # A terminated connection also occupies a private frontend
                 # connection. Keep the public per-listener limit unchanged.
@@ -966,6 +981,54 @@ class JinjaTemplater:
                            'reject': section.get('reject', False),
                            'requests': requests})
         return result
+
+    @staticmethod
+    def _backend_tls_san_options(sans):
+        return [
+            ('dns:' + entry['hostname'] if entry['type'] == 'Hostname' else
+             'uri-hex:' + entry['uri'].encode('ascii').hex())
+            for entry in validate.backend_tls_subject_alt_names(sans)]
+
+    def _transform_otlp_tracing(self, listener, loadbalancer,
+                                feature_compatibility, pool_certs):
+        tracing = validate.otlp_tracing(listener.otlp_tracing)
+        tracing['socket'] = (
+            f'{constants.HAPROXY_OTLP_TRACING_SOCKET_DIR}/{listener.id}.sock')
+        pool = next((pool for pool in loadbalancer.pools if
+                     pool.id == tracing['collector_pool_id']), None)
+        if (pool is None or not pool.enabled or pool.provisioning_status in
+                (constants.PENDING_DELETE, constants.DELETED)):
+            return tracing
+
+        try:
+            validate.validate_otlp_collector_transport(
+                pool.protocol, pool.backend_h2c, pool.backend_tls_require_h2,
+                pool.tls_enabled, pool.alpn_protocols)
+            certs = pool_certs.get(pool.id, {})
+            required_material = {
+                'client_cert': pool.tls_certificate_id,
+                'ca_cert': pool.ca_tls_certificate_id,
+                'crl': pool.crl_container_id,
+            }
+            if certs.get('closed') or (pool.tls_enabled and any(
+                    ref and not certs.get(name)
+                    for name, ref in required_material.items())):
+                return tracing
+            rendered = self._transform_pool(
+                pool, feature_compatibility, False, pool_tls_certs=certs)
+            if not rendered['enabled']:
+                return tracing
+            if 'alpn_protocols' in rendered:
+                rendered['alpn_protocols'] = 'http/1.1'
+            sans = rendered.get('backend_tls_subject_alt_names')
+            if sans:
+                rendered['backend_tls_san_options'] = (
+                    self._backend_tls_san_options(sans))
+        except exceptions.ValidationException:
+            LOG.warning('Ignoring invalid OTLP collector pool %s', pool.id)
+            return tracing
+        tracing['pool'] = rendered
+        return tracing
 
     def _transform_pool(self, pool, feature_compatibility,
                         listener_tls_enabled, pool_tls_certs=None):

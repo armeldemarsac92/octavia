@@ -61,6 +61,10 @@ def _validate_frontend_client_auth_fallback(
 def validate_policy_options_on_create(
         driver, listener, *, creating_load_balancer=False):
     protocol = listener['protocol']
+    if creating_load_balancer and listener.get('otlp_tracing') is not None:
+        raise exceptions.ValidationException(detail=_(
+            'Configure listener OTLP tracing after creating the load '
+            'balancer and collector pool.'))
     if listener.get('client_authentication_insecure_fallback') is True:
         _validate_frontend_client_auth_fallback(
             protocol, listener.get('client_authentication'),
@@ -561,6 +565,11 @@ class ListenersController(base.BaseController):
             self._test_lb_and_listener_statuses(
                 context.session, lb_id=load_balancer_id)
 
+            self._validate_otlp_tracing(
+                context.session, driver, listener.protocol,
+                listener_dict.get('otlp_tracing'), load_balancer_id,
+                listener.project_id)
+
             if 'request_filter_sections' in listener_dict:
                 self._validate_listener_request_filters(
                     context.session, driver, listener_dict['protocol'],
@@ -821,6 +830,21 @@ class ListenersController(base.BaseController):
                     hostname=pool.backend_tls_hostname,
                     ca_ref=pool.ca_tls_certificate_id)
 
+    def _validate_otlp_tracing(self, session, driver, protocol, tracing,
+                               lb_id, project_id):
+        if tracing is None:
+            return
+        if protocol not in (constants.PROTOCOL_HTTP,
+                            constants.PROTOCOL_TERMINATED_HTTPS):
+            raise exceptions.ValidationException(detail=_(
+                'OTLP tracing requires an HTTP or TERMINATED_HTTPS listener.'))
+        driver_utils.require_listener_otlp_tracing(driver)
+        pool = self.repositories.pool.get_on_load_balancer_for_update(
+            session, lb_id, project_id, tracing['collector_pool_id'])
+        validate.validate_otlp_collector_transport(
+            pool.protocol, pool.backend_h2c, pool.backend_tls_require_h2,
+            pool.tls_enabled, pool.alpn_protocols)
+
     def _validate_listener_request_filters(
             self, session, driver, protocol, sections, lb_id, project_id):
         if sections is None:
@@ -973,6 +997,12 @@ class ListenersController(base.BaseController):
                 'default_http_response', db_listener.default_http_response)
             reopening = (listener_dict.get('enabled') is True and
                          not db_listener.enabled)
+            if 'otlp_tracing' in listener_dict or reopening:
+                self._validate_otlp_tracing(
+                    context.session, driver, db_listener.protocol,
+                    listener_dict.get('otlp_tracing',
+                                      db_listener.otlp_tracing),
+                    load_balancer_id, project_id)
             if ('request_filter_sections' in listener_dict or
                     (reopening and db_listener.request_filter_sections)):
                 self._validate_listener_request_filters(

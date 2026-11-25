@@ -8,24 +8,37 @@ if [[ -f "$binary" ]]; then
     mirror="$prefix-h2-alpn-v1-backend-sans-v1-http-policy-v1-http-mirror-v1"
     auth="$mirror-listener-auth-v1"
     budget="$auth-backend-retry-budget-v1"
+    tracing="$budget-listener-otlp-v1"
     if [[ "$version" != "$prefix "* &&
           "$version" != "$prefix-h2-alpn-v1 "* &&
           "$version" != "$prefix-h2-alpn-v1-backend-sans-v1 "* &&
           "$version" != "$prefix-h2-alpn-v1-backend-sans-v1-http-policy-v1 "* &&
           "$version" != "$mirror "* && "$version" != "$auth "* &&
-          "$version" != "$budget "* ]]; then
+          "$version" != "$budget "* && "$version" != "$tracing "* ]]; then
         echo "Expected the Octavia HAProxy strict DNS build" >&2
         exit 1
     fi
     install -m 0755 "$binary" /usr/sbin/haproxy
     if [[ "$version" == "$mirror "* || "$version" == "$auth "* ||
-          "$version" == "$budget "* ]]; then
+          "$version" == "$budget "* || "$version" == "$tracing "* ]]; then
         install -d -m 0755 /usr/lib/tmpfiles.d
         printf 'd /run/octavia/mirror 0755 root root -\n' > \
             /usr/lib/tmpfiles.d/octavia-haproxy-mirror.conf
     fi
-    if [[ "$version" == "$auth "* || "$version" == "$budget "* ]]; then
+    if [[ "$version" == "$auth "* || "$version" == "$budget "* ||
+          "$version" == "$tracing "* ]]; then
         printf 'd /run/octavia/listener-auth 0755 root root -\n' > \
             /usr/lib/tmpfiles.d/octavia-haproxy-listener-auth.conf
+    fi
+    if [[ "$version" == "$tracing "* ]]; then
+        features=$("$binary" -vv)
+        if [[ ! " $features " =~ [[:space:]]\+LUA[[:space:]] ]]; then
+            echo "Expected Lua support in the Octavia HAProxy tracing build" >&2
+            exit 1
+        fi
+        install -D -m 0644 /tmp/in_target.d/octavia-telemetry.lua \
+            /var/lib/octavia/octavia-telemetry.lua
+        printf 'd /run/octavia/telemetry 0755 root root -\n' > \
+            /usr/lib/tmpfiles.d/octavia-haproxy-telemetry.conf
     fi
 fi
