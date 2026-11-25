@@ -149,6 +149,8 @@ HAPROXY_OTLP_TRACING_SOCKET_DIR = '/run/octavia/telemetry'
 GATEWAY_CAPABILITY_LISTENER_REQUEST_FILTERS = 'listener_request_filters_v1'
 GATEWAY_CAPABILITY_LISTENER_AUTH_BODY = (
     'listener_http_external_auth_forward_body_v1')
+GATEWAY_CAPABILITY_HTTPS_LISTENER_AUTH_BODY = (
+    'listener_https_external_auth_forward_body_v1')
 GATEWAY_CAPABILITY_L7POLICY_HTTP_EXTERNAL_AUTH = (
     'l7policy_http_external_auth_v1')
 GATEWAY_CAPABILITY_L7POLICY_GRPC_EXTERNAL_AUTH = (

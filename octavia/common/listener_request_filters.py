@@ -93,10 +93,6 @@ def validate_listener(protocol, sections):
         raise exceptions.ValidationException(detail=_(
             'Listener request filters require an HTTP or TERMINATED_HTTPS '
             'listener.'))
-    if protocol != constants.PROTOCOL_HTTP and any(body_authorizers(sections)):
-        raise exceptions.ValidationException(detail=_(
-            'Listener ExternalAuth request body forwarding requires '
-            'an HTTP listener.'))
 
 
 def valid_pool(pool, protocol=constants.PROTOCOL_HTTP, *, tags=None,

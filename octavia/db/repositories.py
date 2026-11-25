@@ -1625,12 +1625,14 @@ class ListenerRepository(BaseRepository):
 
     def get_enabled_request_filters(self, session, lb_id):
         listener = self.model_class
-        rows = (session.query(listener.request_filter_sections).filter(
+        rows = (session.query(listener.protocol,
+                              listener.request_filter_sections).filter(
             listener.load_balancer_id == lb_id, listener.enabled.is_(True),
             listener.request_filter_sections.is_not(None),
             listener.provisioning_status.notin_(
                 (consts.PENDING_DELETE, consts.DELETED))).with_for_update())
-        return [sections for sections, in rows if sections]
+        return [(protocol, sections) for protocol, sections in rows
+                if sections]
 
     def get_enabled_otlp_tracing(self, session, lb_id):
         listener = self.model_class

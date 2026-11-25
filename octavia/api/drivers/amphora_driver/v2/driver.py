@@ -88,6 +88,7 @@ class AmphoraProviderDriver(driver_base.ProviderDriver):
     supports_listener_otlp_export_headers = True
     supports_listener_request_filters = True
     supports_listener_external_auth_forward_body = True
+    supports_https_listener_external_auth_forward_body = True
     supports_l7policy_http_external_auth = True
     supports_l7policy_grpc_external_auth = True
     supports_l7policy_external_auth_forward_body = True

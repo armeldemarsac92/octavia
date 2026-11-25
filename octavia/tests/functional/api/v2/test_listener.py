@@ -768,6 +768,86 @@ class TestListener(base.BaseAPITest):
         self.set_lb_status(lb['id'])
         self.delete(pool_path)
 
+    @mock.patch('octavia.common.tls_utils.cert_parser.load_certificates_data')
+    @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
+    def test_https_listener_filter_body_requires_its_own_capability(
+            self, rpc, certs):
+        certs.return_value = {
+            'tls_cert': data_models.TLSContainer(certificate='cert'),
+            'sni_certs': [],
+        }
+        self.conf.config(
+            group='api_settings',
+            enabled_listener_request_filter_providers=['amphora'],
+            enabled_listener_external_auth_forward_body_providers=['amphora'])
+        self.conf.config(group='haproxy_amphora',
+                         external_auth_body_buffer_bytes=4096)
+        lb = self.create_load_balancer(
+            uuidutils.generate_uuid(), provider='amphora')['loadbalancer']
+        self.set_lb_status(lb['id'])
+        auth = self.create_pool(
+            lb['id'], 'HTTP', 'ROUND_ROBIN',
+            tags=[constants.GATEWAY_LISTENER_AUTH_POOL_TAG])['pool']
+        self.set_lb_status(lb['id'])
+
+        field = 'request_filter_sections'
+        protected = {'hostname': 'upload.example', 'requests': [{
+            'type': 'ExternalAuth', 'http': {
+                'pool_id': auth['id'], 'forward_body_max_size': 4096}}]}
+        public = {'hostname': 'public.example'}
+        sections = [protected, public]
+        args = (constants.PROTOCOL_TERMINATED_HTTPS, 443, lb['id'])
+        options = {'default_tls_container_ref': uuidutils.generate_uuid(),
+                   field: sections}
+        https_cap = constants.GATEWAY_CAPABILITY_HTTPS_LISTENER_AUTH_BODY
+        http_cap = constants.GATEWAY_CAPABILITY_LISTENER_AUTH_BODY
+        caps_path = self.PROVIDERS_PATH + '/amphora/gateway_capabilities'
+        self.assertNotIn(https_cap, self.get(caps_path).json[
+            'gateway_capabilities'])
+        self.create_listener(*args, status=501, **options)
+
+        self.conf.config(
+            group='api_settings',
+            enabled_listener_external_auth_forward_body_providers=[],
+            enabled_https_listener_external_auth_forward_body_providers=[
+                'amphora'])
+        capabilities = self.get(caps_path).json
+        self.assertIn(https_cap, capabilities['gateway_capabilities'])
+        self.assertNotIn(http_cap, capabilities['gateway_capabilities'])
+        self.assertEqual(4096,
+                         capabilities['l7policy_external_auth_max_body_bytes'])
+        body = protected['requests'][0]['http']
+        body['forward_body_max_size'] = 4097
+        self.create_listener(*args, status=400, **options)
+        body['forward_body_max_size'] = 4096
+        listener = self.create_listener(*args, **options)['listener']
+        path = self.LISTENER_PATH.format(listener_id=listener['id'])
+        self.assertEqual(sections, self.get(path).json['listener'][field])
+        self.assertEqual(sections, rpc.return_value.cast.call_args.kwargs[
+            constants.LISTENER][field])
+
+        lb_path = self.LB_PATH.format(lb_id=lb['id'])
+        self.set_lb_status(lb['id'])
+        self.put(lb_path, {'loadbalancer': {'admin_state_up': False}})
+        self.set_lb_status(lb['id'])
+        self.conf.config(
+            group='api_settings',
+            enabled_listener_external_auth_forward_body_providers=['amphora'],
+            enabled_https_listener_external_auth_forward_body_providers=[])
+        self.put(lb_path, {'loadbalancer': {'admin_state_up': True}},
+                 status=501)
+
+        self.put(path, {'listener': {'admin_state_up': False}})
+        self.set_lb_status(lb['id'])
+        self.put(path, {'listener': {'admin_state_up': True}}, status=501)
+        reduced = [{'hostname': 'upload.example', 'reject': True}, public]
+        result = self.put(path, {'listener': {field: reduced}})
+        self.assertEqual(reduced, result.json['listener'][field])
+        self.set_lb_status(lb['id'])
+        self.put(path, {'listener': {'admin_state_up': True}})
+        self.set_lb_status(lb['id'])
+        self.put(lb_path, {'loadbalancer': {'admin_state_up': True}})
+
     @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
     def test_closed_listener_filters_can_withdraw_one_stale_section(self, rpc):
         api_settings = 'api_settings'

@@ -838,10 +838,11 @@ class LoadBalancersController(base.BaseController):
                         attributes=any('attributes' in spec
                                        for spec in tracing),
                         headers=any('headers' in spec for spec in tracing))
-                for sections in listener_repo.get_enabled_request_filters(
-                        context.session, id):
+                filters = listener_repo.get_enabled_request_filters(
+                    context.session, id)
+                for protocol, sections in filters:
                     driver_utils.require_listener_request_filters(
-                        driver, sections)
+                        driver, protocol, sections)
                 if listener_repo.has_enabled_frontend_client_auth_fallback(
                         context.session, id):
                     driver_utils.require_frontend_client_auth_fallback(driver)

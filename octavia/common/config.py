@@ -183,7 +183,15 @@ api_opts = [
     cfg.ListOpt('enabled_listener_external_auth_forward_body_providers',
                 default=[],
                 help=_('Providers whose regional fleets support forwarding '
-                       'request bodies for HTTP listener authorization. '
+                       'request bodies for cleartext HTTP listener '
+                       'authorization. '
+                       'Enable after qualifying all eligible Amphora agents '
+                       'and HAProxy builds.')),
+    cfg.ListOpt('enabled_https_listener_external_auth_forward_body_providers',
+                default=[],
+                help=_('Providers whose regional fleets support forwarding '
+                       'request bodies for terminated HTTPS listener '
+                       'authorization. '
                        'Enable after qualifying all eligible Amphora agents '
                        'and HAProxy builds.')),
     cfg.ListOpt('enabled_listener_otlp_tracing_providers', default=[],

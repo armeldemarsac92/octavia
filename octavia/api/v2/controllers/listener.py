@@ -899,7 +899,7 @@ class ListenersController(base.BaseController):
         if sections:
             listener_request_filters.validate_listener(protocol, sections)
             driver_utils.require_listener_request_filters(
-                driver, sections, validate_body=not withdrawing)
+                driver, protocol, sections, validate_body=not withdrawing)
             self.repositories.listener.validate_request_filter_pools(
                 session, sections, lb_id, project_id)
 

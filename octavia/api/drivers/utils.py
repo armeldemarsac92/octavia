@@ -225,6 +225,14 @@ def gateway_capabilities(driver):
                 False) is True):
             capabilities.append(
                 constants.GATEWAY_CAPABILITY_LISTENER_AUTH_BODY)
+        https_body_providers = (
+            api_settings
+            .enabled_https_listener_external_auth_forward_body_providers)
+        if (driver.name in https_body_providers and getattr(
+                driver, 'supports_https_listener_external_auth_forward_body',
+                False) is True):
+            capabilities.append(
+                constants.GATEWAY_CAPABILITY_HTTPS_LISTENER_AUTH_BODY)
     if (L7POLICY_EXTERNAL_AUTH_PAYLOAD_AVAILABLE and
             driver.name in
             api_settings.enabled_l7policy_http_external_auth_providers and
@@ -649,7 +657,8 @@ def _require_l7policy_external_auth(driver, protocol, capability, name):
                 'provider.') % {'name': name})
 
 
-def require_listener_request_filters(driver, sections, *, validate_body=True):
+def require_listener_request_filters(driver, protocol, sections, *,
+                                     validate_body=True):
     capabilities = gateway_capabilities(driver)
     if (constants.GATEWAY_CAPABILITY_LISTENER_REQUEST_FILTERS not in
             capabilities):
@@ -659,15 +668,19 @@ def require_listener_request_filters(driver, sections, *, validate_body=True):
                 'this provider.'))
     if not validate_body:
         return
+    body_capability = (
+        constants.GATEWAY_CAPABILITY_HTTPS_LISTENER_AUTH_BODY
+        if protocol == constants.PROTOCOL_TERMINATED_HTTPS else
+        constants.GATEWAY_CAPABILITY_LISTENER_AUTH_BODY)
     for auth in listener_request_filters.body_authorizers(sections):
-        if constants.GATEWAY_CAPABILITY_LISTENER_AUTH_BODY not in capabilities:
+        if body_capability not in capabilities:
             raise exceptions.ProviderUnsupportedOptionError(
                 prov=driver.name, user_msg=_(
-                    'HTTP listener ExternalAuth request body forwarding is '
-                    'unavailable for this provider.'))
+                    'Listener ExternalAuth request body forwarding is '
+                    'unavailable for this provider on %(protocol)s.') % {
+                        'protocol': protocol})
         if validate.external_auth_body_over_limit(auth):
-            _reject_l7policy_external_auth_body_limit(
-                driver, constants.PROTOCOL_HTTP)
+            _reject_l7policy_external_auth_body_limit(driver, protocol)
 
 
 def require_http_request_mirror(driver, protocol):

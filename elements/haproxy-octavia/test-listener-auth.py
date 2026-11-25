@@ -139,10 +139,33 @@ class TestListenerAuth(unittest.TestCase):
         tls.tls_certificate_id = 'test-cert'
         tls.request_filter_sections = [
             section for section in sections if section['hostname'] != '*']
+        tls.request_filter_sections.append(http.request_filter_sections[-1])
+        shared = cls.listener('tls-shared', c.PROTOCOL_TERMINATED_HTTPS)
+        shared.tls_certificate_id = 'test-cert'
+        shared.default_pool = shared.default_pool_id = None
+        shared.https_virtual_hosts = ['upload.example', 'public.example']
+        # Check size before contacting either authorizer in this chain.
+        upload_first = step(cls.auth.id, '/body')
+        upload_first['http']['forward_body_max_size'] = LISTENER_BODY_LIMIT
+        shared.request_filter_sections = [
+            {'hostname': 'upload.example',
+             'requests': [upload_first, chain[1]]},
+            {'hostname': 'public.example'},
+        ]
+        shared.l7policies[0].https_listener_hostname = 'upload.example'
+        shared.l7policies.append(dm.L7Policy(
+            id='public-route', enabled=True,
+            action=c.L7POLICY_ACTION_REDIRECT_TO_POOL,
+            redirect_pool=cls.fallback, redirect_pool_id=cls.fallback.id,
+            https_listener_hostname='public.example',
+            l7rules=[dm.L7Rule(
+                id='public-path', enabled=True, invert=False,
+                type=c.L7RULE_TYPE_PATH,
+                compare_type=c.L7RULE_COMPARE_TYPE_STARTS_WITH, value='/')]))
         ordinary = cls.listener('ordinary', c.PROTOCOL_HTTP)
-        cls.lb.listeners = [http, tls, ordinary]
+        cls.lb.listeners = [http, tls, shared, ordinary]
         cls.lb.pools = [cls.auth, cls.selected, cls.fallback, cls.empty]
-        cls.web, cls.tls, cls.ordinary = (
+        cls.web, cls.tls, cls.shared_tls, cls.ordinary = (
             listener.protocol_port for listener in cls.lb.listeners)
         config = cfg.CONF
         config.set_override('base_cert_dir', str(cls.path),
@@ -248,15 +271,19 @@ class TestListenerAuth(unittest.TestCase):
     def cert(cls):
         cert_dir = cls.path / cls.lb.id
         cert_dir.mkdir()
-        key, cert = cert_dir / 'key', cert_dir / 'cert'
+        key, cls.tls_cert = cert_dir / 'key', cert_dir / 'cert'
         subprocess.run([
             'openssl', 'req', '-x509', '-newkey', 'ec',
             '-pkeyopt', 'ec_paramgen_curve:prime256v1', '-noenc',
-            '-subj', '/CN=auth.example', '-keyout', str(key), '-out', str(cert)
+            '-subj', '/CN=auth.example', '-addext',
+            'subjectAltName=DNS:auth.example,DNS:upload.example,'
+            'DNS:public.example', '-keyout', str(key),
+            '-out', str(cls.tls_cert),
         ], capture_output=True, check=True)
         combined = cert_dir / 'server.pem'
-        combined.write_bytes(key.read_bytes() + cert.read_bytes())
-        (cert_dir / 'tls.pem').write_text(str(combined) + '\n')
+        combined.write_bytes(key.read_bytes() + cls.tls_cert.read_bytes())
+        for listener in ('tls', 'tls-shared'):
+            (cert_dir / f'{listener}.pem').write_text(str(combined) + '\n')
 
     def request(self, host, path='/catalog?kind=1', port=None, tls=False,
                 body=b'body'):
@@ -381,6 +408,71 @@ class TestListenerAuth(unittest.TestCase):
         self.assertEqual('public.example', app['headers']['host'])
         self.assertEqual(['public.example', 'public.example'], [
             item['headers']['host'] for item in self.auth_requests])
+
+    def tls_upload(self, port, sni, authority, body, version):
+        result = subprocess.run([
+            'curl', '--silent', '--show-error', '--noproxy', '*',
+            '--http' + version, '--cacert', str(self.tls_cert),
+            '--request', 'PATCH', '--header', f'Host: {authority}',
+            '--resolve', f'{sni}:{port}:127.0.0.1',
+            '--data-binary', '@-',
+            '--write-out', '\n%{http_code} %{http_version}',
+            f'https://{sni}:{port}/upload',
+        ], input=body, capture_output=True, check=True)
+        payload, metadata = result.stdout.rsplit(b'\n', 1)
+        status, negotiated = metadata.decode().split()
+        self.assertEqual(version, negotiated)
+        return int(status), json.loads(payload) if status == '200' else None
+
+    def test_https_listener_body_limit_and_authority_isolation(self):
+        if not self.body_supported:
+            self.skipTest('HAProxy lacks HTTP ExternalAuth body forwarding')
+        exact = b'abcdef0123456789' * (LISTENER_BODY_LIMIT // 16)
+        oversized = exact + b'x'
+        upload = 'upload.example'
+        public = 'public.example'
+        for version in ('1.1', '2'):
+            with self.subTest(version=version):
+                self.auth_requests.clear()
+                self.origin_requests.clear()
+                status, app = self.tls_upload(
+                    self.shared_tls, upload, upload, exact, version)
+                self.assertEqual(200, status)
+                self.assertEqual('selected', app['route'])
+                self.assertEqual(exact, app['body'].encode())
+                self.assertEqual(
+                    [('/body/upload', exact), ('/second/upload', b'')],
+                    [(req['path'], req['body'].encode())
+                     for req in self.auth_requests])
+                self.assertEqual([app], self.origin_requests)
+
+                self.auth_requests.clear()
+                self.origin_requests.clear()
+                status, _ = self.tls_upload(
+                    self.shared_tls, upload, upload, oversized, version)
+                self.assertEqual(413, status)
+                status, _ = self.tls_upload(
+                    self.shared_tls, upload, public, exact, version)
+                self.assertEqual(421, status)
+                self.assertEqual([], self.auth_requests)
+                self.assertEqual([], self.origin_requests)
+
+                status, app = self.tls_upload(
+                    self.shared_tls, public, public, oversized, version)
+                self.assertEqual(200, status)
+                self.assertEqual('fallback', app['route'])
+                self.assertEqual(oversized, app['body'].encode())
+                self.assertEqual([], self.auth_requests)
+                self.assertEqual([app], self.origin_requests)
+
+        self.auth_requests.clear()
+        status, app = self.tls_upload(self.tls, upload, public, exact, '2')
+        self.assertEqual(200, status)
+        self.assertEqual(exact, app['body'].encode())
+        self.assertEqual('public.example', app['headers']['host'])
+        self.assertEqual([('/second/upload', public, exact)], [
+            (req['path'], req['headers']['host'], req['body'].encode())
+            for req in self.auth_requests])
 
     def test_failures_stop_before_routing(self):
         self.auth_requests.clear()
