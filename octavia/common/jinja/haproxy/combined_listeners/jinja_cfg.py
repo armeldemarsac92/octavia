@@ -96,9 +96,12 @@ def _read_http_cookie_signing_key():
     return None
 
 
-def _derive_http_cookie_signing_key(key, project_id, scope, name, timeout):
+def _derive_http_cookie_signing_key(key, project_id, scope, name, timeout, *,
+                                    permanent=False):
+    purpose = ('octavia-http-cookie-permanent-v1' if permanent else
+               'octavia-http-cookie-v1')
     context = json.dumps(
-        ['octavia-http-cookie-v1', project_id, scope, name, timeout],
+        [purpose, project_id, scope, name, timeout],
         separators=(',', ':')).encode('ascii')
     digest = hmac.digest(key, context, 'sha256')
     return base64.b64encode(digest).decode('ascii')
@@ -301,6 +304,10 @@ class JinjaTemplater:
         if (amp_details or {}).get(cookie_capability) is True:
             feature_compatibility[cookie_capability] = functools.cache(
                 _read_http_cookie_signing_key)
+            permanent_capability = (
+                constants.GATEWAY_CAPABILITY_HTTP_COOKIE_PERMANENT)
+            if (amp_details or {}).get(permanent_capability) is True:
+                feature_compatibility[permanent_capability] = True
         san_capability = (
             constants.GATEWAY_CAPABILITY_BACKEND_TLS_SUBJECT_ALT_NAMES)
         policy_capability = constants.GATEWAY_CAPABILITY_HTTP_REQUEST_POLICY
@@ -1194,9 +1201,12 @@ class JinjaTemplater:
             timeout = getattr(pool.session_persistence,
                               'cookie_absolute_timeout_ms', None)
             scope = getattr(pool.session_persistence, 'cookie_scope', None)
-            if timeout is not None or scope is not None:
+            permanent = getattr(pool.session_persistence, 'cookie_permanent',
+                                False) is True
+            if timeout is not None or scope is not None or permanent:
                 self._configure_absolute_http_cookie(
-                    pool, persistence, timeout, scope, feature_compatibility)
+                    pool, persistence, timeout, scope, permanent,
+                    feature_compatibility)
         if (pool.tls_certificate_id and pool_tls_certs and
                 pool_tls_certs.get('client_cert')):
             ret_value['client_cert'] = pool_tls_certs.get('client_cert')
@@ -1239,7 +1249,7 @@ class JinjaTemplater:
 
     @staticmethod
     def _configure_absolute_http_cookie(pool, persistence, timeout, scope,
-                                        feature_compatibility):
+                                        permanent, feature_compatibility):
         name = persistence['cookie_name']
         if (pool.protocol != constants.PROTOCOL_HTTP or
                 persistence['type'] !=
@@ -1251,13 +1261,19 @@ class JinjaTemplater:
         # Keep the legacy cookie tokens off these server lines even when the
         # key is unavailable or the Amphora does not support this profile.
         persistence['absolute_timeout_us'] = timeout * 1000
+        if permanent:
+            if not feature_compatibility.get(
+                    constants.GATEWAY_CAPABILITY_HTTP_COOKIE_PERMANENT):
+                return
+            persistence['cookie_max_age'] = (timeout + 999) // 1000
         read_key = feature_compatibility.get(
             constants.GATEWAY_CAPABILITY_HTTP_COOKIE_ABSOLUTE_TIMEOUT)
         if read_key:
             key = read_key()
             if key is not None:
                 persistence['signing_key'] = _derive_http_cookie_signing_key(
-                    key, pool.project_id, scope, name, timeout)
+                    key, pool.project_id, scope, name, timeout,
+                    permanent=permanent)
 
     @staticmethod
     def _transform_session_persistence(persistence, feature_compatibility):

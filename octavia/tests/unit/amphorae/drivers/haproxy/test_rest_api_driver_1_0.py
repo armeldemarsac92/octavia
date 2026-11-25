@@ -487,7 +487,7 @@ class TestHaproxyAmphoraLoadBalancerDriverTest(base.TestCase):
             id='pool', protocol=constants.PROTOCOL_HTTP, enabled=True,
             session_persistence=data_models.SessionPersistence(
                 cookie_name='gw', cookie_absolute_timeout_ms=1500,
-                cookie_scope=scope))
+                cookie_scope=scope, cookie_permanent=True))
         listener = data_models.Listener(
             id='http', protocol=constants.PROTOCOL_HTTP, enabled=True,
             pools=[pool])
@@ -496,7 +496,7 @@ class TestHaproxyAmphoraLoadBalancerDriverTest(base.TestCase):
             listeners=[listener], amphorae=[primary, secondary])
         client = self.driver.clients[API_VERSION]
         published_in = session().begin().__enter__()
-        policy = {pool.id: ('gw', 1500, scope)}
+        policy = {pool.id: ('gw', 1500, scope, True)}
         rendered_states = {primary.id: constants.ERROR,
                            secondary.id: constants.ACTIVE}
 
@@ -527,9 +527,20 @@ class TestHaproxyAmphoraLoadBalancerDriverTest(base.TestCase):
         self.driver.update(lb)
         status.assert_not_called()
         secondary.role = constants.ROLE_BACKUP
+        retiring = data_models.Amphora(id='retiring',
+                                       role=constants.ROLE_BACKUP,
+                                       status=constants.PENDING_DELETE)
+        retiring.api_version = API_VERSION
+        lb.amphorae.append(retiring)
+        rendered_states[retiring.id] = constants.ERROR
         self.driver.update(lb)
         status.assert_called_once_with(
             published_in, policy, failed=set(), recovered={pool.id})
+        status.reset_mock()
+        lb.amphorae = [retiring, primary, secondary]
+        client.reload_listener.side_effect = [None, RuntimeError()]
+        self.assertRaises(RuntimeError, self.driver.update, lb)
+        status.assert_not_called()
 
     @mock.patch('octavia.db.api.session')
     @mock.patch('octavia.db.repositories.PoolRepository.'

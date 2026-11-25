@@ -925,6 +925,11 @@ listen octavia-mirror-{{ pool.id }}
     {% set cookie = pool.session_persistence %}
     {% set name = cookie.cookie_name %}
     {% set escaped_name = name|replace('.', '[.]') %}
+    {% if cookie.cookie_max_age is defined %}
+        {% set attributes = 'Path=/; Max-Age=' ~ cookie.cookie_max_age %}
+    {% else %}
+        {% set attributes = 'path=/' %}
+    {% endif %}
     acl octavia_cookie_unique req.cook_cnt({{ name }}) eq 1
     acl octavia_cookie_format var(txn.octavia_cookie) -m reg '^v1[.][0-9a-f]{32}[.][1-9][0-9]{0,17}[.][A-Za-z0-9_-]{43}$'
     acl octavia_cookie_age_valid var(txn.octavia_cookie_age) -m int ge 0
@@ -949,9 +954,15 @@ listen octavia-mirror-{{ pool.id }}
     http-after-response set-var(txn.octavia_cookie_signature) var(txn.octavia_cookie_issue),hmac(sha256,txn.octavia_cookie_signing_key),ub64enc if { var(txn.octavia_cookie_issue) -m found }
     http-after-response set-var-fmt(txn.octavia_cookie_out) "%[var(txn.octavia_cookie_issue)].%[var(txn.octavia_cookie_signature)]" if { var(txn.octavia_cookie_signature) -m found }
     http-after-response add-header Cache-Control private if !octavia_cookie_marker { var(txn.octavia_cookie_out) -m found }
-    http-after-response add-header Set-Cookie "{{ name }}=%[var(txn.octavia_cookie_out)]; path=/" if !octavia_cookie_marker { var(txn.octavia_cookie_out) -m found }
+    http-after-response add-header Set-Cookie "{{ name }}=%[var(txn.octavia_cookie_out)]; {{ attributes }}" if !octavia_cookie_marker { var(txn.octavia_cookie_out) -m found }
+    {% if cookie.cookie_max_age is defined %}
+    {# Ignore a native removal marker if the request cookie still applies.
+       An empty field leaves other Set-Cookie fields intact. #}
+    http-after-response replace-header Set-Cookie '^{{ escaped_name }}=.*$' "%[var(txn.octavia_cookie_out)]" if octavia_cookie_marker !{ var(txn.octavia_cookie_issue) -m found } { var(txn.octavia_cookie_member) -m found }
+    {% else %}
     http-after-response set-var(txn.octavia_cookie_out) var(txn.octavia_cookie) if octavia_cookie_marker !{ var(txn.octavia_cookie_issue) -m found } { var(txn.octavia_cookie_member) -m found }
-    http-after-response replace-header Set-Cookie '^{{ escaped_name }}=.*$' "{{ name }}=%[var(txn.octavia_cookie_out)]; path=/" if octavia_cookie_marker { var(txn.octavia_cookie_out) -m found }
+    {% endif %}
+    http-after-response replace-header Set-Cookie '^{{ escaped_name }}=.*$' "{{ name }}=%[var(txn.octavia_cookie_out)]; {{ attributes }}" if octavia_cookie_marker { var(txn.octavia_cookie_out) -m found }
 {% endmacro %}
 
 

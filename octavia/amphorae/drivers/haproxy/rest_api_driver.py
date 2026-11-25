@@ -200,7 +200,9 @@ class HaproxyAmphoraLoadBalancerDriver(
                                 consts.PENDING_DELETE, consts.DELETED)):
                         policies[pool.id] = (
                             persistence.cookie_name, timeout,
-                            persistence.cookie_scope)
+                            persistence.cookie_scope,
+                            getattr(persistence, 'cookie_permanent',
+                                    False) is True)
         if not policies:
             yield {}
             return
@@ -225,9 +227,11 @@ class HaproxyAmphoraLoadBalancerDriver(
                             self._allocated_amphorae(loadbalancer)}
             except driver_except.ListenerProvisioningError:
                 pass
+        allocated = {amp.id for amp in loadbalancer.amphorae
+                     if amp.status == consts.AMPHORA_ALLOCATED}
         failed = {pool_id for pool_id in policies
-                  if any(vote.get(pool_id) == consts.ERROR
-                         for vote in votes.values())}
+                  if any(votes.get(amp_id, {}).get(pool_id) == consts.ERROR
+                         for amp_id in allocated)}
         recovered = {
             pool_id for pool_id in policies.keys() - failed
             if expected and all(votes.get(amp_id, {}).get(pool_id) ==
