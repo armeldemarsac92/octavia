@@ -20,6 +20,7 @@ import os
 import ssl
 import time
 from typing import Optional
+import uuid
 import warnings
 
 from cryptography import x509
@@ -158,15 +159,29 @@ class HaproxyAmphoraLoadBalancerDriver(
                     **tracing_options, **cookie_options)
 
     @staticmethod
-    def _active_otlp_listeners(loadbalancer):
-        return {
-            listener.id: listener.otlp_tracing
-            for listener in loadbalancer.listeners
-            if (loadbalancer.enabled and listener.enabled and
-                isinstance(getattr(listener, 'otlp_tracing', None), dict) and
-                listener.provisioning_status not in (
-                    consts.PENDING_DELETE, consts.DELETED))
-        }
+    def _otlp_render_targets(loadbalancer):
+        targets = {}
+        for listener in loadbalancer.listeners:
+            if listener.provisioning_status in (
+                    consts.PENDING_DELETE, consts.DELETED):
+                continue
+            tracing = getattr(listener, 'otlp_tracing', None)
+            withdrawing = (
+                tracing is None and
+                getattr(listener, 'otlp_tracing_status', None) in (
+                    consts.PENDING_UPDATE, consts.ERROR))
+            if withdrawing or (loadbalancer.enabled and listener.enabled and
+                               isinstance(tracing, dict)):
+                targets[listener.id] = (
+                    tracing, getattr(listener, 'otlp_tracing_revision', None))
+        return targets
+
+    @staticmethod
+    def _otlp_publication_acked(response, publication):
+        header = consts.HAPROXY_OTLP_PUBLICATION_HEADER
+        return (publication is not None and
+                getattr(response, 'status_code', None) == 202 and
+                response.headers.get(header) == publication)
 
     @contextlib.contextmanager
     def _http_cookie_render_results(self, loadbalancer):
@@ -224,35 +239,37 @@ class HaproxyAmphoraLoadBalancerDriver(
 
     @contextlib.contextmanager
     def _otlp_render_results(self, loadbalancer):
-        listeners = self._active_otlp_listeners(loadbalancer)
+        listeners = self._otlp_render_targets(loadbalancer)
         if not listeners:
             yield {}
             return
         results = {}
-        expected = {amp.id for amp in loadbalancer.amphorae
+        expected = {amp.id: amp.role for amp in loadbalancer.amphorae
                     if amp.status != consts.DELETED}
-        paired = loadbalancer.topology == consts.TOPOLOGY_ACTIVE_STANDBY
-        complete = len(expected) == 2 if paired else bool(expected)
+        roles = {
+            consts.TOPOLOGY_SINGLE: {consts.ROLE_STANDALONE},
+            consts.TOPOLOGY_ACTIVE_STANDBY: {
+                consts.ROLE_MASTER, consts.ROLE_BACKUP},
+        }.get(loadbalancer.topology)
+        valid_peers = (roles and len(expected) == len(roles) and
+                       set(expected.values()) == roles)
         try:
             yield {'otlp_observed': results}
         finally:
             statuses = {}
-            for listener_id, tracing in listeners.items():
-                votes = {amp: result[listener_id]
-                         for amp, result in results.items()
-                         if listener_id in result}
-                if consts.ERROR in votes.values():
-                    statuses[listener_id] = (tracing, consts.ERROR)
-                elif complete and expected.issubset(votes):
-                    statuses[listener_id] = (tracing, consts.ACTIVE)
-            if statuses:
-                listener_repo = repo.ListenerRepository()
-                peer_check = ({
-                    'expected_pair': (loadbalancer.id, expected)
-                } if paired else {})
-                with db_api.session().begin() as session:
-                    listener_repo.set_otlp_tracing_statuses(
-                        session, statuses, **peer_check)
+            for listener_id, (tracing, revision) in listeners.items():
+                applied = valid_peers and all(
+                    results.get(amp, {}).get(listener_id) == consts.ACTIVE
+                    for amp in expected)
+                statuses[listener_id] = (
+                    tracing, revision,
+                    consts.ACTIVE if applied else consts.ERROR)
+            listener_repo = repo.ListenerRepository()
+            with db_api.session().begin() as session:
+                listener_repo.set_otlp_tracing_statuses(
+                    session, statuses, topology=(
+                        loadbalancer.id, loadbalancer.topology, expected,
+                        loadbalancer.enabled))
 
     def _update_amphora_listeners(
             self, loadbalancer, amphora, timeout_dict=None, *,
@@ -272,6 +289,8 @@ class HaproxyAmphoraLoadBalancerDriver(
 
         has_tcp = False
         otlp_tls_certs = {}
+        tracing_targets = self._otlp_render_targets(loadbalancer)
+        tracing_results = {}
         certs = dict(backend_tls_certs or {})
         frontend_tls_certs = frontend_tls_certs or {}
         listeners_to_update = []
@@ -304,17 +323,30 @@ class HaproxyAmphoraLoadBalancerDriver(
                     listeners_to_update.append(listener)
                     continue
 
-                tracing = getattr(listener, 'otlp_tracing', None)
-                if (listener.enabled and loadbalancer.enabled and
-                        isinstance(tracing, dict)):
-                    pool_id = tracing['collector_pool_id']
-                    if pool_id not in otlp_tls_certs:
-                        otlp_tls_certs[pool_id] = (
-                            self._process_otlp_collector_certs(
-                                listener, loadbalancer, amphora, pool_id))
-                    if (tcp_batch_configs is not None and
-                            otlp_tls_certs[pool_id].get('closed')):
-                        raise driver_except.ListenerProvisioningError()
+                if listener.id in tracing_targets:
+                    tracing, _ = tracing_targets[listener.id]
+                    tracing_status = consts.ACTIVE
+                    if tracing is not None:
+                        if amp_details is None:
+                            client = self.clients[amphora.api_version]
+                            amp_details = client.get_details(
+                                amphora, timeout_dict=timeout_dict) or {}
+                        can_trace = jinja_combo.otlp_tracing_supported(
+                            loadbalancer, tracing, amp_details)
+                        if can_trace:
+                            pool_id = tracing['collector_pool_id']
+                            if pool_id not in otlp_tls_certs:
+                                otlp_tls_certs[pool_id] = (
+                                    self._process_otlp_collector_certs(
+                                        listener, loadbalancer, amphora,
+                                        pool_id))
+                            can_trace = not otlp_tls_certs[pool_id].get(
+                                'closed')
+                            if tcp_batch_configs is not None and not can_trace:
+                                raise driver_except.ListenerProvisioningError()
+                        if not can_trace:
+                            tracing_status = consts.ERROR
+                    tracing_results[listener.id] = tracing_status
                 try:
                     if client_auth_fallback:
                         certs.update(frontend_tls_certs[listener.id])
@@ -347,6 +379,13 @@ class HaproxyAmphoraLoadBalancerDriver(
                 tracing_options = {}
                 if otlp_tls_certs:
                     tracing_options['otlp_tls_certs'] = otlp_tls_certs
+                configured = {listener.id for listener in listeners_to_update}
+                tracing_results = {
+                    listener_id: tracing_results[listener_id]
+                    for listener_id in configured & tracing_results.keys()}
+                publication = uuid.uuid4().hex if tracing_results else None
+                publication_options = (
+                    {'otlp_publication': publication} if publication else {})
                 cookie_results = {}
                 cookie_options = (
                     {'http_cookie_results': cookie_results}
@@ -356,30 +395,22 @@ class HaproxyAmphoraLoadBalancerDriver(
                     tls_certs=certs,
                     haproxy_versions=haproxy_versions,
                     amp_details=amp_details, **tracing_options,
-                    **cookie_options)
+                    **cookie_options, **publication_options)
                 if tcp_batch_configs is not None:
-                    tcp_batch_configs.append((amphora, config, cookie_results))
-                    return {listener.id for listener in listeners_to_update}
+                    tcp_batch_configs.append((amphora, config, cookie_results,
+                                              tracing_results, publication))
+                    return configured
                 self.clients[amphora.api_version].upload_config(
                     amphora, loadbalancer.id, config,
                     timeout_dict=timeout_dict)
-                self.clients[amphora.api_version].reload_listener(
-                    amphora, loadbalancer.id, timeout_dict=timeout_dict)
+                response = self.clients[amphora.api_version].reload_listener(
+                    amphora, loadbalancer.id, timeout_dict=timeout_dict,
+                    **publication_options)
                 if http_cookie_observed is not None:
                     http_cookie_observed[amphora.id] = cookie_results
-                if otlp_observed is not None:
-                    results = otlp_observed.setdefault(amphora.id, {})
-                    for listener in listeners_to_update:
-                        tracing = getattr(listener, 'otlp_tracing', None)
-                        if (not tracing or not listener.enabled or
-                                listener.provisioning_status in (
-                                    consts.PENDING_DELETE, consts.DELETED)):
-                            continue
-                        pool_id = tracing['collector_pool_id']
-                        material = otlp_tls_certs[pool_id]
-                        results[listener.id] = (
-                            consts.ERROR if material.get('closed') else
-                            consts.ACTIVE)
+                if (otlp_observed is not None and
+                        self._otlp_publication_acked(response, publication)):
+                    otlp_observed[amphora.id] = tracing_results
             elif tcp_batch_configs is None:
                 # If we aren't updating any listeners, make sure there are
                 # no listeners hanging around. For example if this update
@@ -581,15 +612,25 @@ class HaproxyAmphoraLoadBalancerDriver(
             if tcp_member_batch:
                 # Build every peer's combined config before uploading any
                 # candidate. Validate all uploads before requesting a reload.
-                for amphora, config, _ in tcp_batch_configs:
+                for amphora, config, _, _, _ in tcp_batch_configs:
                     self.clients[amphora.api_version].upload_config(
                         amphora, loadbalancer.id, config)
                 votes = cookie_options.get('http_cookie_observed')
-                for amphora, _, cookie_results in tcp_batch_configs:
-                    self.clients[amphora.api_version].reload_listener(
-                        amphora, loadbalancer.id)
+                tracing_votes = tracing_options.get('otlp_observed')
+                for (amphora, _, cookie_results, tracing_results,
+                     publication) in tcp_batch_configs:
+                    client = self.clients[amphora.api_version]
+                    publication_options = (
+                        {'otlp_publication': publication} if publication else
+                        {})
+                    response = client.reload_listener(
+                        amphora, loadbalancer.id, **publication_options)
                     if votes is not None:
                         votes[amphora.id] = cookie_results
+                    if (tracing_votes is not None and
+                            self._otlp_publication_acked(response,
+                                                         publication)):
+                        tracing_votes[amphora.id] = tracing_results
 
     def update_failover_listeners(self, loadbalancer, amphora_index,
                                   amphorae_status, timeout_dict=None):
@@ -598,7 +639,7 @@ class HaproxyAmphoraLoadBalancerDriver(
         # A paired exporter needs confirmations from the same graph snapshot.
         tracing_pair = (
             loadbalancer.topology == consts.TOPOLOGY_ACTIVE_STANDBY and
-            bool(self._active_otlp_listeners(loadbalancer)))
+            bool(self._otlp_render_targets(loadbalancer)))
         coordinated = opted_in or bool(fallback or withdrawn) or tracing_pair
         if coordinated and amphora_index == 0:
             peers = [amp for amp in loadbalancer.amphorae
@@ -1463,10 +1504,15 @@ class AmphoraAPIClient1_0(AmphoraAPIClientBase):
             return r.json()
         return None
 
-    def _action(self, action, amp, object_id, timeout_dict=None):
+    def _action(self, action, amp, object_id, timeout_dict=None, *,
+                otlp_publication=None):
+        options = {}
+        if otlp_publication is not None:
+            options['headers'] = {
+                consts.HAPROXY_OTLP_PUBLICATION_HEADER: otlp_publication}
         r = self.put(
             amp, f'loadbalancer/{object_id}/{action}',
-            timeout_dict=timeout_dict)
+            timeout_dict=timeout_dict, **options)
         return exc.check_exception(r)
 
     def upload_cert_pem(self, amp, loadbalancer_id, pem_filename, pem_file):

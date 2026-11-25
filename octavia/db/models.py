@@ -603,7 +603,7 @@ class AdditionalVip(base_models.BASE):
 
 
 class ListenerOtlpCollectorPool(base_models.BASE):
-    """Foreign key for the collector reference in a listener's document."""
+    """Collector references held until listener publication is acknowledged."""
 
     __tablename__ = 'listener_otlp_collector_pool'
 
@@ -615,7 +615,7 @@ class ListenerOtlpCollectorPool(base_models.BASE):
     pool_id = sa.Column(
         sa.String(36), sa.ForeignKey(
             'pool.id', name='fk_listener_otlp_collector_pool_id'),
-        nullable=False, index=True)
+        primary_key=True, index=True)
 
 
 class ListenerRequestFilterPool(base_models.BASE):
@@ -671,6 +671,7 @@ class Listener(base_models.BASE, base_models.IdMixin,
     request_filter_sections = sa.Column(sa.JSON(none_as_null=True))
     otlp_tracing = sa.Column(sa.JSON(none_as_null=True))
     otlp_tracing_status = sa.Column(sa.String(16))
+    otlp_tracing_revision = sa.Column(sa.String(36))
     default_pool_id = sa.Column(
         sa.String(36),
         sa.ForeignKey("pool.id", name="fk_listener_pool_id"),

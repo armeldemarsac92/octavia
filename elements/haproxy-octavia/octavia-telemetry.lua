@@ -1,6 +1,6 @@
 -- SPDX-License-Identifier: Apache-2.0
 -- Loaded into the shared Lua state once per traced listener.
-local listener_id, collector_socket, service_name, span_name = ...
+local listener_id, collector_socket, service_name, span_name, base_n, base_d, parent_n, parent_d = ...
 assert(listener_id and listener_id:match("^[a-f0-9-]+$"),
        "telemetry requires a listener UUID")
 assert(collector_socket and collector_socket:match("^/[A-Za-z0-9_./-]+$"),
@@ -11,6 +11,21 @@ assert(span_name and #span_name <= 256 and span_name:match("^[A-Za-z0-9_.:/ -]+$
        and not span_name:match("^ ") and not span_name:match(" $")
        and not span_name:find("  ", 1, true), "invalid telemetry span name")
 
+local function fraction(numerator, denominator)
+    if numerator == nil and denominator == nil then
+        return nil
+    end
+    assert(numerator and denominator and numerator:match("^%d+$")
+           and denominator:match("^%d+$"), "invalid telemetry sampling rate")
+    local n, d = tonumber(numerator), tonumber(denominator)
+    assert(d >= 1 and d <= 2147483647 and n <= d, "invalid telemetry sampling rate")
+    return { numerator = n, denominator = d }
+end
+
+local base_rate = fraction(base_n, base_d)
+local parent_rate = fraction(parent_n, parent_d)
+assert(base_rate or not parent_rate, "telemetry sampling requires a base rate")
+
 local exporters = octavia_telemetry_exporters or {}
 local pending = core.queue()
 assert(not exporters[listener_id], "duplicate telemetry listener")
@@ -18,6 +33,8 @@ exporters[listener_id] = {
     service_name = service_name,
     span_name = span_name,
     pending = pending,
+    base_rate = base_rate,
+    parent_rate = parent_rate,
 }
 local queue_limit = 128
 local var_name = "txn.octavia_telemetry"
@@ -36,13 +53,35 @@ local function read_parent(txn)
     if #header < 55 then
         return
     end
-    local version, trace_id, parent_id = header:match(traceparent_prefix)
+    local version, trace_id, parent_id, flags = header:match(traceparent_prefix)
     if not version or version == "ff" or #trace_id ~= 32 or #parent_id ~= 16
        or trace_id == ("0"):rep(32) or parent_id == ("0"):rep(16)
        or (#header > 55 and (version == "00" or header:sub(56, 56) ~= "-")) then
         return
     end
-    return trace_id, parent_id
+    return trace_id, parent_id, tonumber(flags, 16)
+end
+
+local function sample(rate)
+    if not rate or rate.numerator == rate.denominator then
+        return true
+    end
+    if rate.numerator == 0 then
+        return false
+    end
+    -- Discard the incomplete last bucket for an unbiased integer draw.
+    local range = 1 << 32
+    local limit = range - range % rate.denominator
+    while true do
+        local bytes = octavia_telemetry_entropy:read(4)
+        if not bytes then
+            return false
+        end
+        local draw = string.unpack(">I4", bytes)
+        if draw < limit then
+            return draw % rate.denominator < rate.numerator
+        end
+    end
 end
 
 local function unix_nanos()
@@ -55,7 +94,7 @@ local function start_span(txn, id)
     if not exporter then
         return
     end
-    local trace_id, parent_id = read_parent(txn)
+    local trace_id, parent_id, parent_flags = read_parent(txn)
     local random = octavia_telemetry_entropy:read(24)
     if not random then
         return
@@ -65,12 +104,24 @@ local function start_span(txn, id)
     if span_id == ("0"):rep(16) or trace_id == ("0"):rep(32) then
         return
     end
+    local sampled
+    if parent_id and exporter.parent_rate then
+        sampled = parent_flags & 1 == 1 and sample(exporter.parent_rate)
+    else
+        sampled = sample(exporter.base_rate)
+    end
+    local trace_flags = (parent_flags or 2) & 2
+    if sampled then
+        trace_flags = trace_flags | 1
+    end
     txn:set_priv({
         exporter = exporter,
         trace_id = trace_id,
         span_id = span_id,
         parent_id = parent_id,
-        start_ns = unix_nanos(),
+        sampled = sampled,
+        trace_flags = trace_flags,
+        start_ns = sampled and unix_nanos(),
     })
     txn:set_var(var_name, true)
 end
@@ -80,9 +131,8 @@ local function propagate_span(txn)
         return
     end
     local span = txn:get_priv()
-    -- The enabled tracing contract samples every request.
     txn.http:req_set_header(
-        "traceparent", ("00-%s-%s-01"):format(span.trace_id, span.span_id))
+        "traceparent", ("00-%s-%s-%02x"):format(span.trace_id, span.span_id, span.trace_flags))
     if not span.parent_id then
         txn.http:req_del_header("tracestate")
     end
@@ -102,14 +152,17 @@ local function finish_span(txn)
     local span = txn:get_priv()
     txn:set_priv(nil)
     txn:unset_var(var_name)
+    if not span.sampled then
+        return
+    end
     local http_status = txn.f:status()
     local exporter = span.exporter
     if not http_status or exporter.pending:size() >= queue_limit then
         return
     end
     local parent = span.parent_id and (',"parentSpanId":"%s"'):format(span.parent_id) or ""
-    -- The sampled bit plus both OTLP remote-parent bits for a W3C parent.
-    local flags = span.parent_id and (0x300 | 1) or 1
+    -- Preserve W3C flags and add the OTLP bits marking a known remote parent.
+    local flags = span.trace_flags | (span.parent_id and 0x300 or 0)
     local status = http_status >= 500 and ',"status":{"code":2}' or ""
     exporter.pending:push(otlp:format(
         exporter.service_name, span.trace_id, span.span_id, parent,

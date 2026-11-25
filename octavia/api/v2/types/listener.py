@@ -112,6 +112,7 @@ class ListenerResponse(BaseListenerType):
     def from_db_obj(cls, db_obj):
         result = super().from_db_obj(db_obj)
         if (result.otlp_tracing is None and
+                result.otlp_tracing_status is None and
                 not CONF.api_settings.enabled_listener_otlp_tracing_providers):
             result.otlp_tracing = wtypes.Unset
         if result.otlp_tracing_status is None:

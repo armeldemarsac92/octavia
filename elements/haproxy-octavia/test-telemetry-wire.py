@@ -21,6 +21,7 @@ import uuid
 
 from oslo_config import cfg
 
+from octavia.amphorae.backends.utils import haproxy_query
 from octavia.common import config as octavia_config
 from octavia.common import constants
 from octavia.common import data_models
@@ -122,20 +123,21 @@ def wait_spans(path, count):
     raise TimeoutError(f'Expected {count} collected spans, got {len(spans)}')
 
 
-def check_span(observed, app, trace_id=None, parent_id=None):
+def check_span(observed, app, trace_id=None, parent_id=None, parent_flags=1):
     attributes, span = observed
     code, traceparent, start, end = app
     assert attributes == [{'key': 'service.name',
                            'value': {'stringValue': 'hibiscus-local-gateway'}}]
     assert span['name'] == 'Gateway HTTP' and span['kind'] == 2
     assert span.get('parentSpanId') == parent_id
-    assert span['flags'] == (0x301 if parent_id else 1)
+    flags = (parent_flags & 2) | 1 if parent_id else 3
+    assert span['flags'] == (flags | 0x300 if parent_id else flags)
     trace_id_bytes = bytes.fromhex(span['traceId'])
     assert len(trace_id_bytes) == 16 and any(trace_id_bytes)
     assert len(bytes.fromhex(span['spanId'])) == 8 and int(span['spanId'], 16)
     if trace_id is not None:
         assert span['traceId'] == trace_id and span['spanId'] != parent_id
-    assert traceparent == f"00-{span['traceId']}-{span['spanId']}-01"
+    assert traceparent == f"00-{span['traceId']}-{span['spanId']}-{flags:02x}"
     span_start = int(span['startTimeUnixNano'])
     span_end = int(span['endTimeUnixNano'])
     assert start <= span_start <= span_end <= end
@@ -187,9 +189,13 @@ def create_local_certificate(directory):
 
 
 def render_config(directory, socket_dir, app_port, listener_ports,
-                  collector_ports, cert, key):
+                  collector_ports, cert, key, sampling_listeners=()):
     cfg.CONF.set_override('base_cert_dir', str(directory),
                           group='haproxy_amphora')
+    if sampling_listeners:
+        for profile in ('tracing', 'sampling'):
+            cfg.CONF.set_override(f'enabled_listener_otlp_{profile}_providers',
+                                  ['amphora'], group='api_settings')
 
     def pool(port, **options):
         member = data_models.Member(
@@ -208,17 +214,23 @@ def render_config(directory, socket_dir, app_port, listener_ports,
         backend_tls_hostname='collector.test', alpn_protocols=['http/1.1'])
     lb = data_models.LoadBalancer(
         id=str(uuid.uuid4()), project_id='wire', enabled=True,
+        provider='amphora',
         topology=constants.TOPOLOGY_SINGLE,
         vip=data_models.Vip(ip_address='127.0.0.1'),
         pools=[app, http_collector, tls_collector])
     amphora = data_models.Amphora(
         id=str(uuid.uuid4()), status=constants.ACTIVE)
     lb.amphorae = [amphora]
-    for port, collector in zip(listener_ports,
-                               (http_collector, tls_collector, None)):
+    listeners = [(port, collector, None) for port, collector in zip(
+        listener_ports, (http_collector, tls_collector, None))]
+    listeners.extend((port, http_collector, sampling)
+                     for port, sampling in sampling_listeners)
+    for port, collector, sampling in listeners:
         tracing = (dict(collector_pool_id=collector.id,
                         service_name='hibiscus-local-gateway',
                         span_name='Gateway HTTP') if collector else None)
+        if sampling:
+            tracing['sampling'] = sampling
         https = collector is tls_collector
         lb.listeners.append(data_models.Listener(
             id=str(uuid.uuid4()), load_balancer=lb, protocol_port=port,
@@ -238,17 +250,23 @@ def render_config(directory, socket_dir, app_port, listener_ports,
         base_amp_path=str(directory), base_crt_dir=str(directory))
     lua = Path(__file__).with_name('octavia-telemetry.lua').resolve()
 
-    def render(name):
+    def render(name, sampling_capable, tracing_capable=True):
+        publication = uuid.uuid4().hex if sampling_listeners else None
         config = templater.build_config(
             amphora, lb.listeners, tls_certs={}, haproxy_versions=('3', '0'),
             amp_details={constants.GATEWAY_CAPABILITY_LISTENER_OTLP_TRACING:
-                         True, 'active_tuned_profiles': 'amphora',
+                         tracing_capable,
+                         constants.GATEWAY_CAPABILITY_LISTENER_OTLP_SAMPLING:
+                         sampling_capable,
+                         'active_tuned_profiles': 'amphora',
                          'cpu_count': 5},
             socket_path=str(socket_dir / 'stats.sock'),
-            otlp_tls_certs={tls_collector.id: {'ca_cert': str(cert)}})
+            otlp_tls_certs={tls_collector.id: {'ca_cert': str(cert)}},
+            otlp_publication=publication)
         # Use the harness account and temporary paths in the local process.
         config = (config
                   .replace(constants.HAPROXY_OTLP_TRACING_SCRIPT, str(lua))
+                  .replace(constants.HAPROXY_OTLP_SAMPLING_SCRIPT, str(lua))
                   .replace(constants.HAPROXY_OTLP_TRACING_SOCKET_DIR,
                            str(socket_dir))
                   .replace('    user nobody\n', '')
@@ -258,11 +276,12 @@ def render_config(directory, socket_dir, app_port, listener_ports,
         path.write_text(config)
         return path
 
-    traced = render('haproxy.cfg')
-    lb.listeners[0].otlp_tracing = None
-    cleared = render('haproxy-cleared.cfg')
+    traced = render('haproxy.cfg', bool(sampling_listeners))
+    if not sampling_listeners:
+        lb.listeners[0].otlp_tracing = None
+    cleared = render('haproxy-cleared.cfg', False, not sampling_listeners)
     tls_collector.backend_tls_hostname = 'wrong.test'
-    return traced, cleared, render('haproxy-wrong-identity.cfg')
+    return traced, cleared, render('haproxy-wrong-identity.cfg', False)
 
 
 def prove(args, directory, socket_dir, app_port):
@@ -302,9 +321,7 @@ def prove(args, directory, socket_dir, app_port):
             child_span = check_span(
                 wait_spans(spans, 2)[1], child, TRACE_ID, PARENT_ID)
             assert child_span['spanId'] != root_span['spanId']
-            print(f"root SERVER {root_span['spanId']} http={root[0]}, "
-                  f"child SERVER {child_span['spanId']} "
-                  f"parent={PARENT_ID} http={child[0]}")
+            print(f'root SERVER http={root[0]}, child SERVER http={child[0]}')
 
             off = app_request(
                 disabled, '/disabled', {'traceparent': TRACEPARENT})
@@ -372,11 +389,113 @@ def prove(args, directory, socket_dir, app_port):
                           'still available.')
 
 
+def prove_sampling(args, directory, socket_dir, app_port):
+    (legacy, neighbor, disabled, receiver, tls_port, zero, full, partial,
+     parent) = (free_port() for _ in range(9))
+    cert, key = create_local_certificate(directory)
+    never = {'numerator': 0, 'denominator': 1}
+    always = {'numerator': 1, 'denominator': 1}
+    half = {'numerator': 1, 'denominator': 2}
+    config, withdrawn, _ = render_config(
+        directory, socket_dir, app_port, (legacy, neighbor, disabled),
+        (receiver, tls_port), cert, key, sampling_listeners=(
+            (zero, {'base': never}),
+            (full, {'base': always, 'parent': always}),
+            (partial, {'base': half}),
+            (parent, {'base': never, 'parent': half})))
+    subprocess.run([args.haproxy, '-c', '-f', config], check=True)
+    subprocess.run([args.haproxy, '-c', '-f', withdrawn], check=True)
+    collector_path, spans = collector_config(directory, receiver, 'sampling')
+    expected = {}
+
+    def assert_publication(path):
+        description = next(
+            line.strip().split()[1] for line in path.read_text().splitlines()
+            if line.startswith('    description octavia-otlp-'))
+        query = haproxy_query.HAProxyQuery(
+            str(socket_dir / 'stats.sock'), timeout=0.3)
+        info = query.show_info()
+        assert info['description'] == description and info['Stopping'] == '0'
+
+    def request(port, sampled, incoming=None, valid_parent=False):
+        headers = {'traceparent': incoming} if incoming else None
+        response = app_request(port, '/sampling', headers)
+        assert response[0] == 200
+        version, trace, span, flags = response[1].split('-')
+        assert version == '00' and flags in ('00', '01', '02', '03')
+        assert int(trace, 16) and int(span, 16) and span != PARENT_ID
+        assert (trace == TRACE_ID) == valid_parent
+        parent_flags = int(incoming[-2:], 16) if valid_parent else 2
+        assert int(flags, 16) & 2 == parent_flags & 2
+        decision = bool(int(flags, 16) & 1)
+        if sampled is not None:
+            assert decision == sampled
+        if decision:
+            assert span not in expected
+            expected[span] = (response, TRACE_ID if valid_parent else None,
+                              PARENT_ID if valid_parent else None,
+                              parent_flags)
+        return decision
+
+    with (running([args.haproxy, '-db', '-f', config],
+                  directory / 'haproxy.log') as proxy,
+          running([args.otelcol, '--config', collector_path],
+                  directory / 'collector.log') as collector):
+        wait_port(legacy, proxy)
+        wait_port(receiver, collector)
+        assert_publication(config)
+        not_sampled = f'00-{TRACE_ID}-{PARENT_ID}-02'
+        sampled_parent = f'00-{TRACE_ID}-{PARENT_ID}-03'
+        invalid = f'00-{TRACE_ID}-{"0" * 16}-01'
+        request(legacy, True, not_sampled, valid_parent=True)
+        request(zero, False)
+        request(zero, False, TRACEPARENT, valid_parent=True)
+        request(full, True)
+        request(full, True, sampled_parent, valid_parent=True)
+        request(full, False, not_sampled, valid_parent=True)
+        request(full, True, invalid)
+        request(parent, False)
+        request(parent, False, not_sampled, valid_parent=True)
+        base_count = sum(request(partial, None) for _ in range(64))
+        parent_count = sum(
+            request(parent, None, sampled_parent, valid_parent=True)
+            for _ in range(64))
+        assert 12 <= base_count <= 52 and 12 <= parent_count <= 52
+        wait_spans(spans, len(expected))
+        time.sleep(0.3)
+        observed = record_spans(spans)
+        assert len(observed) == len(expected)
+        for item in observed:
+            check_span(item, *expected.pop(item[1]['spanId']))
+        print('0/1 base: 0 of 2, 1/1 base or sampled parent: 3 of 3, '
+              'unsampled parent with parent mode: 0 of 2')
+        print(f'1/2 base: {base_count} of 64, '
+              f'1/2 sampled parent: {parent_count} of 64, '
+              f'{len(observed)} total exports matched the propagated context')
+        with running(
+            [args.haproxy, '-db', '-f', withdrawn, '-sf', str(proxy.pid)],
+            directory / 'haproxy-withdrawn.log',
+        ) as replacement:
+            proxy.wait(timeout=5)
+            wait_port(full, replacement)
+            assert_publication(withdrawn)
+            for port in (full, legacy):
+                response = app_request(
+                    port, '/withdrawn', {'traceparent': sampled_parent})
+                assert response[:2] == (200, sampled_parent)
+            time.sleep(0.3)
+            assert len(record_spans(spans)) == len(observed)
+        print('Loss of both capabilities: active HAProxy confirmed the '
+              'withdrawal config, HTTP 200 and original context with zero '
+              'additional exports on legacy and sampled listeners')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('haproxy')
     parser.add_argument('otelcol')
     parser.add_argument('evidence_dir', type=Path)
+    parser.add_argument('--sampling', action='store_true')
     args = parser.parse_args()
     octavia_config.init([])
     directory = Path(tempfile.mkdtemp(
@@ -386,7 +505,8 @@ def main():
           ThreadingHTTPServer(('127.0.0.1', 0), App) as app):
         Thread(target=app.serve_forever, daemon=True).start()
         try:
-            prove(args, directory, Path(sockets), app.server_port)
+            check = prove_sampling if args.sampling else prove
+            check(args, directory, Path(sockets), app.server_port)
         finally:
             app.shutdown()
 

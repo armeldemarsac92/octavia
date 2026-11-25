@@ -200,13 +200,23 @@ class TestHaproxyAmphoraLoadBalancerDriverTest(base.TestCase):
         listener = data_models.Listener(
             id='listener', protocol=constants.PROTOCOL_HTTP,
             enabled=True, otlp_tracing=tracing)
-        amphora = data_models.Amphora(id='amphora', status=constants.ACTIVE)
+        amphora = data_models.Amphora(
+            id='amphora', status=constants.ACTIVE,
+            role=constants.ROLE_STANDALONE)
         amphora.api_version = API_VERSION
         lb = data_models.LoadBalancer(
             id='load-balancer', enabled=True, listeners=[listener],
-            pools=[collector], amphorae=[amphora])
+            pools=[collector], amphorae=[amphora],
+            topology=constants.TOPOLOGY_SINGLE)
         listener.load_balancer = lb
         client = self.driver.clients[API_VERSION]
+        client.get_details.return_value = {
+            constants.GATEWAY_CAPABILITY_LISTENER_OTLP_TRACING: True}
+        client.reload_listener.side_effect = (
+            lambda *args, otlp_publication, **kwargs: mock.Mock(
+                status_code=202, headers={
+                    constants.HAPROXY_OTLP_PUBLICATION_HEADER:
+                    otlp_publication}))
 
         with (
             mock.patch.object(self.driver, '_process_pool_certs',
@@ -231,13 +241,18 @@ class TestHaproxyAmphoraLoadBalancerDriverTest(base.TestCase):
             self.assertEqual({collector.id: {'ca_cert': '/tmp/ca.pem'}},
                              config['otlp_tls_certs'])
             transaction = session().begin().__enter__()
+            topology = (lb.id, lb.topology, {amphora.id: amphora.role}, True)
             self.assertEqual([
-                mock.call.reload(amphora, lb.id, timeout_dict=None),
+                mock.call.reload(amphora, lb.id, timeout_dict=None,
+                                 otlp_publication=mock.ANY),
                 mock.call.status(transaction, {
-                    listener.id: (tracing, constants.ERROR)}),
-                mock.call.reload(amphora, lb.id, timeout_dict=None),
+                    listener.id: (tracing, None, constants.ERROR)},
+                    topology=topology),
+                mock.call.reload(amphora, lb.id, timeout_dict=None,
+                                 otlp_publication=mock.ANY),
                 mock.call.status(transaction, {
-                    listener.id: (tracing, constants.ACTIVE)}),
+                    listener.id: (tracing, None, constants.ACTIVE)},
+                    topology=topology),
             ], publication.mock_calls)
 
     def test_protected_pool_preflights_every_amphora(self):

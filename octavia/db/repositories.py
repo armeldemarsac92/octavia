@@ -886,7 +886,8 @@ class LoadBalancerRepository(BaseRepository):
                 .with_for_update().one_or_none())
 
     def test_and_set_provisioning_status(self, session, id, status,
-                                         raise_exception=False):
+                                         raise_exception=False, *,
+                                         allow_error=False):
         """Tests and sets a load balancer and provisioning status.
 
         Puts a lock on the load balancer table to check the status of a
@@ -898,6 +899,7 @@ class LoadBalancerRepository(BaseRepository):
         :param id: id of Load Balancer
         :param status: Status to set Load Balancer if check passes.
         :param raise_exception: If True, raise ImmutableObject on failure
+        :param allow_error: Allow an explicit recovery from ERROR.
         :returns: bool
         """
         lb = (session.query(self.model_class)
@@ -907,7 +909,7 @@ class LoadBalancerRepository(BaseRepository):
         is_delete = status == consts.PENDING_DELETE
         acceptable_statuses = (
             consts.DELETABLE_STATUSES
-            if is_delete else consts.MUTABLE_STATUSES
+            if is_delete or allow_error else consts.MUTABLE_STATUSES
         )
         if (lb.provisioning_status not in acceptable_statuses or
                 self._batch_pending(lb) or self.tcp_batch_pending(lb)):
@@ -1388,46 +1390,57 @@ class ListenerRepository(BaseRepository):
         return (session.query(refs.listener_id).filter_by(pool_id=pool_id)
                 .with_for_update().limit(1).scalar())
 
-    def set_otlp_tracing_statuses(self, session, statuses, *,
-                                  expected_pair=None):
-        if expected_pair is not None:
-            lb_id, expected = expected_pair
+    def set_otlp_tracing_statuses(self, session, statuses, *, topology=None):
+        topology_matches = True
+        if topology is not None:
+            lb_id, expected_topology, expected_peers, enabled = topology
             lb = LoadBalancerRepository().get_for_update(session, lb_id)
-            if (lb is None or not lb.enabled or
-                    lb.topology != consts.TOPOLOGY_ACTIVE_STANDBY):
+            if lb is None:
                 return
             amp = models.Amphora
-            current = session.scalars(select(amp.id).where(
+            current = session.execute(select(amp.id, amp.role).where(
                 amp.load_balancer_id == lb_id,
                 amp.status != consts.DELETED).with_for_update())
-            if expected != set(current):
-                return
+            topology_matches = (lb.topology == expected_topology and
+                                dict(current.all()) == expected_peers and
+                                lb.enabled == enabled)
         model = self.model_class
         listeners = (session.query(model).filter(
             model.id.in_(statuses),
-            model.enabled.is_(True),
             model.provisioning_status.notin_(
                 (consts.PENDING_DELETE, consts.DELETED)))
             .options(lazyload('*')).populate_existing()
             .order_by(model.id).with_for_update())
         for listener in listeners:
-            tracing, status = statuses[listener.id]
-            if tracing == listener.otlp_tracing:
-                listener.otlp_tracing_status = status
+            tracing, revision, status = statuses[listener.id]
+            if (tracing != listener.otlp_tracing or
+                    revision != listener.otlp_tracing_revision):
+                continue
+            if tracing is None:
+                if listener.otlp_tracing_status not in (
+                        consts.PENDING_UPDATE, consts.ERROR):
+                    continue
+            elif not listener.enabled:
+                continue
+            if not topology_matches:
+                status = consts.ERROR
+            if status == consts.ACTIVE:
+                refs = models.ListenerOtlpCollectorPool
+                stale = session.query(refs).filter_by(listener_id=listener.id)
+                if tracing is not None:
+                    stale = stale.filter(
+                        refs.pool_id != tracing['collector_pool_id'])
+                stale.delete(synchronize_session=False)
+            listener.otlp_tracing_status = status
 
     @staticmethod
-    def _set_otlp_collector_pool(session, listener_id, tracing):
-        ref = (session.query(models.ListenerOtlpCollectorPool)
-               .filter_by(listener_id=listener_id)
-               .with_for_update().one_or_none())
-        if tracing is None:
-            if ref is not None:
-                session.delete(ref)
-        elif ref is None:
+    def _hold_otlp_collector_pool(session, listener_id, tracing):
+        pool_id = tracing['collector_pool_id']
+        ref = session.get(models.ListenerOtlpCollectorPool,
+                          (listener_id, pool_id), with_for_update=True)
+        if ref is None:
             session.add(models.ListenerOtlpCollectorPool(
-                listener_id=listener_id, pool_id=tracing['collector_pool_id']))
-        else:
-            ref.pool_id = tracing['collector_pool_id']
+                listener_id=listener_id, pool_id=pool_id))
 
     def get_request_filter_listener_using_pool(self, session, pool_id):
         refs = models.ListenerRequestFilterPool
@@ -1558,14 +1571,14 @@ class ListenerRepository(BaseRepository):
                 (consts.PENDING_DELETE, consts.DELETED))).with_for_update())
         return any(sections for sections, in rows)
 
-    def has_enabled_otlp_tracing(self, session, lb_id):
+    def get_enabled_otlp_tracing(self, session, lb_id):
         listener = self.model_class
-        query = session.query(listener.id).filter(
+        query = session.query(listener.otlp_tracing).filter(
             listener.load_balancer_id == lb_id, listener.enabled.is_(True),
             listener.otlp_tracing.is_not(None),
             listener.provisioning_status.notin_(
                 (consts.PENDING_DELETE, consts.DELETED)))
-        return query.with_for_update().first() is not None
+        return [tracing for tracing, in query.with_for_update()]
 
     def has_enabled_frontend_client_auth_fallback(self, session, lb_id):
         model = self.model_class
@@ -1662,11 +1675,15 @@ class ListenerRepository(BaseRepository):
                     models.ListenerCidr(listener_id=id, cidr=cidr)
                     for cidr in allowed_cidrs]
         if 'otlp_tracing' in model_kwargs:
-            self._set_otlp_collector_pool(session, id,
-                                          model_kwargs['otlp_tracing'])
-            model_kwargs['otlp_tracing_status'] = (
-                consts.PENDING_UPDATE if model_kwargs['otlp_tracing'] else
-                None)
+            tracing = model_kwargs['otlp_tracing']
+            if tracing is not None:
+                self._hold_otlp_collector_pool(session, id, tracing)
+            if (tracing is not None or listener_db.otlp_tracing is not None or
+                    listener_db.otlp_tracing_status in (
+                        consts.PENDING_UPDATE, consts.ERROR)):
+                model_kwargs['otlp_tracing_status'] = consts.PENDING_UPDATE
+                revision = uuidutils.generate_uuid()
+                model_kwargs['otlp_tracing_revision'] = revision
         if 'request_filter_sections' in model_kwargs:
             self._replace_request_filter_pool_refs(
                 session, id, model_kwargs['request_filter_sections'])
@@ -1684,6 +1701,7 @@ class ListenerRepository(BaseRepository):
         model = self.model_class(**model_kwargs)
         if model.otlp_tracing:
             model.otlp_tracing_status = consts.PENDING_UPDATE
+            model.otlp_tracing_revision = uuidutils.generate_uuid()
         if model.default_pool_id:
             model.default_pool = self._pool_check(
                 session, model.default_pool_id,
@@ -1695,8 +1713,8 @@ class ListenerRepository(BaseRepository):
         if model.request_filter_sections or model.otlp_tracing:
             session.flush()
         if model.otlp_tracing:
-            self._set_otlp_collector_pool(session, listener_id,
-                                          model.otlp_tracing)
+            self._hold_otlp_collector_pool(session, listener_id,
+                                           model.otlp_tracing)
         if model.request_filter_sections:
             self._replace_request_filter_pool_refs(
                 session, listener_id, model.request_filter_sections)
