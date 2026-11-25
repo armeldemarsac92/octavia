@@ -22,6 +22,7 @@ import socket
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
+from threading import Event
 from threading import Thread
 import time
 import unittest
@@ -29,15 +30,20 @@ import unittest
 
 class Origin(BaseHTTPRequestHandler):
     calls = Counter()
+    mirror_delivered = Event()
 
     def log_message(self, *args):
         pass
 
     def do_GET(self):
-        self.calls[self.path] += 1
+        mirrored = self.headers.get('X-Test-Delivery') == 'mirror'
+        key = ('mirrored', self.path) if mirrored else self.path
+        self.calls[key] += 1
         status = 200 if self.path.startswith('/ok-') else 500
         self.send_response(status)
         self.end_headers()
+        if mirrored:
+            self.mirror_delivered.set()
 
 
 class BackendRetryBudgetTest(unittest.TestCase):
@@ -55,7 +61,9 @@ class BackendRetryBudgetTest(unittest.TestCase):
 
         directory = TemporaryDirectory()
         self.addCleanup(directory.cleanup)
+        mirror_pool = '8f388635-d55a-4f89-9937-a7550b72e710'
         config = Path(directory.name) / 'haproxy.cfg'
+        mirror_budget = self.budget('mirror-service', 20, 1)
         config.write_text(f"""global
     nbthread 2
 
@@ -67,11 +75,28 @@ defaults
 
 frontend ingress
     bind 127.0.0.1:{self.port}
+    filter octavia-mirror {directory.name}
+    http-request octavia-mirror {mirror_pool} 1 1 if {{ path_beg /copy- }}
+    use_backend wide if {{ path_beg /ok- /wide- }}
+    use_backend copy_target if {{ path_beg /mirror-target }}
+    use_backend source if {{ path_beg /copy- }}
     use_backend shared_a if {{ path_beg /a- }}
     use_backend shared_b if {{ path_beg /b- }}
     use_backend other if {{ path_beg /other- }}
     use_backend ordinary if {{ path_beg /ordinary- }}
     default_backend percentage
+
+listen octavia-mirror-{mirror_pool}
+    bind {directory.name}/{mirror_pool}.sock mode 600 octavia-mirror-socket
+    retries 0
+    no option redispatch
+    http-request disable-l7-retry
+{mirror_budget}    http-request set-header X-Test-Delivery mirror
+    server origin 127.0.0.1:{origin.server_port}
+
+backend source
+    retries 0
+    server origin 127.0.0.1:{origin.server_port}
 """ + ''.join(
             f'\nbackend {pool}\n{budget}'
             '    http-request octavia-http-policy default default 3 500\n'
@@ -80,7 +105,9 @@ frontend ingress
                 ('shared_a', self.budget('same-service', 0, 2)),
                 ('shared_b', self.budget('same-service', 0, 2)),
                 ('other', self.budget('another-service', 0, 2)),
+                ('wide', self.budget('percent-service', 100, 1)),
                 ('percentage', self.budget('percent-service', 20, 1)),
+                ('copy_target', mirror_budget),
                 ('ordinary', ''))), encoding='utf-8')
         subprocess.run([HAPROXY, '-c', '-f', config], check=True,
                        stdout=subprocess.DEVNULL)
@@ -130,10 +157,32 @@ frontend ingress
     def test_percentage_includes_healthy_original_requests(self):
         for index in range(8):
             self.assertEqual(200, self.get(f'/ok-{index}'))
+        # Originals reaching the 100 percent pool still count in the
+        # sibling pool's 20 percent window.
         # Nine originals and two retries are below 20 percent. A third
         # retry would make three of the twelve attempts retries.
         self.assertEqual(503, self.get('/percent-fail'))
         self.assertEqual(3, Origin.calls['/percent-fail'])
+
+    def test_retries_from_a_pool_with_no_percentage_limit_count_for_siblings(
+            self):
+        self.assertEqual(500, self.get('/wide-fail'))
+        self.assertEqual(4, Origin.calls['/wide-fail'])
+        self.assertEqual(503, self.get('/percent-fail'))
+        self.assertEqual(1, Origin.calls['/percent-fail'])
+
+    def test_mirror_delivery_counts_toward_the_destination_budget(self):
+        paths = [f'/copy-{index}' for index in range(7)]
+        for path in paths:
+            Origin.mirror_delivered.clear()
+            self.assertEqual(500, self.get(path))
+            self.assertTrue(Origin.mirror_delivered.wait(timeout=1))
+        # Seven mirror originals plus one direct request allow exactly
+        # two retries at 20 percent, even though the minimum is one.
+        self.assertEqual(503, self.get('/mirror-target'))
+        self.assertEqual(3, Origin.calls['/mirror-target'])
+        for path in paths:
+            self.assertEqual(1, Origin.calls['mirrored', path])
 
 
 if __name__ == '__main__':

@@ -852,6 +852,14 @@ listen octavia-auth-{{ pool.id }}
 {% endmacro %}
 
 
+{% macro backend_retry_budget(pool) %}
+    {% if pool.backend_retry_budget is defined %}
+      {% set budget = pool.backend_retry_budget %}
+    http-request octavia-retry-budget {{ budget.service_uid }} {{ budget.budget_percent }} {{ budget.budget_interval_ms }} {{ budget.min_retry_count }} {{ budget.min_retry_interval_ms }}
+    {% endif %}
+{% endmacro %}
+
+
 {% macro mirror_delivery_macro(constants, lib_consts, pool, state_file) %}
 listen octavia-mirror-{{ pool.id }}
     bind /run/octavia/mirror/{{ pool.id }}.sock user nobody mode 600 octavia-mirror-socket
@@ -860,6 +868,7 @@ listen octavia-mirror-{{ pool.id }}
     retries 0
     no option redispatch
     http-request disable-l7-retry
+{{ backend_retry_budget(pool) -}}
     option abortonclose
     timeout client 5s
     timeout connect 1s
@@ -887,10 +896,8 @@ backend {{ pool.id }}:{{ listener.id }}
                constants.PROTOCOL_HTTP.lower()))%}
     http-reuse safe
     {% endif %}
-    {% if pool.backend_retry_budget is defined and
-          listener.protocol in (constants.PROTOCOL_HTTP, constants.PROTOCOL_TERMINATED_HTTPS) %}
-      {% set budget = pool.backend_retry_budget %}
-    http-request octavia-retry-budget {{ budget.service_uid }} {{ budget.budget_percent }} {{ budget.budget_interval_ms }} {{ budget.min_retry_count }} {{ budget.min_retry_interval_ms }}
+    {% if listener.protocol in (constants.PROTOCOL_HTTP, constants.PROTOCOL_TERMINATED_HTTPS) %}
+{{ backend_retry_budget(pool) -}}
     {% endif %}
     {% set cors = listener.get('cors_by_backend', {}).get(('pool', pool.id), []) %}
 {{ cors_request(cors) -}}

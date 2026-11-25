@@ -318,8 +318,10 @@ Omission in an update preserves the object. Send
 pools forwarding ingress on HTTP and ``TERMINATED_HTTPS`` listeners. It
 shares request and retry history among participating pools with the same
 ``service_uid`` in a single HAProxy process. Use the same Service UID for
-all pools and ports targeting that Service. Each process, including a
-replacement upon reload or failover, has independent counters.
+all pools and ports targeting that Service. Delivered request mirrors count
+as original requests for their destination Service and are never retried.
+Each process, including a replacement upon reload or failover, has
+independent counters.
 
 Each object requires all five fields.
 
