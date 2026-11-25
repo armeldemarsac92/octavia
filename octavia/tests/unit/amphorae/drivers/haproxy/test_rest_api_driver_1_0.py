@@ -255,6 +255,120 @@ class TestHaproxyAmphoraLoadBalancerDriverTest(base.TestCase):
                     topology=topology),
             ], publication.mock_calls)
 
+    @mock.patch('octavia.db.api.session')
+    @mock.patch('octavia.db.repositories.PoolRepository.'
+                'set_backend_tls_system_ca_digests')
+    @mock.patch('octavia.db.repositories.PoolRepository.'
+                'set_backend_tls_pool_statuses')
+    @mock.patch('octavia.db.repositories.ListenerRepository.'
+                'set_otlp_tracing_statuses')
+    def test_otlp_system_ca_is_attested_before_attachment_and_fails_closed(
+            self, tracing_status, pool_status, proof, _db_session):
+        digest = 'a' * 64
+        config = self.useFixture(oslo_fixture.Config(cfg.CONF))
+        config.config(group='api_settings',
+                      enabled_backend_tls_hostname_providers=['amphora'],
+                      enabled_backend_tls_system_ca_providers=['amphora'])
+        config.config(group='haproxy_amphora',
+                      backend_tls_system_ca_sha256=digest)
+        app = data_models.Pool(id='app', enabled=True,
+                               protocol=constants.PROTOCOL_HTTP)
+        collector = data_models.Pool(
+            id=FAKE_UUID_1, enabled=True, protocol=constants.PROTOCOL_HTTP,
+            backend_tls_system_ca=True, tls_enabled=True,
+            backend_tls_hostname='collector.example.test',
+            alpn_protocols=['http/1.1'],
+            tags=[constants.GATEWAY_OTLP_COLLECTOR_POOL_TAG])
+        listener = data_models.Listener(
+            id='http', protocol=constants.PROTOCOL_HTTP, protocol_port=80,
+            enabled=True, pools=[app], default_pool=app)
+        peers = [data_models.Amphora(id=role, role=role,
+                                     status=constants.AMPHORA_ALLOCATED)
+                 for role in (constants.ROLE_MASTER, constants.ROLE_BACKUP)]
+        for amp in peers:
+            amp.api_version = API_VERSION
+        lb = data_models.LoadBalancer(
+            id='lb', project_id='project', enabled=True,
+            pools=[app, collector], listeners=[listener],
+            vip=data_models.Vip(ip_address='127.0.0.1'),
+            amphorae=peers, topology=constants.TOPOLOGY_ACTIVE_STANDBY,
+            provider='amphora')
+        listener.load_balancer = lb
+        client = self.driver.clients[API_VERSION]
+        client.get_details.return_value = {
+            constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME: True,
+            constants.GATEWAY_CAPABILITY_BACKEND_TLS_SYSTEM_CA: True,
+            constants.GATEWAY_CAPABILITY_LISTENER_OTLP_TRACING: True,
+        }
+        client.get_info.return_value = {'haproxy_version': '3.0.19',
+                                        'api_version': API_VERSION}
+        client.stage_backend_tls_system_ca.return_value = digest
+        client.reload_listener.side_effect = (
+            lambda *args, config_publication, **kwargs: mock.Mock(
+                status_code=202, headers={
+                    constants.HAPROXY_CONFIG_PUBLICATION_HEADER:
+                    config_publication}))
+        self.driver.jinja_combo = driver.jinja_combo.JinjaTemplater()
+
+        client.stage_backend_tls_system_ca.side_effect = [digest, 'b' * 64]
+        self.driver.update(lb)
+        self.assertEqual({collector.id: None}, proof.call_args.args[2])
+        self.assertEqual({collector.id},
+                         pool_status.call_args.kwargs['closed'])
+        tracing_status.assert_not_called()
+
+        # The same isolated pool can attest after the pair recovers.
+        collector.alpn_protocols = None
+        client.stage_backend_tls_system_ca.side_effect = None
+        collector.provisioning_status = constants.PENDING_UPDATE
+        self.driver.update(lb)
+        for call in client.upload_config.call_args_list[-2:]:
+            staged = call.args[2]
+            self.assertIn('default_backend app:http', staged)
+            self.assertNotIn('listen octavia-otlp-', staged)
+        self.assertEqual({collector.id: digest}, proof.call_args.args[2])
+        tracing_status.assert_not_called()
+        collector.provisioning_status = constants.ACTIVE
+
+        collector.alpn_protocols = ['http/1.1']
+        collector.members = [data_models.Member(
+            id='collector-member', ip_address='192.0.2.30', protocol_port=4318,
+            weight=1, enabled=True)]
+        listener.otlp_tracing = {
+            'collector_pool_id': collector.id, 'service_name': 'gateway',
+            'span_name': 'Gateway HTTP'}
+        self.driver.update(lb)
+        attached = client.upload_config.call_args.args[2]
+        self.assertIn('default_backend app:http', attached)
+        exporter = attached[attached.index('listen octavia-otlp-'):]
+        self.assertIn('server collector-member 192.0.2.30:4318', exporter)
+        self.assertIn(f'backend-system-ca/{digest}.pem verify required',
+                      exporter)
+        self.assertIn('verifyhost-strict collector.example.test', exporter)
+        self.assertIn('alpn http/1.1', exporter)
+        collector.alpn_protocols = None
+        self.driver.update(lb)
+        attached = client.upload_config.call_args.args[2]
+        exporter = attached[attached.index('listen octavia-otlp-'):]
+        self.assertIn('server collector-member 192.0.2.30:4318', exporter)
+        self.assertIn(f'backend-system-ca/{digest}.pem verify required',
+                      exporter)
+        self.assertIn('verifyhost-strict collector.example.test', exporter)
+        self.assertNotIn(' alpn ', exporter)
+        self.assertEqual({collector.id: digest}, proof.call_args.args[2])
+        self.assertEqual(constants.ACTIVE,
+                         tracing_status.call_args.args[1][listener.id][-1])
+
+        client.stage_backend_tls_system_ca.side_effect = [digest, 'b' * 64]
+        self.driver.update(lb)
+        for call in client.upload_config.call_args_list[-2:]:
+            closed = call.args[2]
+            self.assertIn('default_backend app:http', closed)
+            self.assertNotIn('server collector-member', closed)
+        self.assertEqual({collector.id: None}, proof.call_args.args[2])
+        self.assertEqual(constants.ERROR,
+                         tracing_status.call_args.args[1][listener.id][-1])
+
     def test_protected_pool_preflights_every_amphora(self):
         capability = constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME
         amphorae = [

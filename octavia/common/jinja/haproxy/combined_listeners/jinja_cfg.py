@@ -227,7 +227,7 @@ class JinjaTemplater:
                      otlp_publication=None, http_retry_backoff_results=None,
                      weighted_passthrough_degraded=False,
                      config_publication=None, system_ca_results=None,
-                     read_http_header_key=None):
+                     otlp_system_ca_applied=None, read_http_header_key=None):
         """Convert a logical configuration to the HAProxy version
 
         :param host_amphora: The Amphora this configuration is hosted on
@@ -268,6 +268,8 @@ class JinjaTemplater:
                if config_publication is not None else {}),
             **({'system_ca_results': system_ca_results}
                if system_ca_results is not None else {}),
+            **({'otlp_system_ca_applied': otlp_system_ca_applied}
+               if otlp_system_ca_applied is not None else {}),
             **({'http_retry_backoff_results': http_retry_backoff_results}
                if http_retry_backoff_results is not None else {}),
             **({'http_persistence_results': http_persistence_results}
@@ -319,6 +321,7 @@ class JinjaTemplater:
                                 weighted_passthrough_degraded=False,
                                 config_publication=None,
                                 system_ca_results=None,
+                                otlp_system_ca_applied=None,
                                 read_http_header_key=None):
         """Renders a templated configuration from a load balancer object
 
@@ -438,6 +441,11 @@ class JinjaTemplater:
             for listener in loadbalancer['listeners']:
                 if not listener['enabled']:
                     continue
+                if otlp_system_ca_applied is not None:
+                    collector = listener.get('otlp_tracing', {}).get('pool')
+                    if collector and collector.get(
+                            'backend_tls_system_ca_sha256'):
+                        otlp_system_ca_applied.add(listener['id'])
                 self._apply_http_retry_backoff_support(
                     listener, (amp_details or {}).get(backoff_capability)
                     is True and (amp_details or {}).get(policy_capability)
@@ -1286,6 +1294,10 @@ class JinjaTemplater:
             rendered = self._transform_pool(
                 pool, feature_compatibility, False, pool_tls_certs=certs)
             if not rendered['enabled']:
+                return tracing
+            if (rendered.get('backend_tls_system_ca_sha256') and
+                    pool.alpn_protocols is not None and
+                    'alpn_protocols' not in rendered):
                 return tracing
             if 'alpn_protocols' in rendered:
                 rendered['alpn_protocols'] = 'http/1.1'
