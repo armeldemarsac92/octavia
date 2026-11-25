@@ -236,6 +236,12 @@ def gateway_capabilities(driver):
             api_settings.enabled_tcp_tls_termination_providers and
             getattr(driver, 'supports_tcp_tls_termination', False) is True):
         capabilities.append(constants.GATEWAY_CAPABILITY_TCP_TLS_TERMINATION)
+        if (WEIGHTED_TARGET_PAYLOAD_AVAILABLE and driver.name in
+                api_settings.enabled_tls_sni_weighted_pool_providers and
+                getattr(driver, 'supports_tls_sni_weighted_pools', False)
+                is True):
+            capabilities.append(
+                constants.GATEWAY_CAPABILITY_TLS_SNI_WEIGHTED_POOLS)
         tcp_auth_providers = (
             api_settings.enabled_tcp_tls_backend_auth_providers)
         if (driver.name in tcp_auth_providers and
@@ -522,6 +528,14 @@ def require_tcp_tls_termination(driver):
                 'provider.'))
 
 
+def require_tls_sni_weighted_pools(driver):
+    if (constants.GATEWAY_CAPABILITY_TLS_SNI_WEIGHTED_POOLS not in
+            gateway_capabilities(driver)):
+        raise exceptions.ProviderUnsupportedOptionError(
+            prov=driver.name, user_msg=_(
+                'Weighted TLS SNI pools are unavailable for this provider.'))
+
+
 def require_tcp_tls_backend_auth(driver):
     if (constants.GATEWAY_CAPABILITY_TCP_TLS_BACKEND_AUTH not in
             gateway_capabilities(driver)):
@@ -576,6 +590,28 @@ def validate_existing_tcp_pool_attachment(
         tcp_tls_termination=listener.tcp_tls_termination and not passthrough,
         hostname=pool.backend_tls_hostname,
         ca_ref=pool.ca_tls_certificate_id, tls_sni_policy=tls_sni_policy)
+
+
+def validate_tcp_policy_targets(
+        driver, policy_repo, session, listener, action, redirect_pool_id,
+        targets, passthrough, *, active_targets_only=False):
+    if action != constants.L7POLICY_ACTION_WEIGHTED_TARGETS:
+        validate_existing_tcp_pool_attachment(
+            driver, policy_repo, session, listener, redirect_pool_id,
+            tls_sni_policy=True, passthrough=passthrough)
+        return
+    pools = policy_repo.get_weighted_target_pools(
+        session, listener, targets, tcp_tls_passthrough=passthrough)
+    # All declared pools must be valid. When an existing weighted route
+    # reopens, only enabled, positive-weight pools can carry traffic.
+    checked_pools = pools.values()
+    if active_targets_only:
+        checked_pools = (
+            pools[target['pool_id']]
+            for target in validate.tls_sni_weighted_targets(targets)
+            if target['weight'] > 0 and pools[target['pool_id']].enabled)
+    if any(pool.backend_tls_hostname for pool in checked_pools):
+        require_tcp_tls_backend_auth(driver)
 
 
 def require_tls_sni_passthrough(driver):
@@ -657,6 +693,7 @@ def validate_l7rule_context(driver, rule_type, protocol, *,
 def require_gateway_policy_action(driver, action, protocol, *,
                                   request_header_operations=None,
                                   tcp_tls_termination=False,
+                                  tcp_tls_passthrough=False,
                                   response_header_operations=None,
                                   request_url_rewrite=None, targets=None,
                                   request_cors=None,
@@ -674,11 +711,18 @@ def require_gateway_policy_action(driver, action, protocol, *,
         validate.validate_fixed_http_protocol(protocol)
         require_fixed_http_responses(driver)
     elif action == constants.L7POLICY_ACTION_WEIGHTED_TARGETS:
-        validate.validate_weighted_l7policy_protocol(protocol)
-        require_weighted_targets(driver)
-        if any(validate.target_request_filters(target)
-               for target in targets or []):
-            require_weighted_target_request_filters(driver, protocol)
+        if protocol == constants.PROTOCOL_TCP:
+            validate.validate_tls_sni_weighted_policy(
+                tcp_tls_termination, tcp_tls_passthrough)
+            if targets is not None:
+                validate.tls_sni_weighted_targets(targets)
+            require_tls_sni_weighted_pools(driver)
+        else:
+            validate.validate_weighted_l7policy_protocol(protocol)
+            require_weighted_targets(driver)
+            if any(validate.target_request_filters(target)
+                   for target in targets or []):
+                require_weighted_target_request_filters(driver, protocol)
     elif action == constants.L7POLICY_ACTION_REDIRECT_REQUEST:
         validate.validate_http_request_redirect_protocol(protocol)
         require_http_request_redirect(driver)

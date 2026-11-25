@@ -210,6 +210,10 @@ api_opts = [
     cfg.ListOpt('enabled_tls_sni_providers', default=[],
                 help=_('Providers enabled in this region for TLS ClientHello '
                        'SNI routing on TCP listeners.')),
+    cfg.ListOpt('enabled_tls_sni_weighted_pool_providers', default=[],
+                help=_('Providers enabled in this region for weighted TCP '
+                       'pools on terminating TLS SNI policies. Requires '
+                       'TCP TLS termination and a qualified Amphora fleet.')),
     cfg.ListOpt('enabled_tcp_tls_mixed_mode_providers', default=[],
                 help=_('Providers in this region qualified for mixed TLS '
                        'termination and passthrough on a TCP listener. '

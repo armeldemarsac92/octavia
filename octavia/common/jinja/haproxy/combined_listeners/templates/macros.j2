@@ -495,6 +495,33 @@ backend {{ pool.id }}:{{ listener.id }}
 {% endmacro %}
 
 
+{% macro tcp_sni_policies_macro(constants, listener, policies) %}
+    {% set closed = constants.HAPROXY_TLS_SNI_WEIGHTED_CLOSED_PREFIX ~ listener.id %}
+    {% for policy in policies %}
+        {{- l7policy_rules_macro(constants, policy, listener) -}}
+    {% endfor %}
+    {% if listener.tcp_tls_termination %}
+        {% for policy in policies %}
+            {% if policy.tcp_weighted_targets %}
+    tcp-request content set-var(sess.octavia_sni_weighted_draw) rand({{ policy.total_weight }}) if{{ l7rule_list_macro(constants, policy) }}
+            {% endif %}
+    tcp-request content accept if{{ l7rule_list_macro(constants, policy) }}
+        {% endfor %}
+    {% endif %}
+    {% for policy in policies %}
+        {% if policy.tcp_weighted_targets is defined %}
+            {% for target in policy.tcp_weighted_targets %}
+                {% set backend = target.pool_id ~ ':' ~ listener.id if target.pool_id is defined else closed %}
+    use_backend {{ backend }} if{{ l7rule_list_macro(constants, policy) }} { var(sess.octavia_sni_weighted_draw) -m int {{ target.first }}:{{ target.last }} }
+            {% endfor %}
+    use_backend {{ closed }} if{{ l7rule_list_macro(constants, policy) }}
+        {% else %}
+            {{- l7policy_macro(constants, policy, listener) -}}
+        {% endif %}
+    {% endfor %}
+{% endmacro %}
+
+
 {% macro frontend_macro(constants, lib_consts, listener, lb_vip_address, additional_vips) %}
 frontend {{ listener.id }}
     {% if listener.otlp_tracing is defined %}
@@ -567,12 +594,16 @@ frontend {{ listener.id }}
             {{- stock_redirect_macro(constants, l7policy, unless_ordered=True) -}}
         {% endfor %}
     {% endif %}
-    {% for l7policy in policies %}
-        {% if not (select_policy or structured) %}
-            {{- l7policy_rules_macro(constants, l7policy, listener) -}}
-        {% endif %}
-        {{- l7policy_macro(constants, l7policy, listener) -}}
-    {% endfor %}
+    {% if policies|selectattr('tcp_weighted_targets', 'defined')|list %}
+        {{- tcp_sni_policies_macro(constants, listener, policies) -}}
+    {% else %}
+        {% for l7policy in policies %}
+            {% if not (select_policy or structured) %}
+                {{- l7policy_rules_macro(constants, l7policy, listener) -}}
+            {% endif %}
+            {{- l7policy_macro(constants, l7policy, listener) -}}
+        {% endfor %}
+    {% endif %}
     {% if listener.default_http_status_code is defined %}
     default_backend {{ fixed_response_backend_name(constants, listener, 'default') }}
     {% elif listener.default_pool and
@@ -625,7 +656,9 @@ frontend {{ listener.id }}
     tcp-request content accept if octavia_mixed_hello
         {% for policy in listener.l7policies %}
             {{- l7policy_rules_macro(constants, policy, listener, raw_tls=True) -}}
-            {% if not policy.tcp_tls_passthrough %}
+            {% if policy.tcp_weighted_targets is defined and not policy.tcp_weighted_targets %}
+                {% set target = constants.HAPROXY_TLS_SNI_WEIGHTED_CLOSED_PREFIX ~ listener.id %}
+            {% elif not policy.tcp_tls_passthrough %}
                 {% set target = dispatch %}
             {% elif policy.redirect_pool.tls_enabled or policy.redirect_pool.backend_tls_hostname is defined %}
                 {% set target = reject %}
@@ -647,10 +680,15 @@ frontend {{ local_frontend }}
     {# Require the TLS stack to see the same name as the public dispatcher. #}
     tcp-request content set-var(sess.octavia_mixed_sni) fc_pp_tlv(0xe0)
     tcp-request content reject unless { ssl_fc_sni,lower,strcmp(sess.octavia_mixed_sni) -m int eq 0 }
-        {% for policy in listener.l7policies if not policy.tcp_tls_passthrough %}
-            {{- l7policy_rules_macro(constants, policy, listener) -}}
-            {{- l7policy_macro(constants, policy, listener) -}}
-        {% endfor %}
+        {% set terminating_policies = listener.l7policies|rejectattr('tcp_tls_passthrough')|list %}
+        {% if terminating_policies|selectattr('tcp_weighted_targets', 'defined')|list %}
+            {{- tcp_sni_policies_macro(constants, listener, terminating_policies) -}}
+        {% else %}
+            {% for policy in terminating_policies %}
+                {{- l7policy_rules_macro(constants, policy, listener) -}}
+                {{- l7policy_macro(constants, policy, listener) -}}
+            {% endfor %}
+        {% endif %}
 
 backend {{ dispatch }}
     mode tcp

@@ -97,6 +97,7 @@ class AmphoraProviderDriver(driver_base.ProviderDriver):
     supports_tcp_tls_backend_auth = True
     supports_tls_sni_passthrough = True
     supports_tls_sni_suffix = True
+    supports_tls_sni_weighted_pools = True
     supports_https_listener_isolation = True
     supports_frontend_client_auth_insecure_fallback = True
 
@@ -454,11 +455,14 @@ class AmphoraProviderDriver(driver_base.ProviderDriver):
         with session.begin():
             db_listener = self.repositories.listener.get(
                 session, id=l7policy.listener_id)
-        tcp_redirect = (
+        tcp_sni_policy = (
             db_listener.protocol == lib_consts.PROTOCOL_TCP and
-            l7policy.action == consts.L7POLICY_ACTION_REDIRECT_TO_POOL)
+            (l7policy.action == consts.L7POLICY_ACTION_REDIRECT_TO_POOL or
+             (l7policy.action == consts.L7POLICY_ACTION_WEIGHTED_TARGETS and
+              db_listener.tcp_tls_termination is True and
+              getattr(l7policy, 'tcp_tls_passthrough', False) is not True)))
         if (db_listener.protocol not in VALID_L7POLICY_LISTENER_PROTOCOLS and
-                not tcp_redirect):
+                not tcp_sni_policy):
             msg = ('%s protocol listeners do not support L7 policies' % (
                 db_listener.protocol))
             raise exceptions.UnsupportedOptionError(

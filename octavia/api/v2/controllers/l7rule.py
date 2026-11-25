@@ -205,6 +205,7 @@ class L7RuleController(base.BaseController):
                     http_request_policy=db_l7policy.http_request_policy,
                     request_mirrors=db_l7policy.request_mirrors,
                     targets=db_l7policy.targets,
+                    tcp_tls_passthrough=db_l7policy.tcp_tls_passthrough,
                     tcp_tls_termination=tcp_tls_termination)
             if l7rule_dict['enabled']:
                 driver_utils.require_no_exposed_request_transforms(
@@ -220,10 +221,11 @@ class L7RuleController(base.BaseController):
                 driver_utils.require_tls_sni_rule_comparison(
                     driver, l7rule.compare_type,
                     tcp_tls_termination and not passthrough)
-                driver_utils.validate_existing_tcp_pool_attachment(
+                driver_utils.validate_tcp_policy_targets(
                     driver, self.repositories.l7policy, context.session,
-                    db_l7policy.listener, db_l7policy.redirect_pool_id,
-                    tls_sni_policy=True, passthrough=passthrough)
+                    db_l7policy.listener, db_l7policy.action,
+                    db_l7policy.redirect_pool_id, db_l7policy.targets,
+                    passthrough)
 
             db_l7rule = self._validate_create_l7rule(context.session,
                                                      l7rule_dict)
@@ -301,6 +303,14 @@ class L7RuleController(base.BaseController):
         if rules.has_other_enabled_rules(session, rule):
             listener = self.repositories.listener.get_for_update(
                 session, policy.listener_id, show_deleted=False)
+            if (listener.enabled and listener.tcp_tls_termination and
+                    policy.action ==
+                    constants.L7POLICY_ACTION_WEIGHTED_TARGETS):
+                driver_utils.require_tls_sni_weighted_pools(driver)
+                driver_utils.validate_tcp_policy_targets(
+                    driver, policy_repo, session, listener, policy.action,
+                    policy.redirect_pool_id, policy.targets,
+                    policy.tcp_tls_passthrough, active_targets_only=True)
             if listener.enabled and listener.tcp_tls_mixed_mode:
                 driver_utils.require_tcp_tls_mixed_mode(driver)
                 # SNI predicates on one policy are conjunctive. Without a
@@ -396,6 +406,7 @@ class L7RuleController(base.BaseController):
                     http_request_policy=db_l7policy.http_request_policy,
                     request_mirrors=db_l7policy.request_mirrors,
                     targets=db_l7policy.targets,
+                    tcp_tls_passthrough=db_l7policy.tcp_tls_passthrough,
                     tcp_tls_termination=tcp_tls_termination)
                 if enabled:
                     driver_utils.require_no_exposed_request_transforms(
@@ -413,10 +424,12 @@ class L7RuleController(base.BaseController):
                     driver_utils.require_tls_sni_rule_comparison(
                         driver, compare_type,
                         tcp_tls_termination and not passthrough)
-                    driver_utils.validate_existing_tcp_pool_attachment(
+                    driver_utils.validate_tcp_policy_targets(
                         driver, self.repositories.l7policy, context.session,
-                        db_l7policy.listener, db_l7policy.redirect_pool_id,
-                        tls_sni_policy=True, passthrough=passthrough)
+                        db_l7policy.listener, db_l7policy.action,
+                        db_l7policy.redirect_pool_id, db_l7policy.targets,
+                        passthrough,
+                        active_targets_only=enabled and not db_l7rule.enabled)
             l7rule_dict['id'] = id
             provider_l7rule_dict = (
                 driver_utils.l7rule_dict_to_provider_dict(l7rule_dict))

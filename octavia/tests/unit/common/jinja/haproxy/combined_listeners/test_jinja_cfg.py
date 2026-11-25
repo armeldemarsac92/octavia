@@ -1738,6 +1738,97 @@ class TestHaproxyCfg(base.TestCase):
             self.jinja_cfg.render_loadbalancer_obj,
             amphora, [listener], haproxy_version='2.8.0')
 
+    def test_render_weighted_tcp_tls_sni(self):
+        samples = sample_configs_combined
+        listener = samples.sample_listener_tuple(
+            proto='TCP', persistence=False, tls=True)
+        owners = {'load_balancer_id': listener.load_balancer.id,
+                  'project_id': listener.project_id}
+        plain = SimpleNamespace(**dict(listener.default_pool._asdict(),
+                                       **owners))
+        secure = SimpleNamespace(**dict(
+            samples.sample_pool_tuple(proto='TCP', persistence=False,
+                                      pool_ca_cert=True,
+                                      tls_enabled=True)._asdict(),
+            **owners, id='6496e223-2e4e-4d2a-bfa0-36a6f8558965',
+            backend_tls_hostname='secure.example.test'))
+        disabled = SimpleNamespace(**dict(
+            samples.sample_pool_tuple(proto='TCP', sample_pool=2,
+                                      persistence=False,
+                                      enabled=False)._asdict(),
+            **owners, id='6729a234-2be5-4dd6-b901-fa1cf9cbdb5b'))
+        exact = samples.sample_l7rule_tuple(
+            'exact', type='TLS_SNI', compare_type='EQUAL_TO',
+            value='a.example.test')
+        suffix = exact._replace(id='suffix', compare_type='ENDS_WITH',
+                                value='*.example.test')
+        broad = samples.sample_l7policy_tuple('broad')._replace(
+            redirect_pool=plain, l7rules=[suffix])
+        weighted = broad._replace(
+            id='weighted', action=constants.L7POLICY_ACTION_WEIGHTED_TARGETS,
+            redirect_pool=None, l7rules=[exact], targets=[
+                {'pool_id': secure.id, 'weight': 3},
+                {'pool_id': disabled.id, 'weight': 2},
+                {'pool_id': 'bd93f30a-70cf-4a62-b57b-346c94aa6fbb',
+                 'weight': 1},
+            ])
+        features = {constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME: True,
+                    constants.GATEWAY_CAPABILITY_TCP_TLS_BACKEND_AUTH: True}
+        for mixed_mode in (False, True):
+            with self.subTest(mixed_mode=mixed_mode):
+                current = SimpleNamespace(**dict(
+                    listener._asdict(), **owners,
+                    default_pool=None, tcp_tls_termination=True,
+                    tcp_tls_mixed_mode=mixed_mode,
+                    pools=[plain, secure, disabled],
+                    l7policies=[broad, weighted]))
+
+                def render(policy):
+                    current.l7policies = [broad, policy]
+                    return self.jinja_cfg.render_loadbalancer_obj(
+                        samples.sample_amphora_tuple(), [current],
+                        {secure.id: {'ca_cert': '/secure-ca.pem'}},
+                        amp_details=features,
+                        haproxy_version='3.0.19')
+
+                config = render(weighted)
+                draw = ('tcp-request content set-var'
+                        '(sess.octavia_sni_weighted_draw)')
+                closed = 'octavia-sni-closed-' + current.id
+                self.assertEqual(1, config.count(draw))
+                self.assertIn(f'{draw} rand(6) if exact', config)
+                self.assertIn(f'use_backend {secure.id}:{current.id} if exact '
+                              '{ var(sess.octavia_sni_weighted_draw) '
+                              '-m int 0:2 }', config)
+                self.assertIn(
+                    f'use_backend {disabled.id}:{current.id} if exact '
+                    '{ var(sess.octavia_sni_weighted_draw) -m int 3:4 }',
+                    config)
+                self.assertIn(f'use_backend {closed} if exact '
+                              '{ var(sess.octavia_sni_weighted_draw) '
+                              '-m int 5:5 }', config)
+                self.assertLess(config.index(f'use_backend {closed} if exact'),
+                                config.index(f'{plain.id}:{current.id} '
+                                             'if suffix'))
+                self.assertIn('verifyhost-strict secure.example.test', config)
+                self.assertIn('ca-file /secure-ca.pem', config)
+
+                config = render(
+                    weighted._replace(targets=weighted.targets[1:]))
+                self.assertIn(f'{draw} rand(3) if exact', config)
+                self.assertLess(config.index(f'use_backend {closed} if exact'),
+                                config.index(f'{plain.id}:{current.id} '
+                                             'if suffix'))
+
+                malformed = weighted._replace(targets=[
+                    {'fixed_response': {'status_code': 503}, 'weight': 1}])
+                config = render(malformed)
+                self.assertNotIn(draw, config)
+                self.assertIn(f'use_backend {closed} if exact', config)
+                config = render(weighted._replace(l7rules=[
+                    exact._replace(value='invalid name')]))
+                self.assertNotIn(f'frontend {current.id}', config)
+
     def test_render_template_l7policies(self):
         fe = ("frontend sample_listener_id_1\n"
               "    maxconn {maxconn}\n"
@@ -3393,6 +3484,7 @@ class TestHaproxyCfg(base.TestCase):
         mock_render_loadbalancer_obj.assert_called_once_with(
             mock_amp, mock_listeners, tls_certs=mock_tls_certs,
             socket_path=mock_socket_path, amp_details=None,
+            otlp_tls_certs=None, otlp_publication=None,
             feature_compatibility=expected_fc, haproxy_version="0.7.0")
 
         mock_render_loadbalancer_obj.reset_mock()
@@ -3408,6 +3500,7 @@ class TestHaproxyCfg(base.TestCase):
         mock_render_loadbalancer_obj.assert_called_once_with(
             mock_amp, mock_listeners, tls_certs=mock_tls_certs,
             socket_path=mock_socket_path, amp_details=None,
+            otlp_tls_certs=None, otlp_publication=None,
             feature_compatibility=expected_fc, haproxy_version="1.6.0")
 
         mock_render_loadbalancer_obj.reset_mock()
@@ -3424,6 +3517,7 @@ class TestHaproxyCfg(base.TestCase):
         mock_render_loadbalancer_obj.assert_called_once_with(
             mock_amp, mock_listeners, tls_certs=mock_tls_certs,
             socket_path=mock_socket_path, amp_details=None,
+            otlp_tls_certs=None, otlp_publication=None,
             feature_compatibility=expected_fc, haproxy_version="1.9.0")
 
         mock_render_loadbalancer_obj.reset_mock()
@@ -3441,6 +3535,7 @@ class TestHaproxyCfg(base.TestCase):
         mock_render_loadbalancer_obj.assert_called_once_with(
             mock_amp, mock_listeners, tls_certs=mock_tls_certs,
             socket_path=mock_socket_path, amp_details=None,
+            otlp_tls_certs=None, otlp_publication=None,
             feature_compatibility=expected_fc, haproxy_version="2.1.1")
 
         mock_render_loadbalancer_obj.reset_mock()
@@ -3459,6 +3554,7 @@ class TestHaproxyCfg(base.TestCase):
         mock_render_loadbalancer_obj.assert_called_once_with(
             mock_amp, mock_listeners, tls_certs=mock_tls_certs,
             socket_path=mock_socket_path, amp_details=None,
+            otlp_tls_certs=None, otlp_publication=None,
             feature_compatibility=expected_fc, haproxy_version="2.2.1")
 
         mock_render_loadbalancer_obj.reset_mock()
@@ -3470,6 +3566,7 @@ class TestHaproxyCfg(base.TestCase):
         mock_render_loadbalancer_obj.assert_called_once_with(
             mock_amp, mock_listeners, tls_certs=mock_tls_certs,
             socket_path=mock_socket_path, amp_details=None,
+            otlp_tls_certs=None, otlp_publication=None,
             feature_compatibility=expected_fc, haproxy_version="2.4.0")
 
         mock_render_loadbalancer_obj.reset_mock()
@@ -3481,6 +3578,7 @@ class TestHaproxyCfg(base.TestCase):
         mock_render_loadbalancer_obj.assert_called_once_with(
             mock_amp, mock_listeners, tls_certs=mock_tls_certs,
             socket_path=mock_socket_path, amp_details=None,
+            otlp_tls_certs=None, otlp_publication=None,
             feature_compatibility=expected_fc, haproxy_version="3.1.0")
 
     def test_transform_listener_tls_ciphers_injection_fallback(self):
