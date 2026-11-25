@@ -318,6 +318,7 @@ class TestHaproxyAmphoraLoadBalancerDriverTest(base.TestCase):
         tracing_status.assert_not_called()
 
         # The same isolated pool can attest after the pair recovers.
+        collector.alpn_protocols = None
         client.stage_backend_tls_system_ca.side_effect = None
         collector.provisioning_status = constants.PENDING_UPDATE
         self.driver.update(lb)
@@ -329,6 +330,7 @@ class TestHaproxyAmphoraLoadBalancerDriverTest(base.TestCase):
         tracing_status.assert_not_called()
         collector.provisioning_status = constants.ACTIVE
 
+        collector.alpn_protocols = ['http/1.1']
         collector.members = [data_models.Member(
             id='collector-member', ip_address='192.0.2.30', protocol_port=4318,
             weight=1, enabled=True)]
