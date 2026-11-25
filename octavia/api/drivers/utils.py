@@ -153,6 +153,11 @@ def gateway_capabilities(driver):
             driver.name in policy_providers and
             getattr(driver, 'supports_http_request_policy', False) is True):
         capabilities.append(constants.GATEWAY_CAPABILITY_HTTP_REQUEST_POLICY)
+        backoff_providers = api_settings.enabled_http_retry_backoff_providers
+        if (driver.name in backoff_providers and
+                getattr(driver, 'supports_http_retry_backoff', False) is True):
+            capabilities.append(
+                constants.GATEWAY_CAPABILITY_HTTP_RETRY_BACKOFF)
     mirror_providers = api_settings.enabled_http_request_mirror_providers
     if (HTTP_REQUEST_MIRROR_PAYLOAD_AVAILABLE and
             driver.name in mirror_providers and
@@ -442,6 +447,16 @@ def require_http_request_policy(driver, protocol):
                 'L7 HTTP request policies are unavailable for this provider.'))
 
 
+def require_http_retry_backoff(driver, protocol):
+    validate.validate_http_request_policy_protocol(protocol)
+    if (constants.GATEWAY_CAPABILITY_HTTP_RETRY_BACKOFF not in
+            gateway_capabilities(driver)):
+        raise exceptions.ProviderUnsupportedOptionError(
+            prov=driver.name, user_msg=_(
+                'Explicit HTTP retry backoff is unavailable for this '
+                'provider.'))
+
+
 def require_listener_request_filters(driver):
     if (constants.GATEWAY_CAPABILITY_LISTENER_REQUEST_FILTERS not in
             gateway_capabilities(driver)):
@@ -481,6 +496,8 @@ def _withdrawn_request_transforms(driver):
         yield 'request_cors', require_request_cors
     if constants.GATEWAY_CAPABILITY_HTTP_REQUEST_POLICY not in capabilities:
         yield 'http_request_policy', require_http_request_policy
+    elif constants.GATEWAY_CAPABILITY_HTTP_RETRY_BACKOFF not in capabilities:
+        yield 'http_retry_backoff', require_http_retry_backoff
     if constants.GATEWAY_CAPABILITY_HTTP_REQUEST_MIRROR not in capabilities:
         yield 'request_mirrors', require_http_request_mirror
 
@@ -714,6 +731,8 @@ def require_gateway_policy_action(driver, action, protocol, *,
         require_http_request_mirror(driver, protocol)
     if http_request_policy is not None:
         require_http_request_policy(driver, protocol)
+        if 'backoff_ms' in http_request_policy.get('retry', {}):
+            require_http_retry_backoff(driver, protocol)
     if request_cors is not None:
         require_request_cors(driver, protocol)
     if request_url_rewrite:

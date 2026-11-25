@@ -2380,6 +2380,26 @@ class L7PolicyRepository(BaseRepository):
     model_class = models.L7Policy
     activation_parent = ('listener', 'load_balancer')
 
+    def set_http_retry_backoff_statuses(
+            self, session, policies, *, closed, recovered):
+        policy = self.model_class
+        query = (session.query(policy)
+                 .filter(policy.id.in_(closed | recovered),
+                         policy.enabled.is_(True),
+                         policy.provisioning_status.notin_(
+                             (consts.PENDING_DELETE, consts.DELETED)))
+                 .options(lazyload('*')).order_by(policy.id)
+                 .populate_existing().with_for_update())
+        for row in query:
+            if row.http_request_policy != policies[row.id].http_request_policy:
+                continue
+            if row.id in closed:
+                row.provisioning_status = consts.ERROR
+                row.operating_status = consts.OFFLINE
+            elif row.provisioning_status == consts.ERROR:
+                row.provisioning_status = consts.ACTIVE
+                row.operating_status = consts.ONLINE
+
     def get_listener_policies_for_update(self, session, listener_id):
         policy = self.model_class
         return (session.query(policy).filter_by(listener_id=listener_id)
@@ -2839,6 +2859,7 @@ class L7PolicyRepository(BaseRepository):
         lb = models.LoadBalancer
         target = models.L7PolicyTarget
         cors = transform == 'request_cors'
+        retry_backoff = transform == 'http_retry_backoff'
         if activating_closed_pool is not None:
             if not cors:
                 return []
@@ -2848,6 +2869,8 @@ class L7PolicyRepository(BaseRepository):
                                  include_closed=cors)
         active_target = (target.weight > 0) & target.pool.has(pool)
         query = self._active_http_policies(session)
+        if retry_backoff:
+            query = query.add_columns(policy.http_request_policy)
         if transform == 'request_mirrors':
             query = query.filter(self._active_request_mirrors(
                 restoring_pool=restoring_pool, removed_pool=removed_pool))
@@ -2865,8 +2888,9 @@ class L7PolicyRepository(BaseRepository):
                 weighted = weighted & (restoring_pool is None)
             else:
                 weighted = weighted & policy._targets.any(active_target)
+            field = 'http_request_policy' if retry_backoff else transform
             query = query.filter(
-                getattr(policy, transform).isnot(None),
+                getattr(policy, field).isnot(None),
                 ((policy.action == consts.L7POLICY_ACTION_REDIRECT_TO_POOL) &
                  self._has_redirect_pool(pool)) | weighted)
         if listener_id is not None:
@@ -2879,7 +2903,9 @@ class L7PolicyRepository(BaseRepository):
             query = query.join(listener.load_balancer).filter(
                 lb.enabled.is_(True))
         return [row for row in query.with_for_update().all()
-                if self._in_https_section(row)]
+                if self._in_https_section(row) and
+                (not retry_backoff or
+                 'backoff_ms' in row.http_request_policy.get('retry', {}))]
 
     def get_transform_exposed_by_policy(
             self, session, *, transform, policy_id=None, disabling_pool=None,

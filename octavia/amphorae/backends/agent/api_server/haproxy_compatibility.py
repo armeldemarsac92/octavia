@@ -24,6 +24,30 @@ from octavia.common import constants
 LOG = logging.getLogger(__name__)
 CONF = cfg.CONF
 
+_HTTP_RETRY_BACKOFF_PROBE = """defaults
+    mode http
+    timeout connect 1s
+    timeout client 1s
+    timeout server 1s
+frontend probe
+    bind 127.0.0.1:1
+    default_backend route
+backend route
+    http-request octavia-http-policy default default 1 503 1
+    server destination 127.0.0.1:2
+"""
+
+
+def _supports_http_retry_backoff(haproxy_cmd):
+    try:
+        subprocess.check_output(
+            [haproxy_cmd, '-c', '-q', '-f', '/dev/stdin'],
+            input=_HTTP_RETRY_BACKOFF_PROBE, stderr=subprocess.STDOUT,
+            encoding='utf-8', timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return True
+
 
 _HTTP_COOKIE_PATH_PROBE = (
     """
@@ -81,13 +105,16 @@ def get_haproxy_capabilities():
     http_request_mirror = f'{http_request_policy}-http-mirror-v1'
     listener_auth = f'{http_request_mirror}-listener-auth-v1'
     retry_budget = f'{listener_auth}-backend-retry-budget-v1'
-    retry_budget_build = f'{retry_budget} '
-    otlp_tracing_build = f'{retry_budget}-listener-otlp-v1 '
+    otlp_tracing = f'{retry_budget}-listener-otlp-v1'
+    retry_budget_builds = (
+        f'{retry_budget} ', f'{retry_budget}-route-retry-backoff-v1 ')
+    otlp_tracing_builds = (
+        f'{otlp_tracing} ', f'{otlp_tracing}-route-retry-backoff-v1 ')
     strict_dns_builds = (
         f'{strict_dns} ', f'{strict_dns}-h2-alpn-v1 ',
         f'{backend_sans} ', f'{http_request_policy} ',
-        f'{http_request_mirror} ', f'{listener_auth} ', retry_budget_build,
-        otlp_tracing_build,
+        f'{http_request_mirror} ', f'{listener_auth} ',
+        *retry_budget_builds, *otlp_tracing_builds,
     )
     if not output.startswith(strict_dns_builds):
         return capabilities
@@ -100,6 +127,9 @@ def get_haproxy_capabilities():
             constants.GATEWAY_CAPABILITY_BACKEND_TLS_SUBJECT_ALT_NAMES] = True
     if output.startswith(strict_dns_builds[3:]):
         capabilities[constants.GATEWAY_CAPABILITY_HTTP_REQUEST_POLICY] = True
+        if _supports_http_retry_backoff(haproxy_cmd):
+            capabilities[
+                constants.GATEWAY_CAPABILITY_HTTP_RETRY_BACKOFF] = True
     if output.startswith(strict_dns_builds[4:]):
         capabilities[constants.GATEWAY_CAPABILITY_HTTP_REQUEST_MIRROR] = True
     if (output.startswith(strict_dns_builds[5:]) and
@@ -107,9 +137,9 @@ def get_haproxy_capabilities():
         capabilities[
             constants.GATEWAY_CAPABILITY_LISTENER_REQUEST_FILTERS
         ] = True
-    if output.startswith((retry_budget_build, otlp_tracing_build)):
+    if output.startswith(retry_budget_builds + otlp_tracing_builds):
         capabilities[constants.GATEWAY_CAPABILITY_BACKEND_RETRY_BUDGET] = True
-    if (output.startswith(otlp_tracing_build) and
+    if (output.startswith(otlp_tracing_builds) and
             '+LUA' in output.split() and
             os.path.isfile(constants.HAPROXY_OTLP_TRACING_SCRIPT)):
         capabilities[constants.GATEWAY_CAPABILITY_LISTENER_OTLP_TRACING] = True

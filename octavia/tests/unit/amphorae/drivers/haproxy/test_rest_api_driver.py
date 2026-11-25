@@ -12,6 +12,7 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 import ssl
+from types import SimpleNamespace
 from unittest import mock
 
 from octavia.amphorae.driver_exceptions import exceptions as driver_except
@@ -20,6 +21,7 @@ from octavia.amphorae.drivers.haproxy import rest_api_driver
 from octavia.common import constants
 from octavia.common import data_models
 import octavia.tests.unit.base as base
+from octavia.tests.unit.common.sample_configs import sample_configs_combined
 
 
 class TestCustomHostNameCheckingAdapter(base.TestCase):
@@ -51,6 +53,125 @@ class TestHAProxyAmphoraDriver(base.TestCase):
     def setUp(self):
         super().setUp()
         self.driver = rest_api_driver.HaproxyAmphoraLoadBalancerDriver()
+
+    def test_http_retry_backoff_failover_and_independent_withdrawal(self):
+        listener = sample_configs_combined.sample_listener_tuple(
+            l7=True, topology=constants.TOPOLOGY_ACTIVE_STANDBY)
+        ordinary = listener.l7policies[0]
+        first, sibling = [
+            SimpleNamespace(**ordinary._replace(
+                id=policy_id,
+                l7rules=[sample_configs_combined.sample_l7rule_tuple(
+                    f'{policy_id}-path', value=f'/{policy_id}')])._asdict(),
+                http_request_policy={'retry': {'backoff_ms': duration}})
+            for policy_id, duration in (('first', 80), ('sibling', 150))]
+        listener = listener._replace(l7policies=[first, sibling])
+        amphorae = [amp._replace(status=constants.AMPHORA_ALLOCATED)
+                    for amp in listener.load_balancer.amphorae]
+        loadbalancer = listener.load_balancer._replace(
+            amphorae=amphorae, listeners=[listener])
+        client = self.driver.clients['1.0'] = mock.Mock()
+        client.get_info.return_value = {'haproxy_version': '3.0.19'}
+        policy_cap = constants.GATEWAY_CAPABILITY_HTTP_REQUEST_POLICY
+        backoff_cap = constants.GATEWAY_CAPABILITY_HTTP_RETRY_BACKOFF
+        details = {amphorae[0].id: {policy_cap: True, backoff_cap: True},
+                   amphorae[1].id: {policy_cap: True}}
+        client.get_details.side_effect = (
+            lambda amphora, **kwargs: details[amphora.id])
+        statuses = {amp.id: {constants.UNREACHABLE: False}
+                    for amp in amphorae}
+        with (mock.patch.object(self.driver, '_process_listener_tls_certs',
+                                return_value={}),
+              mock.patch.object(self.driver, '_process_listener_pool_certs',
+                                return_value={}),
+              mock.patch.object(rest_api_driver.db_api, 'session'),
+              mock.patch.object(
+                  rest_api_driver.repo.L7PolicyRepository,
+                  'set_http_retry_backoff_statuses') as publish):
+            backup = amphorae[1]
+            self.driver.update_amphora_listeners(
+                loadbalancer._replace(amphorae=[backup]), backup)
+            config = client.upload_config.call_args.args[2]
+            closed = 'http-request return status 503 if { var('
+            self.assertIn(closed, config)
+            self.assertNotIn('octavia-http-policy', config)
+            self.assertEqual({'first', 'sibling'},
+                             publish.call_args.kwargs['closed'])
+
+            client.reset_mock()
+            self.assertRaises(
+                driver_except.CoordinatedListenerUpdateError,
+                self.driver.update_failover_listeners, loadbalancer, 0,
+                statuses)
+            client.upload_config.assert_not_called()
+            client.reload_listener.assert_not_called()
+
+            details[amphorae[1].id][backoff_cap] = True
+            self.assertTrue(self.driver.update_failover_listeners(
+                loadbalancer, 0, statuses))
+            self.assertEqual(amphorae, [call.args[0] for call in
+                                        client.upload_config.call_args_list])
+            for call in client.upload_config.call_args_list:
+                self.assertIn(
+                    'octavia-http-policy default default 1 none 80 if',
+                    call.args[2])
+            self.assertEqual(2, client.reload_listener.call_count)
+            self.assertEqual({'first', 'sibling'},
+                             publish.call_args.kwargs['recovered'])
+
+            client.reset_mock()
+            del details[backup.id][backoff_cap]
+            first.http_request_policy = {'retry': {'attempts': 2}}
+            self.driver.update(loadbalancer)
+            for call in client.upload_config.call_args_list:
+                config = call.args[2]
+                self.assertIn(
+                    'octavia-http-policy default default 2 none if '
+                    '{ var(txn.octavia_l7_policy) -m str first }', config)
+                self.assertIn(
+                    closed + 'txn.octavia_l7_policy) -m str sibling }', config)
+            self.assertEqual(2, client.reload_listener.call_count)
+            self.assertEqual({'sibling'}, publish.call_args.kwargs['closed'])
+
+    def test_http_retry_backoff_single_failover_requires_details_and_reload(
+            self):
+        listener = sample_configs_combined.sample_listener_tuple(l7=True)
+        policy = SimpleNamespace(**listener.l7policies[0]._asdict(),
+                                 http_request_policy={
+                                     'retry': {'backoff_ms': 0}})
+        listener = listener._replace(l7policies=[policy])
+        amphora = listener.load_balancer.amphorae[0]._replace(
+            role=constants.ROLE_STANDALONE, status=constants.AMPHORA_ALLOCATED)
+        loadbalancer = listener.load_balancer._replace(
+            amphorae=[amphora], listeners=[listener])
+        client = self.driver.clients['1.0'] = mock.Mock()
+        client.get_info.return_value = {'haproxy_version': '3.0.19'}
+        with (mock.patch.object(self.driver, '_process_listener_tls_certs',
+                                return_value={}),
+              mock.patch.object(self.driver, '_process_listener_pool_certs',
+                                return_value={}),
+              mock.patch.object(rest_api_driver.db_api, 'session'),
+              mock.patch.object(
+                  rest_api_driver.repo.L7PolicyRepository,
+                  'set_http_retry_backoff_statuses') as publish):
+            client.get_details.side_effect = exc.ServiceUnavailable()
+            self.assertRaises(
+                driver_except.HttpRetryBackoffUnsupported,
+                self.driver.update_amphora_listeners, loadbalancer, amphora,
+                finalizing_failover=True)
+            client.upload_config.assert_not_called()
+            self.assertEqual({policy.id}, publish.call_args.kwargs['closed'])
+
+            client.get_details.side_effect = None
+            client.get_details.return_value = {
+                constants.GATEWAY_CAPABILITY_HTTP_REQUEST_POLICY: True,
+                constants.GATEWAY_CAPABILITY_HTTP_RETRY_BACKOFF: True}
+            client.reload_listener.side_effect = exc.ServiceUnavailable()
+            self.assertRaises(
+                exc.ServiceUnavailable, self.driver.update_amphora_listeners,
+                loadbalancer, amphora, finalizing_failover=True)
+            client.upload_config.assert_called_once()
+            self.assertEqual({policy.id}, publish.call_args.kwargs['closed'])
 
     def test_tcp_batch_prepares_all_peers_before_reload(self):
         amps = [

@@ -128,12 +128,18 @@ class AmpListenersUpdate(BaseAmphoraTask):
                 return
             db_amp = self.amphora_repo.get(session, id=amphora[constants.ID])
             db_lb = self.loadbalancer_repo.get(session, id=loadbalancer_id)
-        if (db_lb is None or
-                (db_amp is None and _has_managed_udp_listener(db_lb))):
+        if db_lb is None:
+            raise driver_except.ListenerProvisioningError()
+        finalizing = (
+            db_lb.topology == constants.TOPOLOGY_SINGLE and
+            bool(utils.active_http_retry_backoff_policies(db_lb)))
+        strict = finalizing or _has_managed_udp_listener(db_lb)
+        if db_amp is None and strict:
             raise driver_except.ListenerProvisioningError()
         try:
             self.amphora_driver.update_amphora_listeners(
-                db_lb, db_amp, timeout_dict)
+                db_lb, db_amp, timeout_dict,
+                **({'finalizing_failover': True} if finalizing else {}))
         except Exception as e:
             LOG.error('Failed to update listeners on amphora %s. Skipping '
                       'this amphora as it is failing to update due to: %s',
@@ -142,7 +148,7 @@ class AmpListenersUpdate(BaseAmphoraTask):
                 with session.begin():
                     self.amphora_repo.update(session, db_amp.id,
                                              status=constants.ERROR)
-            if _has_managed_udp_listener(db_lb):
+            if strict:
                 raise
 
 
@@ -166,6 +172,8 @@ class AmphoraIndexListenerUpdate(BaseAmphoraTask):
             db_lb = self.loadbalancer_repo.get(
                 session, id=loadbalancer_id)
         managed_udp = _has_managed_udp_listener(db_lb)
+        strict = managed_udp or bool(utils.active_http_retry_backoff_policies(
+            db_lb))
         if managed_udp and any(
                 status.get(constants.UNREACHABLE)
                 for status in amphorae_status.values()):
@@ -178,7 +186,7 @@ class AmphoraIndexListenerUpdate(BaseAmphoraTask):
         except driver_except.CoordinatedListenerUpdateError as error:
             for amphora_id, cause in error.amphora_errors.items():
                 self._handle_update_failure(amphora_id, new_amphora_id, cause)
-            if managed_udp:
+            if strict:
                 raise
             return
 
@@ -189,6 +197,8 @@ class AmphoraIndexListenerUpdate(BaseAmphoraTask):
         amphora_id = amphorae[amphora_index].get(constants.ID)
         amphora_status = amphorae_status.get(amphora_id, {})
         if amphora_status.get(constants.UNREACHABLE):
+            if strict:
+                raise driver_except.ListenerProvisioningError()
             LOG.warning("Skipping listener update because amphora %s "
                         "is not reachable.", amphora_id)
             return
@@ -200,11 +210,13 @@ class AmphoraIndexListenerUpdate(BaseAmphoraTask):
                 db_amp = self.amphora_repo.get(
                     session,
                     id=amphorae[amphora_index][constants.ID])
+            if strict and db_amp is None:
+                raise driver_except.ListenerProvisioningError()
             self.amphora_driver.update_amphora_listeners(
                 db_lb, db_amp, timeout_dict)
         except Exception as error:
             self._handle_update_failure(amphora_id, new_amphora_id, error)
-            if managed_udp:
+            if strict:
                 raise
 
     def _handle_update_failure(self, amphora_id, new_amphora_id, error):
@@ -754,20 +766,24 @@ class AmphoraIndexListenersReload(BaseAmphoraTask):
                 amphorae_status, new_amphora_id, timeout_dict):
         amphora_id = amphorae[amphora_index].get(constants.ID)
         amphora_status = amphorae_status.get(amphora_id, {})
+        session = db_apis.get_session()
+        with session.begin():
+            db_lb = self.loadbalancer_repo.get(session, id=loadbalancer_id)
+        strict = bool(utils.active_http_retry_backoff_policies(db_lb))
         if amphora_status.get(constants.UNREACHABLE):
+            if strict:
+                raise driver_except.ListenerProvisioningError()
             LOG.warning("Skipping listener reload because amphora %s "
                         "is not reachable.", amphora_id)
             return
 
         # TODO(johnsom) Optimize this to use the dicts and not need the
         #               DB lookups
-        session = db_apis.get_session()
         with session.begin():
             db_amp = self.amphora_repo.get(
                 session, id=amphorae[amphora_index][constants.ID])
-            db_lb = self.loadbalancer_repo.get(
-                session,
-                id=loadbalancer_id)
+        if strict and db_amp is None:
+            raise driver_except.ListenerProvisioningError()
         if db_lb.listeners:
             try:
                 self.amphora_driver.reload(db_lb, db_amp, timeout_dict)
@@ -781,7 +797,7 @@ class AmphoraIndexListenersReload(BaseAmphoraTask):
                     with session.begin():
                         self.amphora_repo.update(session, amphora_id,
                                                  status=constants.ERROR)
-                if _has_managed_udp_listener(db_lb):
+                if strict or _has_managed_udp_listener(db_lb):
                     raise
 
 

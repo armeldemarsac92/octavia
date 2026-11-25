@@ -1,0 +1,402 @@
+diff --git a/include/haproxy/http_ana-t.h b/include/haproxy/http_ana-t.h
+--- a/include/haproxy/http_ana-t.h
++++ b/include/haproxy/http_ana-t.h
+@@ -237,6 +237,7 @@
+ struct http_request_policy {
+ 	uint64_t request_timeout_ms;
+ 	uint64_t backend_timeout_ms;
++	uint64_t retry_backoff_ms; /* UINT64_MAX retains the native retry delay */
+ 	int retries; /* -1 retains the backend's native retry policy */
+ 	unsigned int retry_on;
+ };
+@@ -255,9 +256,13 @@
+ 	const struct octavia_retry_budget *retry_budget;
+ 	uint64_t request_expires_ms;
+ 	uint64_t attempt_expires_ms;
++	uint64_t retry_after_ms;
++	struct server *retry_server; /* reference kept while no slot protects the target */
+ 	unsigned int pending_informational; /* output preceding the final response */
+ 	unsigned char final_queued;
+ 	unsigned char final_started;
++	unsigned char retry_force_redispatch;
++	unsigned char retry_pending;
+ 	char cache_hash[20];               /* Store the cache hash  */
+ 	char cache_secondary_hash[HTTP_CACHE_SEC_KEY_LEN]; /* Optional cache secondary key. */
+ 	char *uri;                      /* first line if log needed, NULL otherwise */
+diff --git a/include/haproxy/http_ana.h b/include/haproxy/http_ana.h
+--- a/include/haproxy/http_ana.h
++++ b/include/haproxy/http_ana.h
+@@ -29,6 +29,7 @@
+ #include <haproxy/htx-t.h>
+ #include <haproxy/proxy-t.h>
+ #include <haproxy/stream-t.h>
++#include <haproxy/ticks.h>
+ 
+ extern struct pool_head *pool_head_uniqueid;
+ extern struct pool_head *pool_head_http_txn;
+@@ -69,11 +70,20 @@
+ int octavia_retry_budget_admit(const struct stream *s);
+ void octavia_retry_budget_reject(struct stream *s);
+ int http_policy_expiration(const struct http_txn *txn);
++void http_policy_schedule_retry(struct stream *s, int force_redispatch);
+ 
+ /* The scheduler tick wraps; use HAProxy's full monotonic date for the budget. */
+ static inline uint64_t http_policy_now_ms(void)
+ {
+ 	return now_ns / 1000000;
++}
++
++static inline int http_policy_deadline_tick(uint64_t deadline)
++{
++	uint64_t now = http_policy_now_ms();
++
++	/* Keep every wakeup well within the signed scheduler tick horizon. */
++	return tick_add(now_ms, deadline <= now ? 1 : MIN(deadline - now, 1U << 29));
+ }
+ 
+ static inline int http_policy_expired(const struct http_txn *txn)
+@@ -86,6 +96,18 @@
+ 	now = http_policy_now_ms();
+ 	return (txn->request_expires_ms && txn->request_expires_ms <= now) ||
+ 	       (txn->attempt_expires_ms && txn->attempt_expires_ms <= now);
++}
++
++static inline uint64_t http_policy_retry_backoff_ms(const struct stream *s)
++{
++	return s->txn && s->txn->policy ? s->txn->policy->retry_backoff_ms : UINT64_MAX;
++}
++
++static inline int http_policy_retry_delayed(const struct stream *s)
++{
++	uint64_t backoff = http_policy_retry_backoff_ms(s);
++
++	return backoff && backoff != UINT64_MAX;
+ }
+ 
+ static inline int http_policy_retry_override(const struct stream *s)
+diff --git a/include/haproxy/stream.h b/include/haproxy/stream.h
+--- a/include/haproxy/stream.h
++++ b/include/haproxy/stream.h
+@@ -330,7 +330,7 @@
+ 	MT_LIST_INIT(&strm->by_srv);
+ }
+ 
+-static inline void stream_choose_redispatch(struct stream *s, int force, int retry_limit)
++static inline void stream_choose_redispatch(struct stream *s, int force, int retry_limit, int retry_index)
+ {
+ 	int interval = s->be->redispatch_after;
+ 
+@@ -355,7 +355,7 @@
+ 	    (force ||
+ 	     ((s->be->options & PR_O_REDISP) &&
+ 	      ((__objt_server(s->target)->cur_state < SRV_ST_RUNNING) ||
+-	     (interval > 0 && s->conn_retries % interval == 0) ||
++	     (interval > 0 && retry_index % interval == 0) ||
+ 	     (!(s->flags & SF_DIRECT) && s->be->srv_act > 1 &&
+ 	      ((s->be->lbprm.algo & BE_LB_KIND) != BE_LB_KIND_HI)))))) {
+ 		sess_change_server(s, NULL);
+diff --git a/src/backend.c b/src/backend.c
+--- a/src/backend.c
++++ b/src/backend.c
+@@ -2093,6 +2093,24 @@
+ 			goto abort_connection;
+ 		}
+ 
++		if (s->txn && s->txn->retry_pending) {
++			/* The request has an assignment and has left any server queue.
++			 * Apply its deadline and retry budget before opening a connection.
++			 */
++			if (http_policy_expired(s->txn)) {
++				http_policy_expire(s);
++				goto end;
++			}
++			s->txn->retry_pending = 0;
++			if (!octavia_retry_budget_admit(s)) {
++				sc_shutdown(sc);
++				sc->state = SC_ST_DIS;
++				octavia_retry_budget_reject(s);
++				goto end;
++			}
++			s->conn_retries++;
++		}
++
+ 		conn_err = connect_server(s);
+ 		srv = objt_server(s->target);
+ 
+@@ -2227,6 +2245,31 @@
+ 
+ 		s->flags &= ~SF_CONN_EXP;
+ 		s->conn_exp = TICK_ETERNITY;
++		if (s->txn && s->txn->retry_after_ms) {
++			/* A long wait may span multiple scheduler wakeups. */
++			if (http_policy_now_ms() < s->txn->retry_after_ms) {
++				s->conn_exp = http_policy_deadline_tick(s->txn->retry_after_ms);
++				return;
++			}
++			s->txn->retry_after_ms = 0;
++
++			/* The previous server can have been deleted since releasing
++			 * the slot. Its object is still referenced by the transaction.
++			 */
++			if (srv && (srv->flags & SRV_F_DELETED)) {
++				s->target = NULL;
++				s->flags &= ~(SF_DIRECT | SF_ASSIGNED);
++				sockaddr_free(&sc->dst);
++			}
++			stream_choose_redispatch(s, s->txn->retry_force_redispatch,
++			                         http_retry_limit(s), s->conn_retries + 1);
++
++			/* Always reenter assignment: a retained target still needs a
++			 * new slot, subject to the usual server limits and queue.
++			 */
++			sc->state = SC_ST_REQ;
++			goto end;
++		}
+ 
+ 		/* we keep trying on the same server as long as the stream is
+ 		 * marked "assigned".
+@@ -2246,6 +2289,10 @@
+ 
+ abort_connection:
+ 	/* give up */
++	if (s->txn) {
++		s->txn->retry_after_ms = 0;
++		s->txn->retry_pending = 0;
++	}
+ 	s->conn_exp = TICK_ETERNITY;
+ 	s->flags &= ~SF_CONN_EXP;
+ 	sc_abort(sc);
+@@ -2395,6 +2442,7 @@
+ {
+ 	struct stconn *sc = s->scb;
+ 	int must_tar = !!(sc->flags & SC_FL_ERROR);
++	int delayed = http_policy_retry_delayed(s);
+ 	int budget_denied = 0;
+ 
+ 	DBG_TRACE_ENTER(STRM_EV_STRM_PROC|STRM_EV_CS_ST, s);
+@@ -2439,7 +2487,7 @@
+ 	/* ensure that we have enough retries left */
+ 	if (s->conn_retries >= http_retry_limit(s) || !(http_retry_on(s) & PR_RE_CONN_FAILED) ||
+ 	    (http_policy_retry_override(s) && (s->req.flags & CF_WROTE_DATA)) ||
+-	    (budget_denied = !octavia_retry_budget_admit(s))) {
++	    (budget_denied = !delayed && !octavia_retry_budget_admit(s))) {
+ 		if (!s->conn_err_type) {
+ 			s->conn_err_type = STRM_ET_CONN_ERR;
+ 		}
+@@ -2498,10 +2546,16 @@
+ 		goto end;
+ 	}
+ 
++	if (delayed) {
++		http_policy_schedule_retry(s, http_policy_retry_override(s));
++		goto end;
++	}
++
+ 	s->conn_retries++;
+-	stream_choose_redispatch(s, http_policy_retry_override(s), http_retry_limit(s));
+-
+-	if (must_tar) {
++	stream_choose_redispatch(s, http_policy_retry_override(s),
++	                         http_retry_limit(s), s->conn_retries);
++
++	if (must_tar && http_policy_retry_backoff_ms(s) != 0) {
+ 		/* The error was an asynchronous connection error, and we will
+ 		 * likely have to retry connecting to the same server, most
+ 		 * likely leading to the same result. To avoid this, we wait
+diff --git a/src/http_act.c b/src/http_act.c
+--- a/src/http_act.c
++++ b/src/http_act.c
+@@ -1113,6 +1113,15 @@
+ 	policy.retries = retries == UINT64_MAX ? -1 : (int)retries;
+ 	policy.retry_on = policy.retries > 0 ? PR_RE_CONN_FAILED | PR_RE_TIMEOUT : 0;
+ 	codes = args[cur + 3];
++	cur += 4;
++	policy.retry_backoff_ms = UINT64_MAX;
++	if (*args[cur] && strcmp(args[cur], "if") != 0 && strcmp(args[cur], "unless") != 0) {
++		if (!parse_http_policy_number(args[cur], INT64_MAX, &policy.retry_backoff_ms)) {
++			memprintf(err, "expects retry backoff in milliseconds or 'default'");
++			return ACT_RET_PRS_ERR;
++		}
++		cur++;
++	}
+ 	if (strcmp(codes, "none") != 0) {
+ 		if (policy.retries < 0)
+ 			goto bad_codes;
+@@ -1150,7 +1159,7 @@
+ 	rule->action = ACT_CUSTOM;
+ 	rule->action_ptr = http_req_octavia_policy;
+ 	rule->release_ptr = release_http_req_octavia_policy;
+-	*orig_arg = cur + 4;
++	*orig_arg = cur;
+ 	return ACT_RET_PRS_OK;
+ 
+   bad_codes:
+diff --git a/src/http_ana.c b/src/http_ana.c
+--- a/src/http_ana.c
++++ b/src/http_ana.c
+@@ -36,7 +36,7 @@
+ #include <haproxy/queue.h>
+ #include <haproxy/regex.h>
+ #include <haproxy/sc_strm.h>
+-#include <haproxy/server-t.h>
++#include <haproxy/server.h>
+ #include <haproxy/stats.h>
+ #include <haproxy/stats-html.h>
+ #include <haproxy/stconn.h>
+@@ -1151,30 +1151,68 @@
+ 	return 0;
+ }
+ 
++/* The previous endpoint has been detached. Preserve the target for
++ * redispatch and affinity, but make its slot available to other requests.
++ */
++void http_policy_schedule_retry(struct stream *s, int force_redispatch)
++{
++	struct http_txn *txn = s->txn;
++	struct connection *conn = sc_conn(s->scf);
++	struct server *target = objt_server(s->target);
++	struct server *slot = s->srv_conn;
++
++	if (target != txn->retry_server) {
++		if (target)
++			srv_take(target);
++		srv_drop(txn->retry_server);
++		txn->retry_server = target;
++	}
++	if (slot) {
++		sess_change_server(s, NULL);
++		if (may_dequeue_tasks(slot, s->be))
++			process_srv_queue(slot);
++	}
++
++	/* Ask the client mux to report an abort while no backend is attached. */
++	if (conn && conn->mux && conn->mux->ctl)
++		conn->mux->ctl(conn, MUX_CTL_SUBS_RECV, NULL);
++
++	txn->attempt_expires_ms = 0;
++	txn->retry_after_ms = http_policy_now_ms() + txn->policy->retry_backoff_ms;
++	txn->retry_force_redispatch = force_redispatch;
++	txn->retry_pending = 1;
++	s->conn_exp = http_policy_deadline_tick(txn->retry_after_ms);
++	s->scb->state = SC_ST_TAR;
++}
++
+ /* Reset the stream and the backend stream connector to a situation suitable for attemption connection */
+ /* Returns 0 if we can attempt to retry, -1 otherwise */
+ static __inline int do_l7_retry(struct stream *s, struct stconn *sc)
+ {
+ 	struct channel *req, *res;
+ 	int co_data;
+-
+-	if (s->conn_retries >= http_retry_limit(s) ||
++	int delayed = http_policy_retry_delayed(s);
++
++	if (!s->txn || s->conn_retries >= http_retry_limit(s) ||
+ 	    (s->txn->policy && !b_data(&s->txn->l7_buffer)))
+ 		return -1;
+-	if (!octavia_retry_budget_admit(s)) {
++	if (!delayed && !octavia_retry_budget_admit(s)) {
+ 		octavia_retry_budget_reject(s);
+ 		return 0; /* Stop analysing the upstream response. */
+ 	}
+-	s->conn_retries++;
++	if (!delayed)
++		s->conn_retries++;
+ 	s->txn->attempt_expires_ms = 0;
+ 	if (objt_server(s->target)) {
+ 		if (s->flags & SF_CURR_SESS) {
+ 			s->flags &= ~SF_CURR_SESS;
+ 			_HA_ATOMIC_DEC(&__objt_server(s->target)->cur_sess);
+ 		}
+-		_HA_ATOMIC_INC(&__objt_server(s->target)->counters.retries);
+-	}
+-	_HA_ATOMIC_INC(&s->be->be_counters.retries);
++		if (!delayed)
++			_HA_ATOMIC_INC(&__objt_server(s->target)->counters.retries);
++	}
++	if (!delayed)
++		_HA_ATOMIC_INC(&s->be->be_counters.retries);
+ 
+ 	req = &s->req;
+ 	res = &s->res;
+@@ -1187,7 +1225,8 @@
+ 	s->conn_err_type = STRM_ET_NONE;
+ 	s->flags &= ~(SF_CONN_EXP | SF_ERR_MASK | SF_FINST_MASK);
+ 	s->conn_exp = TICK_ETERNITY;
+-	stream_choose_redispatch(s, 0, http_retry_limit(s));
++	if (!delayed)
++		stream_choose_redispatch(s, 0, http_retry_limit(s), s->conn_retries);
+ 	res->to_forward = 0;
+ 	res->analyse_exp = TICK_ETERNITY;
+ 	res->total = 0;
+@@ -1213,6 +1252,8 @@
+ 
+ 	b_reset(&res->buf);
+ 	co_set_data(res, 0);
++	if (delayed)
++		http_policy_schedule_retry(s, 0);
+ 	return 0;
+ }
+ 
+@@ -1234,7 +1275,7 @@
+ 
+ int http_policy_expiration(const struct http_txn *txn)
+ {
+-	uint64_t deadline, now;
++	uint64_t deadline;
+ 
+ 	if (!txn || !txn->policy)
+ 		return TICK_ETERNITY;
+@@ -1245,9 +1286,7 @@
+ 	if (!deadline)
+ 		return TICK_ETERNITY;
+ 
+-	now = http_policy_now_ms();
+-	/* Keep every wakeup well within the signed scheduler tick horizon. */
+-	return tick_add(now_ms, deadline <= now ? 1 : MIN(deadline - now, 1U << 29));
++	return http_policy_deadline_tick(deadline);
+ }
+ 
+ static void http_policy_queue_final(struct stream *s)
+@@ -1272,7 +1311,19 @@
+ 
+ 	txn->request_expires_ms = 0;
+ 	txn->attempt_expires_ms = 0;
++	txn->retry_after_ms = 0;
+ 	pendconn_free(s);
++	if (txn->retry_pending) {
++		struct server *slot = s->srv_conn;
++
++		txn->retry_pending = 0;
++		/* A server can dequeue the request just before expiry is handled. */
++		if (slot) {
++			sess_change_server(s, NULL);
++			if (may_dequeue_tasks(slot, s->be))
++				process_srv_queue(slot);
++		}
++	}
+ 	s->scb->flags |= SC_FL_NOLINGER;
+ 	sc_shutdown(s->scb);
+ 	if (sc_state_in(s->scb->state, SC_SB_REQ|SC_SB_ASS))
+@@ -5237,9 +5288,13 @@
+ 	txn->retry_budget = NULL;
+ 	txn->request_expires_ms = 0;
+ 	txn->attempt_expires_ms = 0;
++	txn->retry_after_ms = 0;
++	txn->retry_server = NULL;
+ 	txn->pending_informational = 0;
+ 	txn->final_queued = 0;
+ 	txn->final_started = 0;
++	txn->retry_force_redispatch = 0;
++	txn->retry_pending = 0;
+ 	write_u32(txn->cache_hash, 0);
+ 
+ 	txn->cookie_first_date = 0;
+@@ -5287,6 +5342,7 @@
+ 		vars_prune(&s->vars_reqres, s->sess, s);
+ 
+ 	b_free(&txn->l7_buffer);
++	srv_drop(txn->retry_server);
+ 
+ 	pool_free(pool_head_http_txn, txn);
+ 	s->txn = NULL;

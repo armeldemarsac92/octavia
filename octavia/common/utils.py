@@ -59,6 +59,31 @@ def is_disabled_backend_tls_pool(pool):
          (getattr(pool, 'tags', None) or ())))
 
 
+def has_http_retry_backoff(policy):
+    request_policy = getattr(policy, 'http_request_policy', None)
+    return (isinstance(request_policy, dict) and
+            'backoff_ms' in request_policy.get('retry', {}))
+
+
+def active_http_retry_backoff_policies(loadbalancer):
+    if loadbalancer is None or not loadbalancer.enabled:
+        return {}
+    removed = (constants.PENDING_DELETE, constants.DELETED)
+    protocols = (constants.PROTOCOL_HTTP, constants.PROTOCOL_TERMINATED_HTTPS)
+    return {
+        policy.id: policy
+        for listener in loadbalancer.listeners
+        if (listener.enabled and
+            listener.provisioning_status not in removed and
+            listener.protocol in protocols)
+        for policy in listener.l7policies
+        if (policy.enabled and policy.provisioning_status not in removed and
+            has_http_retry_backoff(policy) and
+            any(rule.enabled and rule.provisioning_status not in removed
+                for rule in policy.l7rules))
+    }
+
+
 def base64_sha1_string(string_to_hash):
     """Get a b64-encoded sha1 hash of a string. Not intended to be secure!"""
     # TODO(rm_work): applying nosec here because this is not intended to be

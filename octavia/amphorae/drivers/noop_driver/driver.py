@@ -146,7 +146,8 @@ class NoopAmphoraLoadBalancerDriver(
         super().__init__()
         self.driver = NoopManager()
 
-    def update_amphora_listeners(self, loadbalancer, amphora, timeout_dict):
+    def update_amphora_listeners(self, loadbalancer, amphora, timeout_dict,
+                                 *, finalizing_failover=False):
 
         self.driver.update_amphora_listeners(loadbalancer, amphora,
                                              timeout_dict)

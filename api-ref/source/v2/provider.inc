@@ -301,7 +301,12 @@ listener and pool timeout settings still apply.
   processing. The array can also contain distinct codes from 500, 502,
   503 and 504. Retries after sending a request require HAProxy to retain
   a replayable request, and a response that has begun reaching the client
-  cannot be retried. The API does not accept a backoff setting.
+  cannot be retried.
+* ``http_retry_backoff_v1`` enables ``retry.backoff_ms``, the delay
+  before each eligible retry. It accepts integers from 0 to
+  9223372036854775807 milliseconds. Zero requests immediate retries.
+  Omission keeps the provider's normal retry timing. Existing deadlines,
+  retry eligibility, attempt limits and Service retry budgets still apply.
 
 A policy can combine both deadlines with status-based retries.
 

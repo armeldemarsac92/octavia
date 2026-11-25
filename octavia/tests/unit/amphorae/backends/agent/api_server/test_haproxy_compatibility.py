@@ -11,6 +11,7 @@
 # WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 # License for the specific language governing permissions and limitations
 # under the License.
+import subprocess
 from unittest import mock
 
 from oslo_config import fixture as oslo_fixture
@@ -137,9 +138,42 @@ class HAProxyCompatTestCase(base.TestCase):
                  {hostname: True, tcp_auth: True, h2_alpn: True, sans: True,
                   policy: True, mirror: True})):
             with self.subTest(version=version):
-                check_output.return_value = version
+                check_output.side_effect = [
+                    version, subprocess.CalledProcessError(1, 'haproxy')]
                 result = haproxy_compatibility.get_haproxy_capabilities()
                 self.assertEqual(expected, result)
+
+    @mock.patch.object(haproxy_compatibility.subprocess, 'check_output')
+    def test_http_retry_backoff_capability_uses_configured_binary(
+            self, check_output):
+        binary = '/opt/amphora/custom-haproxy'
+        haproxy_compatibility.CONF.set_override(
+            'haproxy_cmd', binary, group='haproxy_amphora')
+        capability = constants.GATEWAY_CAPABILITY_HTTP_RETRY_BACKOFF
+        build = (
+            'HAProxy version 3.0.19-ade9c1262-octavia-strict-dns-v1'
+            '-h2-alpn-v1-backend-sans-v1-http-policy-v1-http-mirror-v1'
+            '-listener-auth-v1-backend-retry-budget-v1-route-retry-backoff-v1 '
+            '2026/03/19')
+        for supported, probe in (
+                (False, subprocess.CalledProcessError(1, binary)),
+                (True, '')):
+            with self.subTest(supported=supported):
+                check_output.reset_mock()
+                check_output.side_effect = [build, probe]
+                features = haproxy_compatibility.get_haproxy_capabilities()
+                self.assertEqual(supported, features.get(capability, False))
+                self.assertTrue(
+                    features[constants.GATEWAY_CAPABILITY_HTTP_REQUEST_POLICY])
+                budget = constants.GATEWAY_CAPABILITY_BACKEND_RETRY_BUDGET
+                self.assertTrue(features[budget])
+                version, config = check_output.call_args_list
+                self.assertEqual([binary, '-vv'], version.args[0])
+                self.assertEqual([binary, '-c', '-q', '-f', '/dev/stdin'],
+                                 config.args[0])
+                self.assertTrue(config.kwargs['input'].startswith('defaults'))
+                self.assertIn('octavia-http-policy default default 1 503 1',
+                              config.kwargs['input'])
 
     @mock.patch.object(haproxy_compatibility.subprocess, 'check_output')
     @mock.patch.object(haproxy_compatibility.os.path, 'isfile')
@@ -147,7 +181,8 @@ class HAProxyCompatTestCase(base.TestCase):
         check_output.return_value = (
             'HAProxy version 3.0.19-ade9c1262-octavia-strict-dns-v1'
             '-h2-alpn-v1-backend-sans-v1-http-policy-v1-http-mirror-v1'
-            '-listener-auth-v1-backend-retry-budget-v1-listener-otlp-v1 '
+            '-listener-auth-v1-backend-retry-budget-v1-listener-otlp-v1'
+            '-route-retry-backoff-v1 '
             '2026/03/19\nFeature list : +OPENSSL +LUA')
         tracing = constants.GATEWAY_CAPABILITY_LISTENER_OTLP_TRACING
         sampling = constants.GATEWAY_CAPABILITY_LISTENER_OTLP_SAMPLING

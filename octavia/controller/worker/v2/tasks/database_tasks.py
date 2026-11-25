@@ -1088,9 +1088,12 @@ class MarkLBActiveInDB(BaseDatabaseTask):
             self._mark_pool_status(session, listener.default_pool, status)
 
     def _mark_l7policy_status(self, session, l7policy, status):
-        self.l7policy_repo.update(
-            session, l7policy.id,
-            provisioning_status=status)
+        if not (status == constants.ACTIVE and
+                l7policy.provisioning_status == constants.ERROR and
+                utils.has_http_retry_backoff(l7policy)):
+            self.l7policy_repo.update(
+                session, l7policy.id,
+                provisioning_status=status)
 
         LOG.debug("Marking all l7rules of l7policy %s %s",
                   l7policy.id, status)
@@ -2048,6 +2051,9 @@ class MarkL7PolicyActiveInDB(BaseDatabaseTask):
         with db_apis.session().begin() as session:
             db_l7policy = self.l7policy_repo.get(
                 session, id=l7policy[constants.L7POLICY_ID])
+            if (db_l7policy.provisioning_status == constants.ERROR and
+                    utils.has_http_retry_backoff(db_l7policy)):
+                return
             op_status = (constants.ONLINE if db_l7policy.enabled
                          else constants.OFFLINE)
             self.l7policy_repo.update(session,

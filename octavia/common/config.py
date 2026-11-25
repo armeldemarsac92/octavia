@@ -151,6 +151,11 @@ api_opts = [
                        'HTTP deadlines and retries. Enable after upgrading '
                        'the database, API, provider library and workers '
                        'and qualifying all eligible Amphora images.')),
+    cfg.ListOpt('enabled_http_retry_backoff_providers', default=[],
+                help=_('Providers whose regional fleets support explicit '
+                       'per-route HTTP retry backoff. Requires HTTP request '
+                       'policy support and upgraded API, workers and Amphora '
+                       'agents and images.')),
     cfg.ListOpt('enabled_listener_request_filter_providers', default=[],
                 help=_('Providers exposing ordered listener HTTP request '
                        'filters. Enable after updating the database, '

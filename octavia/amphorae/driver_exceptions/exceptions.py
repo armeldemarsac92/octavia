@@ -144,3 +144,9 @@ class AmpConnectionRetry(AmphoraDriverError):
 class AmpVersionUnsupported(AmphoraDriverError):
 
     message = _('Amphora version %(version)s is no longer supported.')
+
+
+class HttpRetryBackoffUnsupported(AmpVersionUnsupported):
+
+    message = _('HTTP retry backoff support was not confirmed on all '
+                'allocated Amphorae.')

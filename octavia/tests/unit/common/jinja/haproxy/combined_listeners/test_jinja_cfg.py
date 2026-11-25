@@ -2373,6 +2373,29 @@ class TestHaproxyCfg(base.TestCase):
                     ],
                 }, {name: lines for name, lines in rules.items() if lines})
 
+                backoff_cap = constants.GATEWAY_CAPABILITY_HTTP_RETRY_BACKOFF
+                weighted.http_request_policy['retry']['backoff_ms'] = 0
+                votes = {}
+                closed = self.jinja_cfg.build_config(
+                    amphora, [listener], None, version, {capability: True},
+                    http_retry_backoff_results=votes)
+                self.assertEqual({'with-retries': constants.ERROR}, votes)
+                self.assertIn(
+                    'http-request return status 503 if '
+                    '{ var(txn.octavia_l7_policy) -m str with-retries }',
+                    closed)
+                self.assertIn('octavia-http-policy 0 default default none',
+                              closed)
+                self.assertNotIn('octavia-http-policy default 500', closed)
+                with_backoff = self.jinja_cfg.build_config(
+                    amphora, [listener], None, version,
+                    {capability: True, backoff_cap: True},
+                    http_retry_backoff_results=votes)
+                self.assertEqual(
+                    config.replace('1 500,504 if', '1 500,504 0 if'),
+                    with_backoff)
+                self.assertEqual({'with-retries': constants.ACTIVE}, votes)
+
     def test_request_url_rewrite_runs_only_in_selected_backend(self):
         amp = sample_configs_combined.sample_amphora_tuple()
         listener = sample_configs_combined.sample_listener_tuple(l7=True)

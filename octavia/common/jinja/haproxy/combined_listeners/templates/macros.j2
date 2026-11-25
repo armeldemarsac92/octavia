@@ -1043,6 +1043,9 @@ backend {{ pool.id }}:{{ listener.id }}
     {% else %}
     mode {{ pool.protocol }}
     {% endif %}
+    {% for policy_id in listener.get('http_retry_backoff_closed_by_pool', {}).get(pool.id, []) %}
+    http-request return status 503 if {{ selected_policy_match_macro(policy_id) }}
+    {% endfor %}
     {% set rejection = pool.get('tcp_connection_rejection') %}
     {% if rejection and rejection.reject_weight %}
       {% if rejection.reject_weight == rejection.total_weight %}

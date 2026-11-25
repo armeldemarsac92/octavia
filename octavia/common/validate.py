@@ -954,9 +954,16 @@ def http_request_policy(policy):
 
     if 'retry' in policy:
         retry = policy['retry']
-        if not isinstance(retry, dict) or retry.keys() - {'attempts', 'codes'}:
+        if (not isinstance(retry, dict) or
+                retry.keys() - {'attempts', 'codes', 'backoff_ms'}):
             raise exceptions.InvalidL7PolicyArgs(
                 msg=_('Invalid http_request_policy.retry fields.'))
+        if 'backoff_ms' in retry:
+            backoff = retry['backoff_ms']
+            if type(backoff) is not int or not 0 <= backoff <= maximum:
+                raise exceptions.InvalidL7PolicyArgs(msg=_(
+                    'http_request_policy.retry.backoff_ms must be a '
+                    'nonnegative 64-bit integer.'))
         attempts = retry.get('attempts', 1)
         if (type(attempts) is not int or
                 not 0 <= attempts <= constants.HTTP_REQUEST_POLICY_RETRY_MAX):

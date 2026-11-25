@@ -233,6 +233,44 @@ expanding or reactivating stored ones. Existing policies continue to run
 on upgraded Amphorae. Clear them with ``http_request_policy: null`` before
 rolling back Octavia, octavia-lib or Amphora images.
 
+Explicit HTTP retry backoff
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Upgrade the API, workers and Amphora agents, and qualify HAProxy on all
+eligible Amphorae, including replacement and failover images. With the
+base HTTP request policy capability enabled, enroll the provider on each
+regional API replica.
+
+.. code-block:: ini
+
+   [api_settings]
+   enabled_http_request_policy_providers = amphora
+   enabled_http_retry_backoff_providers = amphora
+
+Discovery then includes ``http_retry_backoff_v1`` alongside
+``http_request_policy_v1``. The Amphora agent checks that its configured
+HAProxy binary accepts the explicit delay in a policy directive. Octavia
+requires confirmation from the allocated Amphorae before activating the
+delay. When a serving peer lacks the capability, requests matching an
+affected policy receive HTTP 503 after the degraded configuration is
+loaded. Its provisioning status is ERROR. Other forwarding policies and
+withdrawals can proceed on the same listener.
+
+During an active/standby rebuild, the first replacement can load that
+degraded configuration while Octavia brings up its peer. Final failover
+requires a successful configuration reload and capability confirmation
+from the topology's serving Amphorae.
+
+``http_request_policy.retry.backoff_ms`` delays each eligible retry by the
+configured number of milliseconds, within the existing overall deadline.
+An omitted value keeps the existing retry timing. An explicit zero requests
+an immediate retry. Retry limits and pool retry budgets continue to apply.
+
+Removing regional enrollment blocks adding, increasing or reactivating
+the explicit delay. Operators can reduce it or replace the retry object
+without ``backoff_ms`` while retaining its other settings. Withdraw the
+field from stored policies before downgrading the workers or Amphora images.
+
 HTTP request mirroring
 ----------------------
 

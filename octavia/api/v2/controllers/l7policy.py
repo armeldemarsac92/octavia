@@ -69,6 +69,21 @@ def _only_removes_mirrors(previous, mirrors):
     return all(mirror in remaining for mirror in mirrors or [])
 
 
+def _expands_retry_backoff(previous_policy, policy):
+    retry = policy.get('retry', {})
+    backoff = retry.get('backoff_ms')
+    if backoff is None:
+        return False
+    previous_retry = (previous_policy or {}).get('retry', {})
+    previous_backoff = previous_retry.get('backoff_ms')
+    if previous_backoff is None or backoff > previous_backoff:
+        return True
+    attempts = retry.get('attempts', 1)
+    return attempts > previous_retry.get('attempts', 1) or (
+        attempts > 0 and bool(set(retry.get('codes', [])) -
+                              set(previous_retry.get('codes', []))))
+
+
 def _requires_target_filter_capability(previous, targets, expands_scope,
                                        *, mirrors=False):
     """Allow removal of existing filters after regional withdrawal."""
@@ -477,9 +492,13 @@ class L7PolicyController(base.BaseController):
                 listener_ids=[listener_id])
             listener = self.repositories.listener.get_for_update(
                 lock_session, listener_id, show_deleted=False)
-            if l7policy_dict.get('http_request_policy') is not None:
+            request_policy = l7policy_dict.get('http_request_policy')
+            if request_policy is not None:
                 driver_utils.require_http_request_policy(
                     driver, listener.protocol)
+                if 'backoff_ms' in request_policy.get('retry', {}):
+                    driver_utils.require_http_retry_backoff(
+                        driver, listener.protocol)
             if validate.request_mirror_pool_ids(
                     l7policy_dict.get('request_mirrors'),
                     l7policy_dict.get('targets')):
@@ -693,12 +712,19 @@ class L7PolicyController(base.BaseController):
             expands_filter_scope = enabled and (
                 activates_policy or updated_request_transform or
                 hostname != db_l7policy.https_listener_hostname)
+            expands_request_policy_scope = enabled and (
+                activates_policy or routing_changed_or_disabled or
+                targets != old_targets)
             if request_policy is not None and (
-                    request_policy_changed or (enabled and (
-                        activates_policy or routing_changed_or_disabled or
-                        targets != old_targets))):
+                    request_policy_changed or expands_request_policy_scope):
                 driver_utils.require_http_request_policy(
                     driver, listener.protocol)
+                if ('backoff_ms' in request_policy.get('retry', {}) and
+                        (expands_request_policy_scope or
+                         _expands_retry_backoff(
+                             previous_request_policy, request_policy))):
+                    driver_utils.require_http_retry_backoff(
+                        driver, listener.protocol)
             if _requires_target_filter_capability(
                     old_targets, targets, expands_filter_scope):
                 driver_utils.require_weighted_target_request_filters(
