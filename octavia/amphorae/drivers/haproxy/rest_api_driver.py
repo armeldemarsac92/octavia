@@ -155,20 +155,27 @@ class HaproxyAmphoraLoadBalancerDriver(
                     **tracing_options)
 
     @staticmethod
-    @contextlib.contextmanager
-    def _otlp_render_results(loadbalancer):
-        listeners = {
+    def _active_otlp_listeners(loadbalancer):
+        return {
             listener.id: listener.otlp_tracing
             for listener in loadbalancer.listeners
             if (loadbalancer.enabled and listener.enabled and
-                isinstance(getattr(listener, 'otlp_tracing', None), dict))
+                isinstance(getattr(listener, 'otlp_tracing', None), dict) and
+                listener.provisioning_status not in (
+                    consts.PENDING_DELETE, consts.DELETED))
         }
+
+    @contextlib.contextmanager
+    def _otlp_render_results(self, loadbalancer):
+        listeners = self._active_otlp_listeners(loadbalancer)
         if not listeners:
             yield {}
             return
         results = {}
         expected = {amp.id for amp in loadbalancer.amphorae
                     if amp.status != consts.DELETED}
+        paired = loadbalancer.topology == consts.TOPOLOGY_ACTIVE_STANDBY
+        complete = len(expected) == 2 if paired else bool(expected)
         try:
             yield {'otlp_observed': results}
         finally:
@@ -179,12 +186,16 @@ class HaproxyAmphoraLoadBalancerDriver(
                          if listener_id in result}
                 if consts.ERROR in votes.values():
                     statuses[listener_id] = (tracing, consts.ERROR)
-                elif expected and expected.issubset(votes):
+                elif complete and expected.issubset(votes):
                     statuses[listener_id] = (tracing, consts.ACTIVE)
             if statuses:
                 listener_repo = repo.ListenerRepository()
+                peer_check = ({
+                    'expected_pair': (loadbalancer.id, expected)
+                } if paired else {})
                 with db_api.session().begin() as session:
-                    listener_repo.set_otlp_tracing_statuses(session, statuses)
+                    listener_repo.set_otlp_tracing_statuses(
+                        session, statuses, **peer_check)
 
     def _update_amphora_listeners(
             self, loadbalancer, amphora, timeout_dict=None, *,
@@ -351,13 +362,19 @@ class HaproxyAmphoraLoadBalancerDriver(
                                   amphorae_status, timeout_dict=None):
         opted_in, protected = self._backend_tls_pools(loadbalancer)
         fallback, withdrawn = self._frontend_fallback_listeners(loadbalancer)
-        coordinated = opted_in or bool(fallback or withdrawn)
+        # A paired exporter needs confirmations from the same graph snapshot.
+        tracing_pair = (
+            loadbalancer.topology == consts.TOPOLOGY_ACTIVE_STANDBY and
+            bool(self._active_otlp_listeners(loadbalancer)))
+        coordinated = opted_in or bool(fallback or withdrawn) or tracing_pair
         if coordinated and amphora_index == 0:
             peers = [amp for amp in loadbalancer.amphorae
                      if amp.status != consts.DELETED]
-            unreachable = {amp.id for amp in peers
-                           if amphorae_status.get(amp.id, {}).get(
-                               consts.UNREACHABLE)}
+            unreachable = {
+                amp.id for amp in peers
+                if (amphorae_status.get(amp.id, {}).get(consts.UNREACHABLE) or
+                    (tracing_pair and amp.id not in amphorae_status))
+            }
             with self._otlp_render_results(loadbalancer) as tracing_options:
                 self._update_protected_tls_listeners(
                     loadbalancer, [amp for amp in peers
