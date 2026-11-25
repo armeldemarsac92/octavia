@@ -6,7 +6,11 @@ local socket_path = ... or "/run/octavia/grpc-authz.sock"
 assert(socket_path:match("^/[A-Za-z0-9_./-]+$"), "invalid authorization socket path")
 local destination = "unix@" .. socket_path
 local content_type = "application/x-www-form-urlencoded"
+local body_content_type = "application/vnd.octavia.grpc-authz-body"
 local max_form = 256 * 1024
+local max_forward_body = 2147483647
+local body_send_chunk_size = 64 * 1024
+local max_reply_headers = 1024
 -- The applet streams the body, but its response headers must fit in one HTX
 -- buffer. Octavia keeps at least the default 16 KiB minus 1 KiB for data.
 local max_denial_headers = 15 * 1024 - 256
@@ -292,28 +296,19 @@ local function take_decision(txn)
     return table.concat(parts), true
 end
 
-local function get_decision(txn, pool, allowlist)
-    if not pool:match("^[0-9a-f]+%-[0-9a-f]+%-[0-9a-f]+%-[0-9a-f]+%-[0-9a-f]+$")
-       or #pool ~= 36 or pool:sub(9, 9) ~= "-" or pool:sub(14, 14) ~= "-"
-       or pool:sub(19, 19) ~= "-" or pool:sub(24, 24) ~= "-" then
-        return nil
-    end
-    local body = request_form(txn, allowlist)
-    if not body then
-        return nil
-    end
+local function post_form(path, form)
     local client = core.httpclient()
     -- The adapter bounds its entire exchange and output. The client timeout
     -- also handles an adapter that has stopped responding.
     local response = client:post{
-        url = "http://localhost/v1/check/" .. pool,
+        url = "http://localhost" .. path,
         dst = destination,
         timeout = deadline_ms,
         headers = {
             ["connection"] = { "close" },
             ["content-type"] = { content_type },
         },
-        body = body,
+        body = form,
     }
     if not response or response.status ~= 200 or not response.body or #response.body > max_form then
         return nil
@@ -324,11 +319,115 @@ local function get_decision(txn, pool, allowlist)
        or tonumber(length[0]) ~= #response.body or not kind or kind[1] or kind[0] ~= content_type then
         return nil
     end
-    local result = parse_decision(response.body)
-    return result, response.body
+    return response.body
 end
 
-local function authorize(txn, pool, allowlist)
+local function now_ms()
+    local time = core.now()
+    return time.sec * 1000 + time.usec / 1000
+end
+
+local function exchange_body(socket, request, body)
+    local deadline = now_ms() + deadline_ms
+    local function has_time()
+        local remaining = deadline - now_ms()
+        if remaining <= 0 then
+            return false
+        end
+        socket:settimeout(remaining / 1000)
+        return true
+    end
+
+    if not has_time() or not socket:connect(destination) or not has_time()
+       or socket:send(request) ~= #request then
+        return nil
+    end
+    -- Sending slices keeps HAProxy's Socket.send copy bounded regardless of
+    -- the request size. The metadata and payload share no Lua string.
+    for first = 1, #body, body_send_chunk_size do
+        local last = math.min(first + body_send_chunk_size - 1, #body)
+        if not has_time() or socket:send(body, first, last) ~= last - first + 1 then
+            return nil
+        end
+    end
+    if not has_time() then
+        return nil
+    end
+    -- The adapter closes each HTTP/1.0 exchange. A numeric read bounds the
+    -- response even if the adapter returns a malformed or oversized reply.
+    local reply = socket:receive(max_reply_headers + max_form + 1)
+    if now_ms() < deadline then
+        return reply
+    end
+end
+
+local function post_body(path, form, body)
+    local request = string.format("POST %s HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\n"
+        .. "Content-Type: %s\r\nOctavia-Form-Length: %d\r\nContent-Length: %d\r\n\r\n%s",
+        path, body_content_type, #form, #form + #body, form)
+    local socket = core.tcp()
+    local ok, reply = pcall(exchange_body, socket, request, body)
+    socket:close()
+    if not ok or not reply or #reply > max_reply_headers + max_form then
+        return nil
+    end
+
+    local head, body_start = reply:match("^HTTP/1%.0 200 [^\r\n]*\r\n(.-)\r\n\r\n()")
+    if not head or body_start - 1 > max_reply_headers then
+        return nil
+    end
+    local length, kind
+    for line in (head .. "\r\n"):gmatch("(.-)\r\n") do
+        local name, value = line:match("^([^:]+):[ \t]*(.-)[ \t]*$")
+        if not name or not header_name(name) then
+            return nil
+        end
+        name = name:lower()
+        if name == "content-length" and not length and value:match("^[0-9]+$") then
+            length = tonumber(value)
+        elseif name == "content-type" and not kind then
+            kind = value
+        elseif name == "content-length" or name == "content-type" or name == "transfer-encoding" then
+            return nil
+        end
+    end
+    if not length or length > max_form or length ~= #reply - body_start + 1 or kind ~= content_type then
+        return nil
+    end
+    return reply:sub(body_start)
+end
+
+local function get_decision(txn, pool, allowlist, body_limit)
+    if not pool:match("^[0-9a-f]+%-[0-9a-f]+%-[0-9a-f]+%-[0-9a-f]+%-[0-9a-f]+$")
+       or #pool ~= 36 or pool:sub(9, 9) ~= "-" or pool:sub(14, 14) ~= "-"
+       or pool:sub(19, 19) ~= "-" or pool:sub(24, 24) ~= "-" then
+        return nil
+    end
+    local form = request_form(txn, allowlist)
+    if not form then
+        return nil
+    end
+    local path = "/v1/check/" .. pool
+    local raw
+    if body_limit then
+        local limit = body_limit:match("^[0-9]+$") and tonumber(body_limit)
+        if not limit or limit <= 0 or limit > max_forward_body then
+            return nil
+        end
+        local body = txn.f:octavia_auth_body()
+        if body == nil or #body > limit then
+            return nil
+        end
+        raw = post_body(path, form, body)
+    else
+        raw = post_form(path, form)
+    end
+    if raw then
+        return parse_decision(raw), raw
+    end
+end
+
+local function authorize(txn, pool, allowlist, body_limit)
     txn:unset_var(allowed_var)
     txn:unset_var(denied_var)
     take_decision(txn)
@@ -336,7 +435,7 @@ local function authorize(txn, pool, allowlist)
 
     -- HAProxy's rule immediately after this action returns 503 if Lua fails
     -- before publishing success. Keep Lua/transport errors out of the logs.
-    local ok, result, raw = pcall(get_decision, txn, pool, allowlist)
+    local ok, result, raw = pcall(get_decision, txn, pool, allowlist, body_limit)
     if not ok or not result then
         return
     end
@@ -425,5 +524,6 @@ local function deny(applet)
 end
 
 core.register_action("octavia-grpc-auth", { "http-req" }, authorize, 2)
+core.register_action("octavia-grpc-auth-body", { "http-req" }, authorize, 3)
 core.register_action("octavia-grpc-auth-response", { "http-res", "http-after-res" }, authorize_response)
 core.register_service("octavia-grpc-auth-denial", "http", deny)

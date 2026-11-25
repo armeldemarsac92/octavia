@@ -151,9 +151,21 @@ GATEWAY_CAPABILITY_L7POLICY_HTTP_EXTERNAL_AUTH = (
     'l7policy_http_external_auth_v1')
 GATEWAY_CAPABILITY_L7POLICY_GRPC_EXTERNAL_AUTH = (
     'l7policy_grpc_external_auth_v1')
+GATEWAY_CAPABILITY_L7POLICY_EXTERNAL_AUTH_FORWARD_BODY = (
+    'l7policy_external_auth_forward_body_v1')
+AMPHORA_CAPABILITY_HTTP_AUTH_BODY = (
+    'l7policy_http_external_auth_forward_body_v1')
+AMPHORA_CAPABILITY_GRPC_AUTH_BODY = (
+    'l7policy_grpc_external_auth_forward_body_v1')
+L7POLICY_EXTERNAL_AUTH_FORWARD_BODY_MAX_SIZE = 2**31 - 1
+L7POLICY_GRPC_EXTERNAL_AUTH_FORWARD_BODY_MAX_SIZE = (
+    L7POLICY_EXTERNAL_AUTH_FORWARD_BODY_MAX_SIZE - 2**20)
+DEFAULT_EXTERNAL_AUTH_BODY_BUFFER_BYTES = 64 * 2**20
 GATEWAY_GRPC_AUTH_POOL_TAG = 'gw-api-grpc-auth-pool-v1'
 HAPROXY_GRPC_AUTH_SCRIPT = '/var/lib/octavia/octavia-grpc-auth.lua'
 GRPC_AUTH_ADAPTER = '/usr/libexec/octavia-grpc-authz'
+GRPC_AUTH_ADAPTER_FORWARD_BODY_CAPABILITY = (
+    'grpc_external_auth_forward_body_v1')
 GRPC_AUTH_SOCKET = '/run/octavia/grpc-authz.sock'
 GATEWAY_LISTENER_AUTH_POOL_TAG = 'gw-api-listener-auth-pool-v1'
 HAPROXY_LISTENER_AUTH_PROXY_PREFIX = 'octavia-auth-'

@@ -22,6 +22,8 @@ from urllib.parse import urlencode
 
 POOL = '67e0fff4-9150-4a96-a1dd-9d0208bc6d24'
 FORM_TYPE = 'application/x-www-form-urlencoded'
+BODY_TYPE = 'application/vnd.octavia.grpc-authz-body'
+BODY_LIMIT = 512 * 1024
 SCRIPT = Path(__file__).with_name('octavia-grpc-auth.lua')
 
 
@@ -38,14 +40,17 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def request_body(self):
+    def request_body(self, trailers=None):
         if self.headers.get('Transfer-Encoding') != 'chunked':
             return self.rfile.read(int(self.headers['Content-Length']))
         chunks = []
         while size := int(self.rfile.readline(), 16):
             chunks.append(self.rfile.read(size))
             assert self.rfile.read(2) == b'\r\n'
-        assert self.rfile.read(2) == b'\r\n'
+        while (line := self.rfile.readline()) != b'\r\n':
+            assert line and trailers is not None
+            name, value = line.strip().split(b':', 1)
+            trailers[name.lower()] = value.strip()
         return b''.join(chunks)
 
 
@@ -58,28 +63,50 @@ def start_server(stack, server):
     return server
 
 
-def request(port, target, body=b'', *, method='POST'):
+def request(port, target, body=b'', *, method='POST', trailer=None):
     conn = HTTPConnection('127.0.0.1', port, timeout=6)
     try:
         conn.putrequest(method, target, skip_host=True,
                         skip_accept_encoding=True)
         conn.putheader('Host', 'route.example:8443')
-        conn.putheader('Content-Length', str(len(body)))
+        if trailer is None:
+            conn.putheader('Content-Length', str(len(body)))
+        else:
+            conn.putheader('Transfer-Encoding', 'chunked')
+            conn.putheader('Trailer', trailer[0].decode())
         conn.putheader('X-Selected', 'space + plus% percent')
         conn.putheader('X-Selected', 'two')
         conn.putheader('X-Selected!', 'punctuation')
         conn.putheader('X-Private', 'private')
         conn.putheader('X-Delete', 'delete')
-        conn.endheaders(body)
+        if trailer is None:
+            conn.endheaders(body)
+        else:
+            conn.endheaders()
+            conn.send(f'{len(body):x}\r\n'.encode())
+            conn.send(body)
+            conn.send(b'\r\n0\r\n' + b': '.join(trailer) + b'\r\n\r\n')
         response = conn.getresponse()
         return response.status, response.headers, response.read()
     finally:
         conn.close()
 
 
-def haproxy_config(frontend, h2_port, origin, adapter):
+def haproxy_config(frontend, h2_port, origin, adapter, *, forward_body=False):
     selected = b'x-selected,x-selected!'.hex()
     authority = b':authority'.hex()
+    body_rules = ''
+    legacy_auth = f'lua.octavia-grpc-auth {POOL} {selected}'
+    legacy_conditions = 'unless full or auth or public'
+    if forward_body:
+        legacy_conditions += ' or forward_body'
+        with_body = (f'lua.octavia-grpc-auth-body {POOL} {selected} '
+                     f'{BODY_LIMIT}')
+        body_rules = f'''
+    acl forward_body path_beg /with-body/
+    http-request octavia-collect-body {BODY_LIMIT} if forward_body
+    http-request {with_body} if forward_body
+'''
     return f"""
 global
     nbthread 2
@@ -99,11 +126,13 @@ listen gateway
     acl allowed var(txn.octavia_grpc_auth_allowed) -m bool
     acl denied var(txn.octavia_grpc_auth_denied) -m bool
     acl applied var(txn.octavia_grpc_auth_response_applied) -m bool
+    acl public path /public
+{body_rules}
     http-request lua.octavia-grpc-auth {POOL} - if full
     http-request lua.octavia-grpc-auth {POOL} {authority} if auth
-    http-request lua.octavia-grpc-auth {POOL} {selected} unless full or auth
+    http-request {legacy_auth} {legacy_conditions}
     http-request use-service lua.octavia-grpc-auth-denial if denied
-    http-request return status 503 unless allowed
+    http-request return status 503 unless allowed or public
     http-request return status 500 if {{ path /local }}
     http-response lua.octavia-grpc-auth-response if allowed
     http-response return status 503 if allowed !applied
@@ -113,9 +142,11 @@ listen gateway
 """
 
 
-def run(binary):
+def run(binary, *, forward_body=False):
     checks = []
+    bodies = []
     upstream = []
+    upstream_trailers = []
     slow_received = Event()
     release_slow = Event()
     denial_body = b'Access denied.\n' * 3000
@@ -124,16 +155,21 @@ def run(binary):
     class Adapter(Handler):
         def do_POST(self):
             assert self.path == f'/v1/check/{POOL}'
-            assert self.headers['Content-Type'] == FORM_TYPE
             raw = self.request_body()
+            if self.headers['Content-Type'] == BODY_TYPE:
+                length = int(self.headers['Octavia-Form-Length'])
+                bodies.append(raw[length:])
+                raw = raw[:length]
+            else:
+                assert self.headers['Content-Type'] == FORM_TYPE
             check = parse_qs(raw, keep_blank_values=True, strict_parsing=True)
             checks.append(check)
             path = check[b'path'][0]
-            if path == b'/slow':
+            if path in (b'/slow', b'/with-body/slow'):
                 slow_received.set()
                 release_slow.wait(6)
                 return
-            if path == b'/deny':
+            if path in (b'/deny', b'/with-body/deny'):
                 fields = [
                     ('decision', 'deny'), ('status', '401'),
                     ('body', denial_body), ('set.www-authenticate', 'Bearer'),
@@ -144,7 +180,7 @@ def run(binary):
                 self.reply(200, b'decision=allow&response.set.x-bad=%0d%0a',
                            form_headers)
                 return
-            elif path == b'/truncated':
+            elif path in (b'/truncated', b'/with-body/truncated'):
                 self.reply(200, b'decision=allow', form_headers, length=128)
                 return
             else:
@@ -165,7 +201,9 @@ def run(binary):
 
     class Origin(Handler):
         def do_POST(self):
-            body = self.rfile.read(int(self.headers['Content-Length']))
+            trailers = {}
+            body = self.request_body(trailers)
+            upstream_trailers.append(trailers)
             upstream.append((self.path, self.headers, body))
             self.reply(200, body, [('X-Origin', 'original')])
 
@@ -182,7 +220,7 @@ def run(binary):
             h2_port = h2_listener.getsockname()[1]
         cfg = stage / 'haproxy.cfg'
         cfg.write_text(haproxy_config(port, h2_port, origin.server_port,
-                                      adapter_path))
+                                      adapter_path, forward_body=forward_body))
 
         with (stage / 'haproxy.log').open('w+') as log:
             proxy = subprocess.Popen([binary, '-db', '-f', cfg],
@@ -238,7 +276,8 @@ def run(binary):
 
                 with ThreadPoolExecutor(max_workers=1) as executor:
                     started = time.monotonic()
-                    stalled = executor.submit(request, port, '/slow')
+                    slow_path = '/with-body/slow' if forward_body else '/slow'
+                    stalled = executor.submit(request, port, slow_path)
                     try:
                         assert slow_received.wait(1)
                         assert request(port, '/all-headers?sole')[0] == 200
@@ -264,9 +303,38 @@ def run(binary):
                 assert actual == {b'h.:authority': [b'route.example:8443']}
                 assert request(port, '/authority')[0] == 200
                 assert not any(k.startswith(b'h.') for k in checks[-1])
+                assert len(upstream) == 5 and len(checks) == 11
+                if forward_body:
+                    body_count = len(bodies)
+                    payload = bytes(range(256)) * (BODY_LIMIT // 256)
+                    status, headers, echoed = request(
+                        port, '/with-body/allow', payload)
+                    assert status == 200 and echoed == bodies[-1] == payload
+                    status, _, echoed = request(
+                        port, '/with-body/chunked', payload,
+                        trailer=(b'X-End', b'kept'))
+                    assert status == 200 and echoed == bodies[-1] == payload
+                    assert upstream_trailers[-1] == {b'x-end': b'kept'}
+                    assert request(port, '/with-body/empty')[0] == 200
+                    assert bodies[-1] == b''
+                    status, _, _ = request(port, '/with-body/deny', b'\0\xff')
+                    assert status == 401
+                    assert bodies[-1] == b'\x00\xff'
+                    check_count, upstream_count = len(checks), len(upstream)
+                    oversize = payload + b'!'
+                    status, _, _ = request(port, '/with-body/allow', oversize)
+                    assert status == 413
+                    assert len(checks) == check_count
+                    assert len(upstream) == upstream_count
+
+                    assert request(port, '/allow', oversize)[2] == oversize
+                    assert len(bodies) == body_count + 4
+                    assert len(checks) == check_count + 1
+                    assert request(port, '/public', oversize)[2] == oversize
+                    assert len(checks) == check_count + 1
+                    assert request(port, '/with-body/truncated')[0] == 503
                 adapter_path.unlink()
                 assert request(port, '/unavailable')[0] == 503
-                assert len(upstream) == 5 and len(checks) == 11
                 print(f'Async read timed out in {elapsed:.2f}s. '
                       f'Origin received {len(upstream)} requests.')
             except Exception:
@@ -281,5 +349,6 @@ def run(binary):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('haproxy', type=Path)
+    parser.add_argument('--forward-body', action='store_true')
     args = parser.parse_args()
-    run(args.haproxy.resolve())
+    run(args.haproxy.resolve(), forward_body=args.forward_body)

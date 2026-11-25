@@ -17,6 +17,9 @@
 global
     daemon
     user nobody
+    {% if loadbalancer.external_auth_body_buffer_bytes is defined %}
+    tune.octavia-auth-body-max-memory {{ loadbalancer.external_auth_body_buffer_bytes }}
+    {% endif %}
     {% if loadbalancer.get('grpc_auth_pools') %}
     httpclient.retries 0
     httpclient.timeout.connect 3s

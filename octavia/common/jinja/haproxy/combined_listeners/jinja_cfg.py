@@ -381,6 +381,11 @@ class JinjaTemplater:
             constants.GATEWAY_CAPABILITY_L7POLICY_GRPC_EXTERNAL_AUTH)
         feature_compatibility[grpc_auth_cap] = (
             (amp_details or {}).get(grpc_auth_cap) is True)
+        for auth_forward_body in (
+                constants.AMPHORA_CAPABILITY_HTTP_AUTH_BODY,
+                constants.AMPHORA_CAPABILITY_GRPC_AUTH_BODY):
+            feature_compatibility[auth_forward_body] = (
+                (amp_details or {}).get(auth_forward_body) is True)
         fallback_capability = (
             constants.GATEWAY_CAPABILITY_FRONTEND_CLIENT_AUTH_INSECURE_FALLBACK)
         sampling_capability = (
@@ -770,6 +775,10 @@ class JinjaTemplater:
             if ready:
                 ret_value['grpc_auth_pools'] = [
                     ready[pool_id] for pool_id in sorted(ready)]
+        if any(auth['available'] and 'forward_body_max_size' in auth
+               for auth in policy_auth):
+            ret_value['external_auth_body_buffer_bytes'] = (
+                CONF.haproxy_amphora.external_auth_body_buffer_bytes)
         # NOTE(sbalukoff): Global connection limit should be a sum of all
         # listeners' connection limits.
         connection_limit_sum = 0
@@ -1129,11 +1138,18 @@ class JinjaTemplater:
                         # match closed until it can be updated or withdrawn.
                         pass
                     else:
-                        eligible = (grpc_auth_pool_ids if
-                                    auth.get('protocol') == 'GRPC' else
-                                    auth_pool_ids)
-                        transformed['external_auth'] = self._encode_auth(
-                            auth, eligible)
+                        grpc = auth.get('protocol') == 'GRPC'
+                        body_capability = (
+                            constants.AMPHORA_CAPABILITY_GRPC_AUTH_BODY if grpc
+                            else constants.AMPHORA_CAPABILITY_HTTP_AUTH_BODY)
+                        body_ready = (
+                            feature_compatibility.get(body_capability) and
+                            not validate.external_auth_body_over_limit(auth))
+                        if 'forward_body_max_size' not in auth or body_ready:
+                            eligible = (grpc_auth_pool_ids if grpc else
+                                        auth_pool_ids)
+                            transformed['external_auth'] = self._encode_auth(
+                                auth, eligible)
             if policy.enabled:
                 # Closing an HTTP policy must leave a retained mirror
                 # with the same pool classification as removing it.
@@ -1366,20 +1382,21 @@ class JinjaTemplater:
             # Config arguments contain only hex digits or the empty marker.
             return value.encode('ascii').hex() or '-'
 
-        if auth.get('protocol') == 'GRPC':
-            return {'pool_id': auth['pool_id'], 'protocol': 'GRPC',
-                    'available': auth['pool_id'] in available_pool_ids,
-                    'request_headers': encode(','.join(
-                        auth.get('allowed_request_headers', ())))}
-        return {
+        encoded = {
             'pool_id': auth['pool_id'],
             'available': auth['pool_id'] in available_pool_ids,
-            'prefix': encode(auth.get('path_prefix', '')),
             'request_headers': encode(','.join(
                 auth.get('allowed_request_headers', ()))),
-            'response_headers': encode(','.join(
-                auth.get('allowed_response_headers', ()))),
         }
+        if 'forward_body_max_size' in auth:
+            encoded['forward_body_max_size'] = auth['forward_body_max_size']
+        if auth.get('protocol') == 'GRPC':
+            encoded['protocol'] = 'GRPC'
+        else:
+            encoded['prefix'] = encode(auth.get('path_prefix', ''))
+            encoded['response_headers'] = encode(','.join(
+                auth.get('allowed_response_headers', ())))
+        return encoded
 
     @staticmethod
     def _backend_tls_san_options(sans):

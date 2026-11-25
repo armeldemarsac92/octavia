@@ -25,6 +25,7 @@ from octavia.api.v2.controllers import base
 from octavia.api.v2.types import provider as provider_types
 from octavia.common import constants
 from octavia.common import exceptions
+from octavia.common import validate
 
 LOG = logging.getLogger(__name__)
 
@@ -84,8 +85,14 @@ class GatewayCapabilitiesController(base.BaseController):
         self._auth_validate_action(context, context.project_id,
                                    constants.RBAC_GET_ALL)
         driver = driver_factory.get_driver(self.provider)
-        return provider_types.GatewayCapabilitiesResponse(
-            gateway_capabilities=driver_utils.gateway_capabilities(driver))
+        capabilities = driver_utils.gateway_capabilities(driver)
+        response = provider_types.GatewayCapabilitiesResponse(
+            gateway_capabilities=capabilities)
+        if (constants.GATEWAY_CAPABILITY_L7POLICY_EXTERNAL_AUTH_FORWARD_BODY
+                in capabilities):
+            response.l7policy_external_auth_max_body_bytes = (
+                validate.l7policy_external_auth_max_body_bytes())
+        return response
 
 
 class FlavorCapabilitiesController(base.BaseController):

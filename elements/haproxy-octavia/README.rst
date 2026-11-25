@@ -18,7 +18,8 @@ Build the binary on the target image distribution and architecture::
 The script checks the HAProxy 3.0.19 tarball and each patch by SHA-256. It
 applies the strict DNS, required HTTP/2 ALPN, explicit SAN, HTTP policy,
 HTTP mirror, listener authorization, retry budget, route retry backoff and
-gRPC mirror patches, in that order, with zero fuzz.
+gRPC mirror and authorization body forwarding patches, in that order, with
+zero fuzz.
 
 Set ``DIB_OCTAVIA_HAPROXY_BINARY`` to the absolute path of the resulting binary
 when running Octavia's ``diskimage-create.sh``. The element checks the binary in
@@ -396,9 +397,36 @@ Set the policy's ``external_auth.protocol`` to ``GRPC`` and ``pool_id`` to
 the authorizer pool UUID. An empty ``allowed_request_headers`` list sends all
 incoming HTTP request headers in the Envoy check. A populated list sends
 the named headers. Selecting ``:authority`` preserves that HTTP/2 field in
-the Envoy header map. The adapter sends a bodyless check and the origin
-receives the original request body after authorization. Headers supplied
+the Envoy header map. By default the adapter sends a bodyless check. The
+origin receives the original request body after authorization. Headers supplied
 for an allowed downstream response also apply to local HAProxy responses.
 A denial or an explicit Envoy error response returns the authorizer's
 HTTP status, headers and body. An unavailable RPC or missing runtime
 capability closes the selected match with HTTP 503.
+
+Forwarding request bodies to a policy authorizer
+------------------------------------------------
+
+Upgrade the API, workers and eligible Amphora agents and HAProxy binaries.
+For gRPC authorizers, install the matching Lua action and adapter. The
+adapter reports ``grpc_external_auth_forward_body_v1`` with
+``--capabilities``. Verify the HTTP or gRPC body-forwarding capability on
+each eligible Amphora before enabling the provider in
+``[api_settings] enabled_l7policy_external_auth_forward_body_providers``.
+
+Set ``external_auth.forward_body_max_size`` on the L7 policy to the maximum
+request size in bytes. Exceeding the limit returns HTTP 413 before the
+authorizer or origin is contacted. HTTP authorizers receive the original
+bytes with their Content-Length. Envoy authorizers receive the bytes in
+``HttpRequest.raw_body`` and their length in ``size``. The gRPC peer's message
+limit must accommodate the full CheckRequest, including headers and protobuf
+framing. For gRPC the public API reserves 1 MiB for the serialized metadata,
+allowing up to 2,146,435,071 raw body bytes. The default and a value of zero
+preserve bodyless checks.
+
+Set ``[haproxy_amphora] external_auth_body_buffer_bytes`` to the number of
+bytes each HAProxy process may hold for concurrent authorizations. The
+default is 64 MiB. The regional provider advertises its per-request limit as
+``l7policy_external_auth_max_body_bytes``. A request that fits its policy
+can return 503 while other uploads occupy the shared buffer. Unfiltered
+requests bypass collection.

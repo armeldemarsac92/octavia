@@ -169,6 +169,22 @@ response contains only capabilities supported by the driver and enabled by
 the operator for that provider in this region. An enabled provider without
 any available capabilities returns ``{"gateway_capabilities": []}``.
 
+``l7policy_external_auth_forward_body_v1`` enables an L7 policy to forward
+the request body to its authorizer. With this capability, the response
+includes ``l7policy_external_auth_max_body_bytes``. It is the regional
+``[haproxy_amphora] external_auth_body_buffer_bytes`` setting capped at
+2147483647 bytes. The setting defaults to 67108864 bytes (64 MiB) and sets
+the shared budget in each HAProxy process. A further gRPC limit of
+2146435071 bytes leaves space for the protobuf envelope.
+
+For example, a policy with ``forward_body_max_size: 1048576`` returns
+HTTP 413 for a 2 MiB request body. A 512 KiB request can receive HTTP 503
+when other authorization checks are using the shared budget. If the
+operator reduces the regional limit below a stored policy limit, requests
+matching that policy receive HTTP 503 until its limit is brought within
+budget, body forwarding is removed, or the policy is disabled. Set the
+same budget on the API and Amphora workers.
+
 ``fixed_http_responses_v1`` enables listener ``default_http_response`` and
 L7 policy ``FIXED_RESPONSE``. Both take a ``{"status_code": 404}`` or
 ``{"status_code": 500}`` object. The listener field is mutually exclusive
@@ -686,6 +702,7 @@ Response Parameters
 .. rest_parameters:: ../parameters.yaml
 
    - gateway_capabilities: gateway-capabilities
+   - l7policy_external_auth_max_body_bytes: l7policy-external-auth-max-body-bytes
 
 Response Example
 ----------------
@@ -696,6 +713,9 @@ Response Example
      "gateway_capabilities": [
        "fixed_http_responses_v1",
        "weighted_http_targets_v1",
-       "request_header_operations_v1"
-     ]
+       "request_header_operations_v1",
+       "l7policy_http_external_auth_v1",
+       "l7policy_external_auth_forward_body_v1"
+     ],
+     "l7policy_external_auth_max_body_bytes": 67108864
    }
