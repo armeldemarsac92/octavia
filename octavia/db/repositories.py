@@ -1431,18 +1431,24 @@ class ListenerRepository(BaseRepository):
 
     @staticmethod
     def validate_external_auth_pools(session, pool_ids, lb_id, project_id,
-                                     *, protocol=consts.PROTOCOL_HTTP):
+                                     *, protocol=consts.PROTOCOL_HTTP,
+                                     rule=False):
         repo = PoolRepository()
         for pool_id in sorted(pool_ids):
             pool = repo.get_on_load_balancer_for_update(
                 session, lb_id, project_id, pool_id)
             tags = repo.get_tags_for_update(session, pool_id)
             if not listener_request_filters.valid_pool(
-                    pool, protocol=protocol, tags=tags):
+                    pool, protocol=protocol, tags=tags, rule=rule):
                 if protocol == 'GRPC':
                     raise exceptions.ValidationException(detail=_(
                         'gRPC authorization requires a managed HTTP pool '
                         'with h2c or verified TLS HTTP/2.'))
+                if rule:
+                    raise exceptions.ValidationException(detail=_(
+                        'HTTP rule authorization requires a managed HTTP '
+                        'pool with plain HTTP or verified HTTP/1.1 over '
+                        'TLS.'))
                 raise exceptions.ValidationException(detail=_(
                     'HTTP authorization requires a managed plain HTTP '
                     'pool.'))
@@ -1597,6 +1603,8 @@ class ListenerRepository(BaseRepository):
         if not pool_db:
             raise exceptions.NotFound(
                 resource=data_models.Pool._name(), id=pool_id)
+        listener_request_filters.require_non_http_tls_authorizer(
+            pool_db.tags)
         return pool_db
 
     def get_for_update(self, session, id, show_deleted=True):
@@ -2531,10 +2539,13 @@ class L7PolicyRepository(BaseRepository):
         if not pool_db:
             raise exceptions.NotFound(
                 resource=data_models.Pool._name(), id=pool_id)
+        listener_request_filters.require_non_http_tls_authorizer(pool_db.tags)
 
     def get_redirect_pool_for_update(self, session, listener, pool_id):
-        return PoolRepository().get_on_load_balancer_for_update(
+        pool = PoolRepository().get_on_load_balancer_for_update(
             session, listener.load_balancer_id, listener.project_id, pool_id)
+        listener_request_filters.require_non_http_tls_authorizer(pool.tags)
+        return pool
 
     def get_active_protected_tcp_policy_pools(self, session, listener_id):
         policy = self.model_class
@@ -2799,6 +2810,7 @@ class L7PolicyRepository(BaseRepository):
             if pool is None:
                 raise exceptions.NotFound(
                     resource=data_models.Pool._name(), id=pool_id)
+            listener_request_filters.require_non_http_tls_authorizer(pool.tags)
             if tcp:
                 validate.validate_tcp_redirect_pool_protocol(
                     pool.protocol, pool.tls_enabled,
@@ -2916,7 +2928,8 @@ class L7PolicyRepository(BaseRepository):
         pool_id = auth['pool_id']
         ListenerRepository.validate_external_auth_pools(
             session, {pool_id}, listener.load_balancer_id, project_id,
-            protocol=auth.get('protocol', consts.PROTOCOL_HTTP))
+            protocol=auth.get('protocol', consts.PROTOCOL_HTTP),
+            rule=True)
         if row is None:
             session.add(ref(l7policy_id=policy_id, pool_id=pool_id))
         else:
@@ -3039,11 +3052,21 @@ class L7PolicyRepository(BaseRepository):
             'external_auth_forward_body_over_limit')
         auth_forward_body = (auth_body_over_limit or
                              transform == 'external_auth_forward_body')
-        external_auth = (auth_forward_body or
+        http_auth_tls = transform == 'http_external_auth_tls'
+        external_auth = (auth_forward_body or http_auth_tls or
                          transform in ('external_auth', 'grpc_external_auth'))
         if external_auth:
             query = query.add_columns(policy.external_auth).filter(
                 policy.external_auth.isnot(None))
+            if http_auth_tls:
+                ref = models.L7PolicyExternalAuthPool
+                query = query.filter(
+                    select(ref.pool_id)
+                    .join(models.Pool, models.Pool.id == ref.pool_id)
+                    .where(ref.l7policy_id == policy.id,
+                           _pool_has_tag(
+                               consts.GATEWAY_HTTP_AUTH_TLS_POOL_TAG))
+                    .correlate(policy).with_for_update().exists())
             if reopening is None:
                 query = query.filter(self._reachable_external_auth(
                     restoring_pool=restoring_pool, removed_pool=removed_pool))

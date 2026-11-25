@@ -1177,10 +1177,21 @@ l7policy-external-auth:
     and project as the policy.
 
     Omit ``protocol`` for HTTP authorization with
-    ``l7policy_http_external_auth_v1``. The pool uses plain HTTP and carries
+    ``l7policy_http_external_auth_v1``. For plain HTTP use a pool with
     the ``gw-api-listener-auth-pool-v1`` tag. HTTP accepts optional
     ``path_prefix``, ``allowed_request_headers`` and
     ``allowed_response_headers``.
+
+    With ``l7policy_http_external_auth_tls_v1``, a detached HTTP pool
+    created with the ``gw-api-http-auth-tls-pool-v1`` tag can serve as
+    the authorizer over verified TLS. Set ``tls_enabled``, an exact
+    ``backend_tls_hostname`` for SNI, and either ``ca_tls_container_ref``
+    or ``backend_tls_system_ca``. The pool can use the existing backend
+    TLS SAN and client-certificate options. The connection speaks
+    HTTP/1.1. An explicit ALPN list must include ``http/1.1``. The tag
+    is set at pool creation and reserves the pool for L7 policy
+    authorization. TLS validation or trust preparation failures return
+    HTTP 503 on the protected rule.
 
     Set ``protocol`` to ``GRPC`` for Envoy v3 authorization with
     ``l7policy_grpc_external_auth_v1``. The HTTP pool carries the

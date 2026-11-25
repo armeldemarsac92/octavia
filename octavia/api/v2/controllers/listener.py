@@ -873,6 +873,8 @@ class ListenersController(base.BaseController):
             attributes='attributes' in tracing, headers='headers' in tracing)
         pool = self.repositories.pool.get_on_load_balancer_for_update(
             session, lb_id, project_id, tracing['collector_pool_id'])
+        listener_request_filters.require_non_http_tls_authorizer(
+            pool.tags)
         validate.validate_otlp_collector_transport(
             pool.protocol, pool.backend_h2c, pool.backend_tls_require_h2,
             pool.tls_enabled, pool.alpn_protocols)

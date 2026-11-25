@@ -507,6 +507,8 @@ class L7PolicyActivationController(base.BaseController):
             http_request_policy=policy.http_request_policy,
             request_mirrors=policy.request_mirrors,
             external_auth=policy.external_auth)
+        driver_utils.require_l7policy_external_auth_transport(
+            driver, session, listener, policy.external_auth)
         if protocol == constants.PROTOCOL_TCP:
             driver_utils.validate_tcp_policy_targets(
                 driver, repo, session, listener, policy.action,
@@ -837,6 +839,9 @@ class L7PolicyController(base.BaseController):
                 listener_ids=[listener_id])
             listener = self.repositories.listener.get_for_update(
                 lock_session, listener_id, show_deleted=False)
+            driver_utils.require_l7policy_external_auth_transport(
+                driver, lock_session, listener,
+                l7policy_dict.get('external_auth'))
             request_policy = l7policy_dict.get('http_request_policy')
             if request_policy is not None:
                 driver_utils.require_http_request_policy(
@@ -1054,6 +1059,8 @@ class L7PolicyController(base.BaseController):
                             routing_changed | {'redirect_pool_id'})))):
                 driver_utils.require_l7policy_external_auth(
                     driver, listener.protocol, auth)
+                driver_utils.require_l7policy_external_auth_transport(
+                    driver, lock_session, listener, auth)
             old_targets = db_l7policy.targets
             targets = l7policy_dict.get('targets', old_targets)
             routing_changed_or_disabled = (

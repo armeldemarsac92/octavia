@@ -414,6 +414,61 @@ class TestInitialL7Rules(base.BaseAPITest):
         self.set_lb_status(self.lb_id)
         self.delete(pool_path)
 
+    def test_http_external_auth_tls_capability_and_pool_isolation(self):
+        providers = ['amphora']
+        cap = constants.GATEWAY_CAPABILITY_L7POLICY_HTTP_EXTERNAL_AUTH_TLS
+        role = constants.GATEWAY_HTTP_AUTH_TLS_POOL_TAG
+        caps = self.PROVIDERS_PATH + '/amphora/gateway_capabilities'
+        settings = {'enabled_l7policy_http_external_auth_providers': providers,
+                    'enabled_backend_tls_hostname_providers': providers}
+        tls_setting = 'enabled_l7policy_http_external_auth_tls_providers'
+        self.conf.config(group='api_settings', **settings)
+        self.assertNotIn(cap, self.get(caps).json['gateway_capabilities'])
+        self.conf.config(group='api_settings', **{tls_setting: providers})
+        self.assertIn(cap, self.get(caps).json['gateway_capabilities'])
+        self.cert_manager_mock().get_secret.return_value = (
+            sample_certs.X509_CA_CERT)
+        origin = self.create_pool(self.lb_id, 'HTTP', 'ROUND_ROBIN')['pool']
+        self.set_lb_status(self.lb_id)
+        auth_pool = self.create_pool(
+            self.lb_id, 'HTTP', 'ROUND_ROBIN', tls_enabled=True,
+            backend_tls_hostname='authorizer.example.test',
+            ca_tls_container_ref=uuidutils.generate_uuid(),
+            alpn_protocols=['http/1.1', 'h2'], tags=[role])['pool']
+        self.set_lb_status(self.lb_id)
+        auth = {'pool_id': auth_pool['id'], 'path_prefix': '/auth'}
+        payload = {'action': 'REDIRECT_TO_POOL',
+                   'redirect_pool_id': origin['id'],
+                   'redirect_prefix': None, 'external_auth': auth}
+        self.conf.config(group='api_settings', **{tls_setting: []})
+        self._post_policy(status=501, **payload)
+        self.conf.config(group='api_settings', **{tls_setting: providers})
+        self._post_policy(status=400, **{
+            **payload, 'external_auth': None,
+            'redirect_pool_id': auth_pool['id']})
+        policy = self._post_policy(**payload)['l7policy']
+        self.assertEqual(auth, policy['external_auth'])
+        self.set_lb_status(self.lb_id)
+        policy_path = self.L7POLICY_PATH.format(l7policy_id=policy['id'])
+        self.put(policy_path, {'l7policy': {'admin_state_up': True}})
+        self.set_lb_status(self.lb_id)
+        pool_path = self.POOL_PATH.format(pool_id=auth_pool['id'])
+        self.put(pool_path, {'pool': {'alpn_protocols': ['h2']}}, status=409)
+        self.put(pool_path, {'pool': {
+            'tags': [constants.GATEWAY_LISTENER_AUTH_POOL_TAG]}}, status=400)
+        listener_path = self.LISTENER_PATH.format(listener_id=self.listener_id)
+        self.conf.config(group='api_settings',
+                         enabled_listener_request_filter_providers=providers)
+        self.put(listener_path, {'listener': {'request_filter_sections': [
+            {'hostname': 'example.test', 'requests': [
+                {'type': 'ExternalAuth', 'http': auth}]}]}}, status=400)
+
+        self.conf.config(group='api_settings', **{tls_setting: []})
+        self.put(listener_path, {'listener': {'admin_state_up': False}})
+        self.set_lb_status(self.lb_id)
+        self.put(listener_path, {'listener': {'admin_state_up': True}},
+                 status=501)
+
     def test_grpc_external_auth_validates_tls_h2_and_activation(self):
         enabled = ['amphora']
         self.conf.config(

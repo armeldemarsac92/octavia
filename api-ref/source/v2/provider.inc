@@ -718,6 +718,7 @@ Response Example
        "weighted_http_targets_v1",
        "request_header_operations_v1",
        "l7policy_http_external_auth_v1",
+       "l7policy_http_external_auth_tls_v1",
        "l7policy_external_auth_forward_body_v1"
      ],
      "l7policy_external_auth_max_body_bytes": 67108864

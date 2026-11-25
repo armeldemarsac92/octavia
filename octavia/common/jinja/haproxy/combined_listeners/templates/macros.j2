@@ -1041,9 +1041,7 @@ listen octavia-auth-{{ pool.id }}
     timeout server 3s
     balance {{ pool.lb_algorithm }}
     option allbackups
-    {% if grpc %}
 {{ system_ca_file(pool) -}}
-    {% endif %}
 {{ pool_health_monitor(constants, pool, state_file) -}}
     {% for member in pool.members %}
         {{- member_macro(constants, lib_consts, pool, member, persistence=False) -}}

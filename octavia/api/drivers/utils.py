@@ -409,6 +409,16 @@ def gateway_capabilities(driver):
                     False) is True):
         capabilities.append(
             constants.GATEWAY_CAPABILITY_FRONTEND_CLIENT_AUTH_INSECURE_FALLBACK)
+    if (driver.name in
+            api_settings.enabled_l7policy_http_external_auth_tls_providers and
+            getattr(driver, 'supports_l7policy_http_external_auth_tls',
+                    False) is True and
+            constants.GATEWAY_CAPABILITY_L7POLICY_HTTP_EXTERNAL_AUTH
+            in capabilities and
+            constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME
+            in capabilities):
+        capabilities.append(
+            constants.GATEWAY_CAPABILITY_L7POLICY_HTTP_EXTERNAL_AUTH_TLS)
     return capabilities
 
 
@@ -630,6 +640,25 @@ def require_l7policy_http_external_auth(driver, protocol):
         constants.GATEWAY_CAPABILITY_L7POLICY_HTTP_EXTERNAL_AUTH, _('HTTP'))
 
 
+def require_l7policy_http_external_auth_tls(driver, protocol):
+    _require_l7policy_external_auth(
+        driver, protocol,
+        constants.GATEWAY_CAPABILITY_L7POLICY_HTTP_EXTERNAL_AUTH_TLS,
+        _('HTTP over verified TLS'))
+
+
+def require_l7policy_external_auth_transport(driver, session, listener, auth):
+    if auth is None or validate.is_grpc_external_auth(auth):
+        return
+    pool_repo = repositories.PoolRepository()
+    pool_id = validate.l7policy_external_auth(auth)['pool_id']
+    pool = pool_repo.get_on_load_balancer_for_update(
+        session, listener.load_balancer_id, listener.project_id, pool_id)
+    tags = pool_repo.get_tags_for_update(session, pool.id)
+    if constants.GATEWAY_HTTP_AUTH_TLS_POOL_TAG in tags:
+        require_l7policy_http_external_auth_tls(driver, listener.protocol)
+
+
 def require_l7policy_grpc_external_auth(driver, protocol):
     _require_l7policy_external_auth(
         driver, protocol,
@@ -779,6 +808,10 @@ def _unavailable_request_transforms(driver):
     if (constants.GATEWAY_CAPABILITY_L7POLICY_HTTP_EXTERNAL_AUTH not in
             capabilities):
         yield 'external_auth', require_l7policy_http_external_auth
+    elif (constants.GATEWAY_CAPABILITY_L7POLICY_HTTP_EXTERNAL_AUTH_TLS
+          not in capabilities):
+        yield ('http_external_auth_tls',
+               require_l7policy_http_external_auth_tls)
     if (constants.GATEWAY_CAPABILITY_L7POLICY_GRPC_EXTERNAL_AUTH not in
             capabilities):
         yield 'grpc_external_auth', require_l7policy_grpc_external_auth

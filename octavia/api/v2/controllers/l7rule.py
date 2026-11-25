@@ -227,6 +227,9 @@ class L7RuleController(base.BaseController):
                     tcp_tls_passthrough=db_l7policy.tcp_tls_passthrough,
                     tcp_tls_mixed_mode=db_l7policy.listener.tcp_tls_mixed_mode,
                     tcp_tls_termination=tcp_tls_termination)
+                driver_utils.require_l7policy_external_auth_transport(
+                    driver, context.session, db_l7policy.listener,
+                    db_l7policy.external_auth)
             if l7rule_dict['enabled']:
                 driver_utils.require_no_exposed_request_transforms(
                     driver, self.repositories.l7policy, context.session,
@@ -346,6 +349,8 @@ class L7RuleController(base.BaseController):
             if policy.external_auth is not None and listener.enabled:
                 driver_utils.require_l7policy_external_auth(
                     driver, listener.protocol, policy.external_auth)
+                driver_utils.require_l7policy_external_auth_transport(
+                    driver, session, listener, policy.external_auth)
             if redirect and listener.enabled:
                 driver_utils.require_http_request_redirect(driver)
                 self._require_no_transform_exposed_by_ordered_redirect(
@@ -439,6 +444,9 @@ class L7RuleController(base.BaseController):
                     tcp_tls_passthrough=db_l7policy.tcp_tls_passthrough,
                     tcp_tls_mixed_mode=db_l7policy.listener.tcp_tls_mixed_mode,
                     tcp_tls_termination=tcp_tls_termination)
+                driver_utils.require_l7policy_external_auth_transport(
+                    driver, context.session, db_l7policy.listener,
+                    db_l7policy.external_auth)
                 if enabled:
                     if (db_l7rule.enabled and match_changed and
                             db_l7rule.type !=

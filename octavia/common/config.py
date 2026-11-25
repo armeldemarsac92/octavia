@@ -165,6 +165,12 @@ api_opts = [
                 help=_('Providers exposing HTTP L7 policy authorization. '
                        'Enable after upgrading the API, worker, octavia-lib, '
                        'database and qualifying eligible Amphora images.')),
+    cfg.ListOpt('enabled_l7policy_http_external_auth_tls_providers',
+                default=[],
+                help=_('Providers with verified TLS to HTTP L7 policy '
+                       'authorizers. Enable with HTTP L7 policy authorization '
+                       'and backend TLS hostname verification after '
+                       'qualifying all eligible Amphora images.')),
     cfg.ListOpt('enabled_l7policy_grpc_external_auth_providers', default=[],
                 help=_('Providers exposing bodyless gRPC L7 policy '
                        'authorization. Enable after upgrading the API and '

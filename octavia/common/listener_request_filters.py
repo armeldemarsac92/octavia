@@ -99,8 +99,20 @@ def validate_listener(protocol, sections):
             'an HTTP listener.'))
 
 
+def is_http_tls_authorizer(pool):
+    return constants.GATEWAY_HTTP_AUTH_TLS_POOL_TAG in (
+        getattr(pool, 'tags', None) or ())
+
+
+def require_non_http_tls_authorizer(tags):
+    if constants.GATEWAY_HTTP_AUTH_TLS_POOL_TAG in (tags or ()):
+        raise exceptions.ValidationException(detail=_(
+            'An HTTP TLS authorizer pool is reserved for L7 policy '
+            'authorization.'))
+
+
 def valid_pool(pool, protocol=constants.PROTOCOL_HTTP, *, tags=None,
-               changes=None):
+               changes=None, rule=False):
     """Check the authorizer role and transport, including a pending edit."""
     if pool.protocol != constants.PROTOCOL_HTTP:
         return False
@@ -108,12 +120,27 @@ def valid_pool(pool, protocol=constants.PROTOCOL_HTTP, *, tags=None,
     changes = changes or {}
 
     def field(name):
-        return changes[name] if name in changes else getattr(pool, name)
+        return changes[name] if name in changes else getattr(pool, name, None)
 
     grpc_tag = constants.GATEWAY_GRPC_AUTH_POOL_TAG
     http_tag = constants.GATEWAY_LISTENER_AUTH_POOL_TAG
     tls_enabled = field('tls_enabled')
     backend_h2c = field('backend_h2c')
+    tls_tag = constants.GATEWAY_HTTP_AUTH_TLS_POOL_TAG
+    collector_tag = constants.GATEWAY_OTLP_COLLECTOR_POOL_TAG
+    if tls_tag in tags:
+        if (not rule or protocol != constants.PROTOCOL_HTTP or
+                tags.intersection({http_tag, grpc_tag, collector_tag})):
+            return False
+        ca_ref = bool(field('ca_tls_certificate_id'))
+        system_ca = bool(field('backend_tls_system_ca'))
+        alpn = field('alpn_protocols')
+        return (tls_enabled is True and not backend_h2c and
+                not field('backend_tls_require_h2') and
+                validate.is_exact_sni_name(field('backend_tls_hostname')) and
+                ca_ref != system_ca and
+                (not system_ca or not field('crl_container_id')) and
+                (not alpn or 'http/1.1' in alpn))
     if protocol == constants.PROTOCOL_HTTP:
         return (not tls_enabled and not backend_h2c and
                 http_tag in tags and grpc_tag not in tags)
