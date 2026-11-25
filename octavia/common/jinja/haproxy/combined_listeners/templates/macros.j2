@@ -121,6 +121,11 @@ bind {% if local_socket %}{{ local_socket }} accept-proxy{% else %}{{ lb_vip_add
     {% elif l7rule.type == constants.L7RULE_TYPE_PATH %}
         acl {{ l7rule.id }} path {{ l7rule_compare_type_macro(
             constants, l7rule.compare_type) }} {{ l7rule.value }}
+    {% elif l7rule.type == constants.L7RULE_TYPE_HTTP_PATH_LITERAL %}
+        {# HAProxy ORs declarations of the same ACL before inversion. #}
+        {% for method, pattern in l7rule.value %}
+        acl {{ l7rule.id }} path -m {{ method }} -- {{ pattern }}
+        {% endfor %}
     {% elif l7rule.type == constants.L7RULE_TYPE_FILE_TYPE %}
         acl {{ l7rule.id }} path_end {{ l7rule_compare_type_macro(
             constants, l7rule.compare_type, l7rule.type) }} {{ l7rule.value }}

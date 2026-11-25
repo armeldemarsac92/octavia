@@ -140,6 +140,27 @@ rules remain readable and can be disabled, shortened or deleted.
 Create these rules at the L7 rule endpoint, as initial rules at the L7
 policy endpoint, or in a load balancer creation graph.
 
+With ``http_literal_path_v1`` enabled, use ``HTTP_PATH_LITERAL`` with
+``EQUAL_TO`` or ``STARTS_WITH`` on HTTP and TERMINATED_HTTPS listeners.
+The value is a case-sensitive absolute Gateway API v1.7.0 path of up
+to 1024 ASCII bytes. Omit the key. The rule compares the raw request
+path without the query string or percent decoding. ``STARTS_WITH``
+matches whole segments, so ``/store/`` matches ``/store``,
+``/store/`` and ``/store/item``, while ``/storefront`` does
+not match. A prefix of ``/`` matches every absolute path.
+``invert`` negates the entire match.
+
+Create these rules at the L7 rule endpoint, as initial rules at the L7
+policy endpoint, or in a load balancer creation graph. Creating or
+modifying the match, and enabling a rule or parent that would activate
+it, returns HTTP 501 when the capability is unavailable. Stored rules
+remain readable and can be disabled or deleted.
+
+.. code-block:: json
+
+   {"rule": {"type": "HTTP_PATH_LITERAL", "compare_type": "STARTS_WITH",
+             "value": "/store/"}}
+
 With ``http_header_exact_v1`` enabled, use ``HTTP_HEADER_EXACT`` with
 ``EQUAL_TO`` on HTTP or TERMINATED_HTTPS listeners. The key is an HTTP
 field name of up to 255 ASCII characters, compared case-insensitively. The

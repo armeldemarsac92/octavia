@@ -605,6 +605,7 @@ class ApplyL7PolicyActivation(BaseAmphoraTask):
             return False
         expected = request['policies']
         transition = request.get('grpc_auth_transition')
+        driver = None
         if transition:
             driver = driver_factory.get_driver(lb.provider)
             if not l7policy_activation.grpc_auth_transition_available(
@@ -619,12 +620,24 @@ class ApplyL7PolicyActivation(BaseAmphoraTask):
                     exceptions.ValidationException):
                 return False
         selected = [p for p in policies if p.id in expected]
-        if not transition and any(
-                rule.enabled and validate.is_long_http_hostname_regex(
-                    rule.type, rule.compare_type, rule.value)
-                for policy in selected for rule in policy.l7rules):
-            driver = driver_factory.get_driver(lb.provider)
-            if not driver_utils.http_long_hostname_available(driver):
+        # A transition to the fixed 500 preserves the existing predicates.
+        # Only activation or restoration of an origin requires enrollment.
+        activating_rules = [
+            rule for policy in selected
+            if not transition or transition[policy.id]['origin'] is not None
+            for rule in policy.l7rules if rule.enabled]
+        long_hostname = any(validate.is_long_http_hostname_regex(
+            rule.type, rule.compare_type, rule.value)
+            for rule in activating_rules)
+        literal_path = any(
+            rule.type == constants.L7RULE_TYPE_HTTP_PATH_LITERAL
+            for rule in activating_rules)
+        if long_hostname or literal_path:
+            driver = driver or driver_factory.get_driver(lb.provider)
+            if ((long_hostname and
+                 not driver_utils.http_long_hostname_available(driver)) or
+                (literal_path and
+                 not driver_utils.http_literal_path_available(driver))):
                 return False
         if listener.protocol == constants.PROTOCOL_TCP:
             driver = driver_factory.get_driver(lb.provider)

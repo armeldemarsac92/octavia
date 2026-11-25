@@ -25,6 +25,7 @@ import typing as tp
 from urllib.parse import quote
 
 import jinja2
+from markupsafe import Markup
 from octavia_lib.common import constants as lib_consts
 from oslo_log import log as logging
 from oslo_utils import versionutils
@@ -2394,7 +2395,17 @@ class JinjaTemplater:
             be processed by the templating system
         """
         key = l7rule.key
-        if l7rule.type == constants.L7RULE_TYPE_HTTP_HEADER_EXACT:
+        if l7rule.type == constants.L7RULE_TYPE_HTTP_PATH_LITERAL:
+            path = l7rule.value
+            matches = [('str', path)]
+            if (l7rule.compare_type ==
+                    constants.L7RULE_COMPARE_TYPE_STARTS_WITH):
+                path = path.removesuffix('/')
+                matches = [('str', path)] if path else []
+                matches.append(('beg', path + '/'))
+            value = [(method, Markup(_quote_config_arg(pattern)))
+                     for method, pattern in matches]
+        elif l7rule.type == constants.L7RULE_TYPE_HTTP_HEADER_EXACT:
             # Protect the token in both the configuration and sample fetch
             # parsers. Match raw field bytes with a hex-encoded ACL pattern.
             escaped_key = key.translate({

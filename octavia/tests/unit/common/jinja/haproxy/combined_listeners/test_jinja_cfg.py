@@ -2101,6 +2101,28 @@ class TestHaproxyCfg(base.TestCase):
         self.assertEqual(sample_configs_combined.sample_base_expected_config(
             frontend=fe, backend=be), rendered_obj)
 
+    def test_render_inverted_literal_http_path_prefix(self):
+        amp = sample_configs_combined.sample_amphora_tuple()
+        listener = sample_configs_combined.sample_listener_tuple(l7=True)
+        policy = listener.l7policies[0]
+        rule = policy.l7rules[0]._replace(
+            id='literal-path', type=constants.L7RULE_TYPE_HTTP_PATH_LITERAL,
+            compare_type=constants.L7RULE_COMPARE_TYPE_STARTS_WITH,
+            value="/store/'&/", invert=True)
+        listener = listener._replace(
+            l7policies=[policy._replace(l7rules=[rule])])
+        config = self.jinja_cfg.build_config(
+            amp, [listener], None, haproxy_versions=['3', '0', '19'],
+            amp_details=None)
+        lines = [line.strip() for line in config.splitlines()
+                 if 'literal-path' in line]
+        self.assertEqual([
+            "acl literal-path path -m str -- \"/store/'&\"",
+            "acl literal-path path -m beg -- \"/store/'&/\"",
+            f'use_backend {policy.redirect_pool.id}:{listener.id}'
+            ' if !literal-path',
+        ], lines)
+
     def test_haproxy_version_check_ignores_unrendered_fixed_responses(self):
         amp = sample_configs_combined.sample_amphora_tuple()
         listener = sample_configs_combined.sample_listener_tuple(l7=True)

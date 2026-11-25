@@ -2865,6 +2865,43 @@ class TestLoadBalancerGraph(base.BaseAPITest):
 
     @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.'
                 'AmphoraProviderDriver.loadbalancer_create', autospec=True)
+    @mock.patch.object(
+        amphora_driver.AmphoraProviderDriver, 'create_vip_port', autospec=True,
+        side_effect=amphora_driver.AmphoraProviderDriver.create_vip_port)
+    def test_graph_create_with_literal_http_path(self, create_vip_port,
+                                                 driver_create):
+        value = '/' + 'a' * 1022 + '/'
+        rule = {'type': 'HTTP_PATH_LITERAL', 'compare_type': 'STARTS_WITH',
+                'value': value}
+        policy = {'action': 'REJECT', 'rules': [rule]}
+        listener = {'protocol': 'HTTP', 'protocol_port': 80,
+                    'l7policies': [policy]}
+        body = self._build_body({
+            'vip_subnet_id': uuidutils.generate_uuid(),
+            'project_id': self._project_id, 'provider': 'amphora',
+            'listeners': [listener]})
+        self.post(self.LBS_PATH, body, status=501)
+        self.conf.config(group='api_settings',
+                         enabled_http_literal_path_providers=['amphora'])
+        listener['protocol'] = 'TCP'
+        self.post(self.LBS_PATH, body, status=400)
+        listener['protocol'] = 'HTTP'
+        rule['value'] = value + 'a'
+        self.post(self.LBS_PATH, body, status=400)
+        create_vip_port.assert_not_called()
+        driver_create.assert_not_called()
+        rule['value'] = value
+        response = self.post(self.LBS_PATH, body, status=201)
+        created = response.json[self.root_tag]
+        create_vip_port.assert_called_once()
+        driver_create.assert_called_once()
+        saved_listener, = created['listeners']
+        saved_policy, = saved_listener['l7policies']
+        saved, = saved_policy['rules']
+        self.assertEqual(rule, {field: saved[field] for field in rule})
+
+    @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.'
+                'AmphoraProviderDriver.loadbalancer_create', autospec=True)
     def test_graph_create_with_http_cookie_path(self, driver_create):
         persistence = 'session_persistence'
         pool = {

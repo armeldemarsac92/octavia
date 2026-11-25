@@ -646,12 +646,15 @@ class TestInitialL7Rules(base.BaseAPITest):
 
     def test_grpc_auth_transition_preserves_the_order_and_fixed_barrier(self):
         enabled = ['amphora']
+        path_option = 'enabled_http_literal_path_providers'
+        hostname_option = 'enabled_http_long_hostname_providers'
         self.conf.config(
             group='api_settings', enabled_gateway_action_providers=enabled,
             enabled_backend_h2c_providers=enabled,
             enabled_backend_tls_hostname_providers=enabled,
             enabled_l7policy_grpc_external_auth_providers=enabled,
-            enabled_l7policy_grpc_auth_transition_providers=enabled)
+            enabled_l7policy_grpc_auth_transition_providers=enabled,
+            **{path_option: enabled, hostname_option: enabled})
         origin = self.create_pool(self.lb_id, 'HTTP', 'ROUND_ROBIN')['pool']
         self.set_lb_status(self.lb_id)
         authorizer = self.create_pool(
@@ -667,13 +670,19 @@ class TestInitialL7Rules(base.BaseAPITest):
         self.set_lb_status(self.lb_id)
         auth = {'protocol': 'GRPC', 'pool_id': authorizer['id']}
         for path in ('/protected', '/secure', '/public'):
+            rule_type = 'HTTP_PATH_LITERAL' if path == '/protected' else 'PATH'
+            rules = [{'type': rule_type, 'compare_type': 'EQUAL_TO',
+                      'value': path}]
+            if path == '/protected':
+                # A legal DNS name needs a long regex once dots are escaped.
+                rules.append({'type': 'HOST_NAME', 'compare_type': 'REGEX',
+                              'value': r'\.'.join(['a'] * 127)})
             policy = self._post_policy(
                 action='REDIRECT_TO_POOL', redirect_prefix=None,
                 redirect_pool_id=(private if path == '/protected'
                                   else origin)['id'],
                 external_auth=None if path == '/public' else auth,
-                rules=[{'type': 'PATH', 'compare_type': 'EQUAL_TO',
-                        'value': path}])['l7policy']
+                rules=rules)['l7policy']
             endpoints.Endpoints().create_l7policy(
                 {}, **self.rpc.cast.call_args.kwargs)
             self.put(self.L7POLICY_PATH.format(l7policy_id=policy['id']),
@@ -706,12 +715,15 @@ class TestInitialL7Rules(base.BaseAPITest):
         stale = {**withdrawal, 'expected_order': list(reversed(order))}
         self.post(path, {field: stale}, status=409)
         row = withdrawal['policies'][0]
-        for duplicate in ({**row, 'tags': ['tag', 'tag']},
-                          {**row, 'rules': [{**row['rules'][0],
-                                            'tags': ['tag', 'tag']}]}):
+        duplicate_rule = {**row['rules'][0], 'tags': ['tag', 'tag']}
+        for duplicate in (
+                {**row, 'tags': ['tag', 'tag']},
+                {**row, 'rules': [duplicate_rule, *row['rules'][1:]]}):
             invalid = {**withdrawal,
                        'policies': [duplicate, withdrawal['policies'][1]]}
             self.post(path, {field: invalid}, status=400)
+        self.conf.config(group='api_settings',
+                         **{path_option: [], hostname_option: []})
         self.post(path, {field: withdrawal}, status=204)
         delivery = self.rpc.cast.call_args.kwargs
         caps = {constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME: True}
@@ -750,13 +762,40 @@ class TestInitialL7Rules(base.BaseAPITest):
             self.assertEqual('FIXED_RESPONSE', protected['action'])
             self.assertEqual({'status_code': 500}, protected['fixed_response'])
             self.assertIsNone(protected['external_auth'])
-            self.assertEqual(['revised-rule'], protected['rules'][0]['tags'])
+            for rule in protected['rules']:
+                self.assertEqual(['revised-rule'], rule['tags'])
 
         queried = path + '?pool_ids=' + ','.join([authorizer['id'],
                                                   private['id']])
         snapshot = self.get(queried).json['l7policy_activation']
         restoration = request(snapshot, redirect_pool_id=private['id'],
                               external_auth=auth)
+        self.conf.config(group='api_settings',
+                         **{path_option: enabled, hostname_option: enabled})
+        for option in (path_option, hostname_option):
+            with self.subTest(withdrawn=option):
+                self.conf.config(group='api_settings', **{option: []})
+                self.rpc.cast.reset_mock()
+                self.post(path, {field: restoration}, status=501)
+                self.rpc.cast.assert_not_called()
+                self.conf.config(group='api_settings', **{option: enabled})
+                self.post(path, {field: restoration}, status=204)
+                delivery = self.rpc.cast.call_args.kwargs
+                self.conf.config(group='api_settings', **{option: []})
+                with mock.patch.object(
+                        amphora_noop.NoopAmphoraLoadBalancerDriver,
+                        'update') as update:
+                    endpoints.Endpoints().activate_l7policies({}, **delivery)
+                update.assert_called_once()
+                self.assertTrue(
+                    update.call_args.kwargs['l7policy_restoration'])
+                listener = update.call_args.args[0].listeners[0]
+                self.assertTrue(listener.enabled)
+                self.assertEqual(
+                    ['FIXED_RESPONSE', 'FIXED_RESPONSE', 'REDIRECT_TO_POOL'],
+                    [policy.action for policy in listener.l7policies])
+                self.conf.config(group='api_settings', **{option: enabled})
+
         self.post(path, {field: restoration}, status=204)
         call = self.rpc.cast.call_args
         with mock.patch.object(amphora_noop.NoopAmphoraLoadBalancerDriver,
@@ -1715,6 +1754,32 @@ class TestInitialL7Rules(base.BaseAPITest):
         endpoints.Endpoints().activate_l7policies({}, **delivery.kwargs)
         policies = self._activation_policies(path)
         self.assertFalse(any(policy['admin_state_up'] for policy in policies))
+
+    def test_initial_literal_http_path_rules_and_batch_recheck(self):
+        option = 'enabled_http_literal_path_providers'
+        self.rules[1].update(type='HTTP_PATH_LITERAL',
+                             compare_type='STARTS_WITH',
+                             value="/excluded/'&%41")
+        self._post_policy(status=501)
+        self.rpc.cast.assert_not_called()
+        self.conf.config(group='api_settings', **{option: ['amphora']})
+        path, payload = self._prepare_activation_group()
+        policy = self._activation_policies(path)[0]
+        saved = next(rule for rule in policy['rules']
+                     if rule['type'] == 'HTTP_PATH_LITERAL')
+        self.assertEqual(self.rules[1],
+                         {field: saved[field] for field in self.rules[1]})
+
+        self.conf.config(group='api_settings', **{option: []})
+        self.post(path, payload, status=501)
+        self.rpc.cast.assert_not_called()
+        self.conf.config(group='api_settings', **{option: ['amphora']})
+        self.post(path, payload, status=204)
+        delivery = self.rpc.cast.call_args
+        self.conf.config(group='api_settings', **{option: []})
+        endpoints.Endpoints().activate_l7policies({}, **delivery.kwargs)
+        self.assertFalse(any(policy['admin_state_up']
+                             for policy in self._activation_policies(path)))
 
     def test_create_initial_rules_in_one_worker_operation(self):
         response = self._post_policy()['l7policy']

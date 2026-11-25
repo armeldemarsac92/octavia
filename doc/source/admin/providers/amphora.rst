@@ -470,6 +470,31 @@ rules remain readable and can be disabled, shortened or deleted. Retire
 long rules before rolling back to API or worker versions with the
 255-character validation limit.
 
+Literal HTTP path matching
+--------------------------
+
+``HTTP_PATH_LITERAL`` implements Gateway API exact and segment-prefix
+matching for paths of up to 1024 ASCII bytes on HTTP and terminated HTTPS
+listeners. HAProxy compares the raw path case-sensitively and leaves the
+request target unchanged. The existing ``PATH`` rule type retains its
+original comparisons.
+
+Apply the database migration, upgrade the regional API and workers and
+verify that the Amphora fleet can load the resulting HAProxy configuration.
+Configure the provider name on each regional API and worker replica. The
+opt-in defaults to empty.
+
+.. code-block:: ini
+
+   [api_settings]
+   enabled_http_literal_path_providers = amphora
+
+The provider then advertises ``http_literal_path_v1``. Removing its name
+stops new rules and match changes, and prevents activation of disabled
+rules and parents that would activate them. Existing rules continue to serve
+and can be disabled or removed. Retire the rules before rolling back the
+workers.
+
 
 Exact HTTP query parameter matching
 -----------------------------------
