@@ -30,7 +30,8 @@ class BaseL7PolicyType(types.BaseType):
         data = super().to_dict(render_unsets=render_unsets)
         for field in ('request_header_operations',
                       'response_header_operations', 'redirect_request',
-                      'request_url_rewrite', 'request_cors'):
+                      'request_url_rewrite', 'request_cors',
+                      'http_request_policy'):
             if getattr(self, field) is wtypes.Unset:
                 data.pop(field, None)
         return data
@@ -53,6 +54,7 @@ class L7PolicyResponse(BaseL7PolicyType):
     redirect_request = wtypes.wsattr(types.HTTPRequestRedirect())
     request_url_rewrite = wtypes.wsattr(types.HTTPRequestURLRewrite())
     request_cors = wtypes.wsattr(types.HTTPRequestCORS())
+    http_request_policy = wtypes.wsattr(types.HTTPRequestPolicy())
     targets = wtypes.wsattr(types.WeightedL7PolicyTargets())
     request_header_operations = wtypes.wsattr(types.RequestHeaderOperations())
     response_header_operations = wtypes.wsattr(
@@ -84,7 +86,8 @@ class L7PolicyResponse(BaseL7PolicyType):
             result.tcp_tls_passthrough = wtypes.Unset
         for field in ('request_header_operations',
                       'response_header_operations', 'redirect_request',
-                      'request_url_rewrite', 'request_cors'):
+                      'request_url_rewrite', 'request_cors',
+                      'http_request_policy'):
             if getattr(db_obj, field) is None:
                 setattr(result, field, wtypes.Unset)
         if not db_obj.targets:
@@ -137,6 +140,7 @@ class L7PolicyPOST(BaseL7PolicyType):
     redirect_request = wtypes.wsattr(types.HTTPRequestRedirect())
     request_url_rewrite = wtypes.wsattr(types.HTTPRequestURLRewrite())
     request_cors = wtypes.wsattr(types.HTTPRequestCORS())
+    http_request_policy = wtypes.wsattr(types.HTTPRequestPolicy())
     targets = wtypes.wsattr(types.WeightedL7PolicyTargets())
     request_header_operations = wtypes.wsattr(types.RequestHeaderOperations())
     response_header_operations = wtypes.wsattr(
@@ -196,6 +200,7 @@ class L7PolicyPUT(BaseL7PolicyType):
     redirect_request = wtypes.wsattr(types.HTTPRequestRedirect())
     request_url_rewrite = wtypes.wsattr(types.HTTPRequestURLRewrite())
     request_cors = wtypes.wsattr(types.HTTPRequestCORS())
+    http_request_policy = wtypes.wsattr(types.HTTPRequestPolicy())
     targets = wtypes.wsattr(types.WeightedL7PolicyTargets())
     request_header_operations = wtypes.wsattr(types.RequestHeaderOperations())
     response_header_operations = wtypes.wsattr(
@@ -229,6 +234,7 @@ class L7PolicySingleCreate(BaseL7PolicyType):
     redirect_request = wtypes.wsattr(types.HTTPRequestRedirect())
     request_url_rewrite = wtypes.wsattr(types.HTTPRequestURLRewrite())
     request_cors = wtypes.wsattr(types.HTTPRequestCORS())
+    http_request_policy = wtypes.wsattr(types.HTTPRequestPolicy())
     targets = wtypes.wsattr(types.WeightedL7PolicyTargets())
     request_header_operations = wtypes.wsattr(types.RequestHeaderOperations())
     response_header_operations = wtypes.wsattr(

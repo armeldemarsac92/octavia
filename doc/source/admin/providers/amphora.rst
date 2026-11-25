@@ -210,6 +210,29 @@ filters continue to run on upgraded workers. Clear a filter with
 ``request_cors: null`` before a routing change that would expose it.
 Clear stored filters before rolling back Octavia, octavia-lib or Amphora.
 
+Deadlines and retries in L7 forwarding policies
+----------------------------------------------
+
+Apply migration ``d3d72b90b815`` and upgrade the regional API, octavia-lib
+and workers. Qualify the eligible Amphora fleet, including existing,
+replacement and failover images, before enabling the provider on every
+regional API replica.
+
+.. code-block:: ini
+
+   [api_settings]
+   enabled_http_request_policy_providers = amphora
+
+Discovery advertises ``http_request_policy_v1`` when the regional setting,
+provider driver and installed octavia-lib support the field. For Amphora,
+the renderer also requires the capability reported by the Amphora agent
+from the HAProxy build with the ``-backend-sans-v1-http-policy-v1`` suffix.
+
+Removing regional enrollment prevents adding HTTP request policies and
+expanding or reactivating stored ones. Existing policies continue to run
+on upgraded Amphorae. Clear them with ``http_request_policy: null`` before
+rolling back Octavia, octavia-lib or Amphora images.
+
 Full-value exact request header matching
 ----------------------------------------
 

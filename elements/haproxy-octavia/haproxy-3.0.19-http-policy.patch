@@ -1,0 +1,724 @@
+diff --git a/include/haproxy/action-t.h b/include/haproxy/action-t.h
+index eee16a3..667c4ad 100644
+--- a/include/haproxy/action-t.h
++++ b/include/haproxy/action-t.h
+@@ -132,6 +132,7 @@ struct act_rule {
+ 	const struct action_kw *kw;
+ 	struct applet applet;                  /* used for the applet registration. */
+ 	union {
++		struct http_request_policy *http_policy;
+ 		struct {
+ 			struct sample_expr *expr;
+ 			char *varname;
+diff --git a/include/haproxy/http_ana-t.h b/include/haproxy/http_ana-t.h
+index f43aa32..d146d65 100644
+--- a/include/haproxy/http_ana-t.h
++++ b/include/haproxy/http_ana-t.h
+@@ -233,6 +233,14 @@ struct http_msg {
+ /* This is an HTTP transaction. It contains both a request message and a
+  * response message (which can be empty).
+  */
++/* Compiled literal arguments of the octavia-http-policy rule. */
++struct http_request_policy {
++	uint64_t request_timeout_ms;
++	uint64_t backend_timeout_ms;
++	int retries; /* -1 retains the backend's native retry policy */
++	unsigned int retry_on;
++};
++
+ struct http_txn {
+ 	struct http_msg rsp;            /* HTTP response message */
+ 	struct http_msg req;            /* HTTP request message */
+@@ -243,6 +251,12 @@ struct http_txn {
+ 	short server_status;            /* HTTP status received from the server, negative if not received */
+ 	struct http_reply *http_reply;  /* The HTTP reply to use as reply */
+ 	struct buffer l7_buffer;        /* To store the data, in case we have to retry */
++	const struct http_request_policy *policy;
++	uint64_t request_expires_ms;
++	uint64_t attempt_expires_ms;
++	unsigned int pending_informational; /* output preceding the final response */
++	unsigned char final_queued;
++	unsigned char final_started;
+ 	char cache_hash[20];               /* Store the cache hash  */
+ 	char cache_secondary_hash[HTTP_CACHE_SEC_KEY_LEN]; /* Optional cache secondary key. */
+ 	char *uri;                      /* first line if log needed, NULL otherwise */
+diff --git a/include/haproxy/http_ana.h b/include/haproxy/http_ana.h
+index 2cc6516..b5e494a 100644
+--- a/include/haproxy/http_ana.h
++++ b/include/haproxy/http_ana.h
+@@ -24,6 +24,7 @@
+ 
+ #include <haproxy/api.h>
+ #include <haproxy/channel-t.h>
++#include <haproxy/clock.h>
+ #include <haproxy/http_ana-t.h>
+ #include <haproxy/htx-t.h>
+ #include <haproxy/proxy-t.h>
+@@ -63,6 +64,41 @@ struct http_txn *http_create_txn(struct stream *s);
+ void http_destroy_txn(struct stream *s);
+ 
+ void http_set_term_flags(struct stream *s);
++void http_policy_expire(struct stream *s);
++int http_policy_expiration(const struct http_txn *txn);
++
++/* The scheduler tick wraps; use HAProxy's full monotonic date for the budget. */
++static inline uint64_t http_policy_now_ms(void)
++{
++	return now_ns / 1000000;
++}
++
++static inline int http_policy_expired(const struct http_txn *txn)
++{
++	uint64_t now;
++
++	if (!txn || !txn->policy)
++		return 0;
++
++	now = http_policy_now_ms();
++	return (txn->request_expires_ms && txn->request_expires_ms <= now) ||
++	       (txn->attempt_expires_ms && txn->attempt_expires_ms <= now);
++}
++
++static inline int http_policy_retry_override(const struct stream *s)
++{
++	return s->txn && s->txn->policy && s->txn->policy->retries >= 0;
++}
++
++static inline int http_retry_limit(const struct stream *s)
++{
++	return http_policy_retry_override(s) ? s->txn->policy->retries : s->be->conn_retries;
++}
++
++static inline unsigned int http_retry_on(const struct stream *s)
++{
++	return http_policy_retry_override(s) ? s->txn->policy->retry_on : s->be->retry_type;
++}
+ 
+ /* for debugging, reports the HTTP/1 message state name (legacy version) */
+ static inline const char *h1_msg_state_str(enum h1_state msg_state)
+diff --git a/include/haproxy/proxy.h b/include/haproxy/proxy.h
+index 9a93e3a..692e9fd 100644
+--- a/include/haproxy/proxy.h
++++ b/include/haproxy/proxy.h
+@@ -189,35 +189,35 @@ static inline void proxy_inc_fe_req_ctr(struct listener *l, struct proxy *fe,
+ }
+ 
+ /* Returns non-zero if the proxy is configured to retry a request if we got that status, 0 otherwise */
+-static inline int l7_status_match(struct proxy *p, int status)
++static inline int l7_status_match(unsigned int retry_on, int status)
+ {
+ 	/* Just return 0 if no retry was configured for any status */
+-	if (!(p->retry_type & PR_RE_STATUS_MASK))
++	if (!(retry_on & PR_RE_STATUS_MASK))
+ 		return 0;
+ 
+ 	switch (status) {
+ 	case 401:
+-		return (p->retry_type & PR_RE_401);
++		return (retry_on & PR_RE_401);
+ 	case 403:
+-		return (p->retry_type & PR_RE_403);
++		return (retry_on & PR_RE_403);
+ 	case 404:
+-		return (p->retry_type & PR_RE_404);
++		return (retry_on & PR_RE_404);
+ 	case 408:
+-		return (p->retry_type & PR_RE_408);
++		return (retry_on & PR_RE_408);
+ 	case 425:
+-		return (p->retry_type & PR_RE_425);
++		return (retry_on & PR_RE_425);
+ 	case 429:
+-		return (p->retry_type & PR_RE_429);
++		return (retry_on & PR_RE_429);
+ 	case 500:
+-		return (p->retry_type & PR_RE_500);
++		return (retry_on & PR_RE_500);
+ 	case 501:
+-		return (p->retry_type & PR_RE_501);
++		return (retry_on & PR_RE_501);
+ 	case 502:
+-		return (p->retry_type & PR_RE_502);
++		return (retry_on & PR_RE_502);
+ 	case 503:
+-		return (p->retry_type & PR_RE_503);
++		return (retry_on & PR_RE_503);
+ 	case 504:
+-		return (p->retry_type & PR_RE_504);
++		return (retry_on & PR_RE_504);
+ 	default:
+ 		break;
+ 	}
+diff --git a/include/haproxy/stream.h b/include/haproxy/stream.h
+index 86f7a1d..d5229af 100644
+--- a/include/haproxy/stream.h
++++ b/include/haproxy/stream.h
+@@ -330,8 +330,15 @@ static inline void stream_init_srv_conn(struct stream *strm)
+ 	MT_LIST_INIT(&strm->by_srv);
+ }
+ 
+-static inline void stream_choose_redispatch(struct stream *s)
++static inline void stream_choose_redispatch(struct stream *s, int force, int retry_limit)
+ {
++	int interval = s->be->redispatch_after;
++
++	/* Negative intervals count backwards from the effective retry limit.
++	 * Adding one to the negative offset first keeps INT_MAX representable.
++	 */
++	if (interval < 0)
++		interval = MAX(1, retry_limit + (interval + 1));
+ 	/* If the "redispatch" option is set on the backend, we are allowed to
+ 	 * retry on another server. By default this redispatch occurs on the
+ 	 * last retry, but if configured we allow redispatches to occur on
+@@ -344,15 +351,13 @@ static inline void stream_choose_redispatch(struct stream *s)
+ 	 * we accept to perform an immediate redispatch without waiting since
+ 	 * we don't care about this particular server.
+ 	 */
+-	if (objt_server(s->target) &&
+-	    (s->be->options & PR_O_REDISP) && !(s->flags & SF_FORCE_PRST) &&
+-	    ((__objt_server(s->target)->cur_state < SRV_ST_RUNNING) ||
+-	     (((s->be->redispatch_after > 0) &&
+-	       (s->conn_retries % s->be->redispatch_after == 0)) ||
+-	      ((s->be->redispatch_after < 0) &&
+-	       (s->conn_retries % (s->be->conn_retries + 1 + s->be->redispatch_after) == 0))) ||
++	if (objt_server(s->target) && !(s->flags & SF_FORCE_PRST) &&
++	    (force ||
++	     ((s->be->options & PR_O_REDISP) &&
++	      ((__objt_server(s->target)->cur_state < SRV_ST_RUNNING) ||
++	     (interval > 0 && s->conn_retries % interval == 0) ||
+ 	     (!(s->flags & SF_DIRECT) && s->be->srv_act > 1 &&
+-	      ((s->be->lbprm.algo & BE_LB_KIND) != BE_LB_KIND_HI)))) {
++	      ((s->be->lbprm.algo & BE_LB_KIND) != BE_LB_KIND_HI)))))) {
+ 		sess_change_server(s, NULL);
+ 		if (may_dequeue_tasks(objt_server(s->target), s->be))
+ 			process_srv_queue(objt_server(s->target));
+diff --git a/src/backend.c b/src/backend.c
+index 100b6a8..e7cce26 100644
+--- a/src/backend.c
++++ b/src/backend.c
+@@ -1536,7 +1536,7 @@ int connect_server(struct stream *s)
+ 			const int not_first_req = s->txn && s->txn->flags & TX_NOT_FIRST;
+ 			const int idle = srv->curr_idle_nb > 0;
+ 			const int safe = srv->curr_safe_nb > 0;
+-			const int retry_safe = (s->be->retry_type & (PR_RE_CONN_FAILED | PR_RE_DISCONNECTED | PR_RE_TIMEOUT)) ==
++			const int retry_safe = (http_retry_on(s) & (PR_RE_CONN_FAILED | PR_RE_DISCONNECTED | PR_RE_TIMEOUT)) ==
+ 			                                            (PR_RE_CONN_FAILED | PR_RE_DISCONNECTED | PR_RE_TIMEOUT);
+ 
+ 			/* second column of the tables above,
+@@ -1895,7 +1895,7 @@ int connect_server(struct stream *s)
+ 	     * it's our first try
+ 	     */
+ 	    ((cli_conn->flags & CO_FL_EARLY_DATA) ||
+-	     ((s->be->retry_type & PR_RE_EARLY_ERROR) && !s->conn_retries)) &&
++	     ((http_retry_on(s) & PR_RE_EARLY_ERROR) && !s->conn_retries)) &&
+ 	    co_data(sc_oc(s->scb)) &&
+ 	    srv_conn->flags & CO_FL_SSL_WAIT_HS)
+ 		srv_conn->flags &= ~(CO_FL_SSL_WAIT_HS | CO_FL_WAIT_L6_CONN);
+@@ -2430,13 +2430,14 @@ void back_handle_st_cer(struct stream *s)
+ 			 * provided by the client and we don't want to let the
+ 			 * client provoke retries.
+ 			 */
+-			s->conn_retries = s->be->conn_retries;
++			s->conn_retries = http_retry_limit(s);
+ 			DBG_TRACE_DEVEL("Bad SSL cert, disable connection retries", STRM_EV_STRM_PROC|STRM_EV_CS_ST|STRM_EV_STRM_ERR, s);
+ 		}
+ 	}
+ 
+ 	/* ensure that we have enough retries left */
+-	if (s->conn_retries >= s->be->conn_retries || !(s->be->retry_type & PR_RE_CONN_FAILED)) {
++	if (s->conn_retries >= http_retry_limit(s) || !(http_retry_on(s) & PR_RE_CONN_FAILED) ||
++	    (http_policy_retry_override(s) && (s->req.flags & CF_WROTE_DATA))) {
+ 		if (!s->conn_err_type) {
+ 			s->conn_err_type = STRM_ET_CONN_ERR;
+ 		}
+@@ -2494,7 +2495,7 @@ void back_handle_st_cer(struct stream *s)
+ 	}
+ 
+ 	s->conn_retries++;
+-	stream_choose_redispatch(s);
++	stream_choose_redispatch(s, http_policy_retry_override(s), http_retry_limit(s));
+ 
+ 	if (must_tar) {
+ 		/* The error was an asynchronous connection error, and we will
+diff --git a/src/http_act.c b/src/http_act.c
+index bb0fe15..44f4dad 100644
+--- a/src/http_act.c
++++ b/src/http_act.c
+@@ -17,6 +17,8 @@
+ #include <time.h>
+ 
+ #include <haproxy/acl.h>
++#include <errno.h>
++
+ #include <haproxy/action.h>
+ #include <haproxy/api.h>
+ #include <haproxy/arg.h>
+@@ -772,6 +774,108 @@ static enum act_parse_ret parse_http_req_disable_l7_retry(const char **args,
+ 	return ACT_RET_PRS_OK;
+ }
+ 
++static enum act_return http_req_octavia_policy(struct act_rule *rule, struct proxy *px,
++                                             struct session *sess, struct stream *s, int flags)
++{
++	const struct http_request_policy *policy = rule->arg.http_policy;
++
++	if (!s->txn->policy) {
++		s->txn->policy = policy;
++		if (policy->request_timeout_ms && policy->request_timeout_ms != UINT64_MAX)
++			s->txn->request_expires_ms = http_policy_now_ms() + policy->request_timeout_ms;
++	}
++	return ACT_RET_CONT;
++}
++
++static void release_http_req_octavia_policy(struct act_rule *rule)
++{
++	free(rule->arg.http_policy);
++}
++
++/* Read a nonnegative decimal literal or the explicit default marker. */
++static int parse_http_policy_number(const char *arg, uint64_t max, uint64_t *number)
++{
++	if (strcmp(arg, "default") == 0) {
++		*number = UINT64_MAX;
++		return 1;
++	}
++	if (!*arg || arg[strspn(arg, "0123456789")])
++		return 0;
++	errno = 0;
++	*number = strtoull(arg, NULL, 10);
++	return !errno && *number <= max;
++}
++
++static enum act_parse_ret parse_http_req_octavia_policy(const char **args, int *orig_arg,
++                                                       struct proxy *px, struct act_rule *rule, char **err)
++{
++	struct http_request_policy policy, *compiled;
++	int cur = *orig_arg;
++	uint64_t retries;
++	const char *codes;
++
++	if (!*args[cur] || !*args[cur + 1] || !*args[cur + 2] || !*args[cur + 3] ||
++	    !parse_http_policy_number(args[cur], INT64_MAX, &policy.request_timeout_ms) ||
++	    !parse_http_policy_number(args[cur + 1], INT64_MAX, &policy.backend_timeout_ms) ||
++	    !parse_http_policy_number(args[cur + 2], INT_MAX, &retries)) {
++		memprintf(err, "expects request milliseconds, backend milliseconds, retry count and status codes");
++		return ACT_RET_PRS_ERR;
++	}
++	if (policy.request_timeout_ms && policy.request_timeout_ms != UINT64_MAX &&
++	    policy.backend_timeout_ms != UINT64_MAX &&
++	    policy.backend_timeout_ms > policy.request_timeout_ms) {
++		memprintf(err, "backend timeout exceeds request timeout");
++		return ACT_RET_PRS_ERR;
++	}
++
++	policy.retries = retries == UINT64_MAX ? -1 : (int)retries;
++	policy.retry_on = policy.retries > 0 ? PR_RE_CONN_FAILED | PR_RE_TIMEOUT : 0;
++	codes = args[cur + 3];
++	if (strcmp(codes, "none") != 0) {
++		if (policy.retries < 0)
++			goto bad_codes;
++		for (;;) {
++			size_t len = strcspn(codes, ",");
++			unsigned int bit;
++
++			if (len != 3 || codes[0] != '5' || codes[1] != '0')
++				goto bad_codes;
++			switch (codes[2]) {
++			case '0': bit = PR_RE_500; break;
++			case '2': bit = PR_RE_502; break;
++			case '3': bit = PR_RE_503; break;
++			case '4': bit = PR_RE_504; break;
++			default: goto bad_codes;
++			}
++			if (policy.retry_on & bit)
++				goto bad_codes;
++			policy.retry_on |= bit;
++			if (!codes[len])
++				break;
++			codes += len + 1;
++		}
++	}
++	if (policy.retries == 0)
++		policy.retry_on = 0;
++
++	compiled = malloc(sizeof(*compiled));
++	if (!compiled) {
++		memprintf(err, "out of memory");
++		return ACT_RET_PRS_ERR;
++	}
++	*compiled = policy;
++	rule->arg.http_policy = compiled;
++	rule->action = ACT_CUSTOM;
++	rule->action_ptr = http_req_octavia_policy;
++	rule->release_ptr = release_http_req_octavia_policy;
++	*orig_arg = cur + 4;
++	return ACT_RET_PRS_OK;
++
++  bad_codes:
++	memprintf(err, "expects 'none' or a comma-separated list of distinct 500,502,503,504 codes with an explicit retry count");
++	return ACT_RET_PRS_ERR;
++}
++
+ /* This function executes the "capture" action. It executes a fetch expression,
+  * turns the result into a string and puts it in a capture slot. It always
+  * returns 1. If an error occurs the action is cancelled, but the rule
+@@ -2393,6 +2497,7 @@ static struct action_kw_list http_req_actions = {
+ 		{ "del-map",          parse_http_set_map,              KWF_MATCH_PREFIX },
+ 		{ "deny",             parse_http_deny,                 0 },
+ 		{ "disable-l7-retry", parse_http_req_disable_l7_retry, 0 },
++		{ "octavia-http-policy", parse_http_req_octavia_policy, 0 },
+ 		{ "early-hint",       parse_http_set_header,           0 },
+ 		{ "normalize-uri",    parse_http_normalize_uri,        KWF_EXPERIMENTAL },
+ 		{ "redirect",         parse_http_redirect,             0 },
+diff --git a/src/http_ana.c b/src/http_ana.c
+index 9fcb3a9..fe53a20 100644
+--- a/src/http_ana.c
++++ b/src/http_ana.c
+@@ -23,6 +23,7 @@
+ #include <haproxy/connection.h>
+ #include <haproxy/errors.h>
+ #include <haproxy/filters.h>
++#include <haproxy/h2.h>
+ #include <haproxy/http.h>
+ #include <haproxy/http_ana.h>
+ #include <haproxy/http_htx.h>
+@@ -31,6 +32,7 @@
+ #include <haproxy/log.h>
+ #include <haproxy/net_helper.h>
+ #include <haproxy/proxy.h>
++#include <haproxy/queue.h>
+ #include <haproxy/regex.h>
+ #include <haproxy/sc_strm.h>
+ #include <haproxy/server-t.h>
+@@ -1141,9 +1143,11 @@ static __inline int do_l7_retry(struct stream *s, struct stconn *sc)
+ 	struct channel *req, *res;
+ 	int co_data;
+ 
+-	if (s->conn_retries >= s->be->conn_retries)
++	if (s->conn_retries >= http_retry_limit(s) ||
++	    (s->txn->policy && !b_data(&s->txn->l7_buffer)))
+ 		return -1;
+ 	s->conn_retries++;
++	s->txn->attempt_expires_ms = 0;
+ 	if (objt_server(s->target)) {
+ 		if (s->flags & SF_CURR_SESS) {
+ 			s->flags &= ~SF_CURR_SESS;
+@@ -1164,7 +1168,7 @@ static __inline int do_l7_retry(struct stream *s, struct stconn *sc)
+ 	s->conn_err_type = STRM_ET_NONE;
+ 	s->flags &= ~(SF_CONN_EXP | SF_ERR_MASK | SF_FINST_MASK);
+ 	s->conn_exp = TICK_ETERNITY;
+-	stream_choose_redispatch(s);
++	stream_choose_redispatch(s, 0, http_retry_limit(s));
+ 	res->to_forward = 0;
+ 	res->analyse_exp = TICK_ETERNITY;
+ 	res->total = 0;
+@@ -1193,6 +1197,73 @@ static __inline int do_l7_retry(struct stream *s, struct stconn *sc)
+ 	return 0;
+ }
+ 
++int http_policy_expiration(const struct http_txn *txn)
++{
++	uint64_t deadline, now;
++
++	if (!txn || !txn->policy)
++		return TICK_ETERNITY;
++
++	deadline = txn->request_expires_ms;
++	if (txn->attempt_expires_ms && (!deadline || txn->attempt_expires_ms < deadline))
++		deadline = txn->attempt_expires_ms;
++	if (!deadline)
++		return TICK_ETERNITY;
++
++	now = http_policy_now_ms();
++	/* Keep every wakeup well within the signed scheduler tick horizon. */
++	return tick_add(now_ms, deadline <= now ? 1 : MIN(deadline - now, 1U << 29));
++}
++
++static void http_policy_queue_final(struct stream *s)
++{
++	if (s->txn->policy && !s->txn->final_queued) {
++		s->txn->pending_informational = co_data(&s->res);
++		s->txn->final_queued = 1;
++	}
++}
++
++/* Called with a work buffer available and before forwarding any more data. */
++void http_policy_expire(struct stream *s)
++{
++	struct http_txn *txn = s->txn;
++	uint64_t now = http_policy_now_ms();
++
++	if ((!txn->request_expires_ms || txn->request_expires_ms > now) &&
++	    !txn->final_queued && (txn->flags & TX_L7_RETRY) &&
++	    (http_retry_on(s) & PR_RE_TIMEOUT) &&
++	    do_l7_retry(s, s->scb) == 0)
++		return;
++
++	txn->request_expires_ms = 0;
++	txn->attempt_expires_ms = 0;
++	pendconn_free(s);
++	s->scb->flags |= SC_FL_NOLINGER;
++	sc_shutdown(s->scb);
++	if (sc_state_in(s->scb->state, SC_SB_REQ|SC_SB_ASS))
++		s->scb->state = SC_ST_DIS;
++
++	if (!(s->flags & SF_ERR_MASK))
++		s->flags |= SF_ERR_SRVTO;
++	http_set_term_flags(s);
++	stream_inc_http_fail_ctr(s);
++
++	if (txn->final_started) {
++		/* A final status has reached the client mux. Abort without another reply. */
++		http_reply_and_close(s, txn->status, NULL);
++		channel_htx_erase(&s->res, htxbuf(&s->res.buf));
++		s->scf->flags |= SC_FL_NOLINGER;
++		sc_shutdown(s->scf);
++		return;
++	}
++
++	if (txn->final_queued)
++		co_set_data(&s->res, txn->pending_informational);
++	txn->status = 504;
++	txn->http_reply = NULL;
++	http_reply_and_close(s, txn->status, http_error_message(s));
++}
++
+ /* This stream analyser waits for a complete HTTP response. It returns 1 if the
+  * processing can continue on next analysers, or zero if it either needs more
+  * data or wants to immediately abort the response (eg: timeout, error, ...). It
+@@ -1244,6 +1315,18 @@ int http_wait_for_response(struct stream *s, struct channel *rep, int an_bit)
+ 	 */
+   next_one:
+ 	if (unlikely(htx_is_empty(htx) || htx->first == -1)) {
++		const struct se_abort_info *abort = &s->scb->sedesc->abort_info;
++
++		/* REFUSED_STREAM means the server rejected the stream before
++		 * processing it. A route retry can replay a buffered request
++		 * without depending on a list of HTTP response status codes.
++		 */
++		if (http_policy_retry_override(s) && (txn->flags & TX_L7_RETRY) &&
++		    ((abort->info & SE_ABRT_SRC_MASK) >> SE_ABRT_SRC_SHIFT) == SE_ABRT_SRC_MUX_H2 &&
++		    abort->code == H2_ERR_REFUSED_STREAM && !txn->final_queued &&
++		    (co_data(rep) || do_l7_retry(s, s->scb) == 0))
++			return 0;
++
+ 		/* 1: have we encountered a read error ? */
+ 		if (s->scb->flags & SC_FL_ERROR) {
+ 			struct connection *conn = sc_conn(s->scb);
+@@ -1252,7 +1335,7 @@ int http_wait_for_response(struct stream *s, struct channel *rep, int an_bit)
+ 				health_adjust(__objt_server(s->target), HANA_STATUS_HTTP_READ_ERROR);
+ 
+ 			if ((txn->flags & TX_L7_RETRY) &&
+-			    (s->be->retry_type & PR_RE_DISCONNECTED) &&
++			    (http_retry_on(s) & PR_RE_DISCONNECTED) &&
+ 			    (!conn || conn->err_code != CO_ER_SSL_EARLY_FAILED)) {
+ 				if (co_data(rep) || do_l7_retry(s, s->scb) == 0)
+ 					return 0;
+@@ -1260,7 +1343,7 @@ int http_wait_for_response(struct stream *s, struct channel *rep, int an_bit)
+ 
+ 			/* Perform a L7 retry on empty response or because server refuses the early data. */
+ 			if ((txn->flags & TX_L7_RETRY) &&
+-			    (s->be->retry_type & PR_RE_EARLY_ERROR) &&
++			    (http_retry_on(s) & PR_RE_EARLY_ERROR) &&
+ 			    conn && conn->err_code == CO_ER_SSL_EARLY_FAILED &&
+ 			    do_l7_retry(s, s->scb) == 0) {
+ 				DBG_TRACE_DEVEL("leaving on L7 retry",
+@@ -1301,7 +1384,7 @@ int http_wait_for_response(struct stream *s, struct channel *rep, int an_bit)
+ 				health_adjust(__objt_server(s->target), HANA_STATUS_HTTP_READ_TIMEOUT);
+ 
+ 			if ((txn->flags & TX_L7_RETRY) &&
+-			    (s->be->retry_type & PR_RE_TIMEOUT)) {
++			    (http_retry_on(s) & PR_RE_TIMEOUT)) {
+ 				if (co_data(rep) || do_l7_retry(s, s->scb) == 0) {
+ 					DBG_TRACE_DEVEL("leaving on L7 retry",
+ 							STRM_EV_STRM_ANA|STRM_EV_HTTP_ANA, s, txn);
+@@ -1356,7 +1439,7 @@ int http_wait_for_response(struct stream *s, struct channel *rep, int an_bit)
+ 				health_adjust(__objt_server(s->target), HANA_STATUS_HTTP_BROKEN_PIPE);
+ 
+ 			if ((txn->flags & TX_L7_RETRY) &&
+-			    (s->be->retry_type & PR_RE_DISCONNECTED)) {
++			    (http_retry_on(s) & PR_RE_DISCONNECTED)) {
+ 				if (co_data(rep) || do_l7_retry(s, s->scb) == 0) {
+ 					DBG_TRACE_DEVEL("leaving on L7 retry",
+ 							STRM_EV_STRM_ANA|STRM_EV_HTTP_ANA, s, txn);
+@@ -1433,7 +1516,7 @@ int http_wait_for_response(struct stream *s, struct channel *rep, int an_bit)
+ 
+ 	/* Perform a L7 retry because of the status code */
+ 	if ((txn->flags & TX_L7_RETRY) &&
+-	    l7_status_match(s->be, sl->info.res.status) &&
++	    l7_status_match(http_retry_on(s), sl->info.res.status) &&
+ 	    do_l7_retry(s, s->scb) == 0) {
+ 		DBG_TRACE_DEVEL("leaving on L7 retry", STRM_EV_STRM_ANA|STRM_EV_HTTP_ANA, s, txn);
+ 		return 0;
+@@ -1629,6 +1712,8 @@ int http_wait_for_response(struct stream *s, struct channel *rep, int an_bit)
+   end:
+ 	/* Now, L7 buffer is useless, it can be released */
+ 	b_free(&txn->l7_buffer);
++	if (txn->policy)
++		txn->flags &= ~TX_L7_RETRY;
+ 
+ 	/* we want to have the response time before we start processing it */
+ 	s->logs.t_data = ns_to_ms(now_ns - s->logs.accept_ts);
+@@ -1653,7 +1738,7 @@ int http_wait_for_response(struct stream *s, struct channel *rep, int an_bit)
+ 	goto return_prx_cond;
+ 
+   return_bad_res:
+-	if ((s->be->retry_type & PR_RE_JUNK_REQUEST) &&
++	if ((http_retry_on(s) & PR_RE_JUNK_REQUEST) &&
+ 	    (txn->flags & TX_L7_RETRY) &&
+ 	    do_l7_retry(s, s->scb) == 0) {
+ 		DBG_TRACE_DEVEL("leaving on L7 retry",
+@@ -2063,6 +2148,8 @@ int http_response_forward_body(struct stream *s, struct channel *res, int an_bit
+ 	if (msg->msg_state == HTTP_MSG_BODY)
+ 		msg->msg_state = HTTP_MSG_DATA;
+ 
++	http_policy_queue_final(s);
++
+ 	/* in most states, we should abort in case of early close */
+ 	channel_auto_close(res);
+ 
+@@ -4548,6 +4635,7 @@ int http_forward_proxy_resp(struct stream *s, int final)
+ 		if (s->txn->meth == HTTP_METH_HEAD)
+ 			htx_skip_msg_payload(htx);
+ 
++		http_policy_queue_final(s);
+ 		channel_auto_read(req);
+ 		channel_abort(req);
+ 		channel_htx_erase(req, htxbuf(&req->buf));
+@@ -5110,6 +5198,12 @@ struct http_txn *http_create_txn(struct stream *s)
+ 	txn->server_status = -1;
+ 	txn->http_reply = NULL;
+ 	txn->l7_buffer = BUF_NULL;
++	txn->policy = NULL;
++	txn->request_expires_ms = 0;
++	txn->attempt_expires_ms = 0;
++	txn->pending_informational = 0;
++	txn->final_queued = 0;
++	txn->final_started = 0;
+ 	write_u32(txn->cache_hash, 0);
+ 
+ 	txn->cookie_first_date = 0;
+diff --git a/src/stconn.c b/src/stconn.c
+index 32d4c9e..66a4b5e 100644
+--- a/src/stconn.c
++++ b/src/stconn.c
+@@ -1277,10 +1277,14 @@ int sc_conn_recv(struct stconn *sc)
+ {
+ 	struct connection *conn = __sc_conn(sc);
+ 	struct channel *ic = sc_ic(sc);
++	struct stream *s = __sc_strm(sc);
+ 	int ret, max, cur_read = 0;
+ 	int read_poll = MAX_READ_POLL_LOOPS;
+ 	int flags = 0;
+ 
++	if (http_policy_expired(s->txn))
++		return 0;
++
+ 	/* If not established yet, do nothing. */
+ 	if (sc->state != SC_ST_EST)
+ 		return 0;
+@@ -1506,6 +1510,8 @@ int sc_conn_recv(struct stconn *sc)
+ 
+  end_recv:
+ 	ret = (cur_read != 0);
++	if (s->txn && (sc->flags & SC_FL_ISBACK) && sc_ep_test(sc, SE_FL_EOI))
++		s->txn->attempt_expires_ms = 0;
+ 
+ 	/* Report EOI on the channel if it was reached from the mux point of
+ 	 * view. */
+@@ -1589,6 +1595,9 @@ int sc_conn_send(struct stconn *sc)
+ 	int ret;
+ 	int did_send = 0;
+ 
++	if (http_policy_expired(s->txn))
++		return 0;
++
+ 	if (sc_ep_test(sc, SE_FL_ERROR | SE_FL_ERR_PENDING) || sc_is_conn_error(sc)) {
+ 		/* We're probably there because the tasklet was woken up,
+ 		 * but process_stream() ran before, detected there were an
+@@ -1706,6 +1715,16 @@ int sc_conn_send(struct stconn *sc)
+ 
+ 		ret = conn->mux->snd_buf(sc, &oc->buf, co_data(oc), send_flag);
+ 		if (ret > 0) {
++			struct http_txn *txn = s->txn;
++
++			if (txn && txn->policy && !(sc->flags & SC_FL_ISBACK) && txn->final_queued) {
++				if ((unsigned int)ret > txn->pending_informational) {
++					txn->pending_informational = 0;
++					txn->final_started = 1;
++				}
++				else
++					txn->pending_informational -= ret;
++			}
+ 			did_send = 1;
+ 			c_rew(oc, ret);
+ 			c_realign_if_empty(oc);
+@@ -1721,6 +1740,29 @@ int sc_conn_send(struct stconn *sc)
+ 	}
+ 
+  end:
++	if (s->txn && s->txn->policy) {
++		struct http_txn *txn = s->txn;
++		uint64_t timeout = txn->policy->backend_timeout_ms;
++
++		if (sc->flags & SC_FL_ISBACK) {
++			if (did_send && !(oc->flags & CF_WROTE_DATA) && timeout && timeout != UINT64_MAX) {
++				txn->attempt_expires_ms = http_policy_now_ms() + timeout;
++				task_wakeup(s->task, TASK_WOKEN_MSG);
++			}
++		}
++		else if (txn->final_started && !c_data(oc) && !sc_ep_have_ff_data(sc)) {
++			if (sco->flags & SC_FL_EOI)
++				txn->request_expires_ms = 0;
++
++			/* An upgraded connection stops being an HTTP transaction. */
++			if (txn->status == 101 ||
++			    (txn->meth == HTTP_METH_CONNECT && txn->status >= 200 && txn->status < 300)) {
++				txn->request_expires_ms = 0;
++				txn->attempt_expires_ms = 0;
++			}
++		}
++	}
++
+ 	if (did_send) {
+ 		oc->flags |= CF_WRITE_EVENT | CF_WROTE_DATA;
+ 		if (sc->state == SC_ST_CON)
+diff --git a/src/stream.c b/src/stream.c
+index 46a3c59..55c5bdf 100644
+--- a/src/stream.c
++++ b/src/stream.c
+@@ -1808,6 +1808,7 @@ struct task *process_stream(struct task *t, void *context, unsigned int state)
+ 		 */
+ 		if (!((scf->flags | scb->flags) & (SC_FL_ERROR|SC_FL_EOS|SC_FL_ABRT_DONE|SC_FL_SHUT_DONE)) &&
+ 		    !((req->flags | res->flags) & (CF_READ_EVENT|CF_READ_TIMEOUT|CF_WRITE_EVENT|CF_WRITE_TIMEOUT)) &&
++		    !http_policy_expired(s->txn) &&
+ 		    !(s->flags & SF_CONN_EXP) &&
+ 		    ((s->pending_events & TASK_WOKEN_ANY) == TASK_WOKEN_TIMER)) {
+ 			scf->flags &= ~SC_FL_DONT_WAKE;
+@@ -1825,6 +1826,9 @@ struct task *process_stream(struct task *t, void *context, unsigned int state)
+ 		goto leave;
+ 	}
+ 
++	if (http_policy_expired(s->txn))
++		http_policy_expire(s);
++
+ 	/* 1b: check for low-level errors reported at the stream connector.
+ 	 * First we check if it's a retryable error (in which case we don't
+ 	 * want to tell the buffer). Otherwise we report the error one level
+@@ -2308,7 +2312,7 @@ struct task *process_stream(struct task *t, void *context, unsigned int state)
+ 				 */
+ 				scb->state = SC_ST_REQ; /* new connection requested */
+ 				s->conn_retries = 0;
+-				if ((s->be->retry_type &~ PR_RE_CONN_FAILED) &&
++				if ((http_retry_on(s) & ~PR_RE_CONN_FAILED) &&
+ 				    (s->be->mode == PR_MODE_HTTP) &&
+ 				    !(s->txn->flags & TX_D_L7_RETRY))
+ 					s->txn->flags |= TX_L7_RETRY;
+@@ -2562,6 +2566,7 @@ struct task *process_stream(struct task *t, void *context, unsigned int state)
+ 		t->expire = tick_first(t->expire, req->analyse_exp);
+ 		t->expire = tick_first(t->expire, res->analyse_exp);
+ 		t->expire = tick_first(t->expire, s->conn_exp);
++		t->expire = tick_first(t->expire, http_policy_expiration(s->txn));
+ 
+ 		if (unlikely(tick_is_expired(t->expire, now_ms))) {
+ 			/* Some events prevented the timeouts to be handled but nothing evolved.

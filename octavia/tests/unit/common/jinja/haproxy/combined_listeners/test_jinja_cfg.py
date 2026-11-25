@@ -1969,6 +1969,65 @@ class TestHaproxyCfg(base.TestCase):
             self.assertIn(f'http-request {action} {guard}', backends)
         self.assertEqual(3, backends.count(guard))
 
+    def test_http_request_policy_in_selected_forwarding_backends(self):
+        amphora = sample_configs_combined.sample_amphora_tuple()
+        capability = constants.GATEWAY_CAPABILITY_HTTP_REQUEST_POLICY
+        for protocol in ('HTTP', 'TERMINATED_HTTPS'):
+            with self.subTest(protocol=protocol):
+                listener = sample_configs_combined.sample_listener_tuple(
+                    l7=True, proto=protocol)
+                ordinary = listener.l7policies[0]
+                pool = ordinary.redirect_pool
+                direct = SimpleNamespace(**ordinary._replace(
+                    id='with-deadline',
+                    l7rules=[sample_configs_combined.sample_l7rule_tuple(
+                        'deadline-path', value='/deadline')],
+                )._asdict(),
+                    http_request_policy={'request_timeout_ms': 0})
+                weighted = SimpleNamespace(**ordinary._replace(
+                    id='with-retries',
+                    action=constants.L7POLICY_ACTION_WEIGHTED_TARGETS,
+                    redirect_pool=None,
+                    l7rules=[sample_configs_combined.sample_l7rule_tuple(
+                        'retries-path', value='/retries')],
+                    targets=[{'weight': 2, 'pool_id': pool.id},
+                             {'weight': 1,
+                              'fixed_response': {'status_code': 500}}]
+                )._asdict(), http_request_policy={
+                    'backend_request_timeout_ms': 500,
+                    'retry': {'codes': [500, 504]}})
+                listener = listener._replace(
+                    l7policies=[direct, ordinary, weighted])
+                version = ['3', '0', '19']
+                self.assertRaises(
+                    driver_except.AmpVersionUnsupported,
+                    self.jinja_cfg.build_config, amphora, [listener], None,
+                    version, {})
+                config = self.jinja_cfg.build_config(
+                    amphora, [listener], None, version, {capability: True})
+                frontend, *backends = config.split('\nbackend ')
+                self.assertIn(
+                    'set-var(txn.octavia_l7_policy) str(with-deadline)',
+                    frontend)
+                self.assertIn(
+                    'set-var(txn.octavia_weighted_draw) rand(3)', frontend)
+                rules = {
+                    backend.splitlines()[0]: [
+                        line.strip() for line in backend.splitlines()
+                        if 'http-request octavia-http-policy' in line]
+                    for backend in backends
+                }
+                self.assertEqual({
+                    f'{pool.id}:{listener.id}': [
+                        'http-request octavia-http-policy 0 default default '
+                        'none if { var(txn.octavia_l7_policy) -m str '
+                        'with-deadline }',
+                        'http-request octavia-http-policy default 500 1 '
+                        '500,504 if { var(txn.octavia_l7_policy) -m str '
+                        'with-retries }',
+                    ],
+                }, {name: lines for name, lines in rules.items() if lines})
+
     def test_request_url_rewrite_runs_only_in_selected_backend(self):
         amp = sample_configs_combined.sample_amphora_tuple()
         listener = sample_configs_combined.sample_listener_tuple(l7=True)

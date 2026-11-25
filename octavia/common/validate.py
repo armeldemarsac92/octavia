@@ -709,6 +709,49 @@ def _valid_cors_origin(origin):
     return port is None or 1 <= int(port) <= constants.MAX_PORT_NUMBER
 
 
+def http_request_policy(policy):
+    """Validate per-route budgets and retries without coercing JSON values."""
+    durations = ('request_timeout_ms', 'backend_request_timeout_ms')
+    if not isinstance(policy, dict) or policy.keys() - {*durations, 'retry'}:
+        raise exceptions.InvalidL7PolicyArgs(
+            msg=_('Invalid http_request_policy fields.'))
+
+    maximum = constants.HTTP_REQUEST_POLICY_DURATION_MAX
+    for field in durations:
+        if field in policy:
+            value = policy[field]
+            if type(value) is not int or not 0 <= value <= maximum:
+                raise exceptions.InvalidL7PolicyArgs(msg=_(
+                    'http_request_policy.%s must be a nonnegative '
+                    '64-bit integer.') % field)
+    request = policy.get('request_timeout_ms', 0)
+    backend = policy.get('backend_request_timeout_ms', 0)
+    if request and backend > request:
+        raise exceptions.InvalidL7PolicyArgs(msg=_(
+            'backend_request_timeout_ms cannot exceed request_timeout_ms.'))
+
+    if 'retry' in policy:
+        retry = policy['retry']
+        if not isinstance(retry, dict) or retry.keys() - {'attempts', 'codes'}:
+            raise exceptions.InvalidL7PolicyArgs(
+                msg=_('Invalid http_request_policy.retry fields.'))
+        attempts = retry.get('attempts', 1)
+        if (type(attempts) is not int or
+                not 0 <= attempts <= constants.HTTP_REQUEST_POLICY_RETRY_MAX):
+            raise exceptions.InvalidL7PolicyArgs(msg=_(
+                'http_request_policy.retry.attempts must be an integer '
+                'from 0 to 2147483647.'))
+        codes = retry.get('codes', [])
+        allowed_codes = constants.HTTP_REQUEST_POLICY_RETRY_CODES
+        if (not isinstance(codes, list) or len(codes) > len(allowed_codes) or
+                any(type(code) is not int or code not in allowed_codes
+                    for code in codes) or len(set(codes)) != len(codes)):
+            raise exceptions.InvalidL7PolicyArgs(msg=_(
+                'http_request_policy.retry.codes must be an array of '
+                'distinct codes from 500, 502, 503 and 504.'))
+    return policy
+
+
 def http_request_cors(cors):
     """Validate the Gateway API v1.7.0 CORS object without coercing values."""
     if (not isinstance(cors, dict) or
@@ -835,6 +878,14 @@ def validate_http_request_url_rewrite_protocol(protocol):
         raise exceptions.ValidationException(
             detail=_('HTTP request URL rewrites require an HTTP or '
                      'TERMINATED_HTTPS listener.'))
+
+
+def validate_http_request_policy_protocol(protocol):
+    if protocol not in (constants.PROTOCOL_HTTP,
+                        constants.PROTOCOL_TERMINATED_HTTPS):
+        raise exceptions.ValidationException(detail=_(
+            'HTTP request policies require an HTTP or TERMINATED_HTTPS '
+            'listener.'))
 
 
 def validate_http_request_cors_protocol(protocol):
@@ -1018,6 +1069,18 @@ def sanitize_l7policy_api_args(l7policy, create=False, old_policy=None):
                       'WEIGHTED_TARGETS.'))
         if 'request_url_rewrite' in l7policy:
             l7policy['request_url_rewrite'] = http_request_url_rewrite(rewrite)
+    previous_request_policy = getattr(
+        old_policy, 'http_request_policy', None)
+    request_policy = l7policy.get(
+        'http_request_policy', previous_request_policy)
+    if request_policy is not None:
+        if l7policy.get('action', old_action) not in forwarding_actions:
+            raise exceptions.InvalidL7PolicyArgs(
+                msg=_('http_request_policy requires REDIRECT_TO_POOL or '
+                      'WEIGHTED_TARGETS.'))
+        if 'http_request_policy' in l7policy:
+            l7policy['http_request_policy'] = http_request_policy(
+                request_policy)
     cors = l7policy.get('request_cors',
                         getattr(old_policy, 'request_cors', None))
     if cors is not None:

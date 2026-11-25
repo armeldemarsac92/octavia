@@ -16,8 +16,8 @@ Build the binary on the target image distribution and architecture::
         /path/to/haproxy-3.0.19.tar.gz /path/to/haproxy
 
 The script checks the HAProxy 3.0.19 tarball and each patch by SHA-256. It
-applies the strict DNS, required HTTP/2 ALPN and explicit SAN patches, in that
-order, with zero fuzz.
+applies the strict DNS, required HTTP/2 ALPN, explicit SAN and HTTP policy
+patches, in that order, with zero fuzz.
 
 Set ``DIB_OCTAVIA_HAPROXY_BINARY`` to the absolute path of the resulting binary
 when running Octavia's ``diskimage-create.sh``. The element checks the binary in
@@ -48,3 +48,34 @@ TLS connections and TLS health checks. Once the combined binary is installed
 across the fleet, enable
 ``[api_settings] enabled_backend_tls_subject_alt_names_providers`` along with
 ``enabled_backend_tls_hostname_providers``.
+
+HTTP request budgets and retries
+================================
+
+The combined binary exposes this HTTP request action for a matched rule::
+
+    http-request octavia-http-policy <request-ms> <backend-ms> <retries> <codes> if ...
+
+Each of the first three arguments accepts a decimal literal or ``default``.
+Duration literals are signed 64-bit milliseconds. Zero explicitly disables a
+deadline. A default duration leaves HAProxy's normal inactivity timers in
+place without adding an absolute deadline. The request deadline begins when the
+action selects the policy and covers backend queuing, connection setup and all
+attempts. The backend deadline applies from the first request bytes handed to
+the backend protocol through the end of its response.
+
+The retry count is the maximum number of additional attempts. A default count
+retains HAProxy's backend retry policy and requires ``none`` as the fourth
+argument. Use ``none`` when no HTTP response codes should trigger a retry.
+The other accepted values are comma-separated selections of 500, 502, 503 and
+504. A positive retry count also covers connection failures before sending, an
+HTTP/2 REFUSED_STREAM and expiration of an attempt before final headers. A
+request deadline takes precedence over further attempts. A zero count disables
+retries.
+
+Replaying an already-sent request requires a complete request in HAProxy's
+replay buffer. This also applies to a small body if its last bytes arrive after
+sending starts.
+After final response bytes reach the client protocol, expiration interrupts that
+response without sending another status. A successful HTTP upgrade ends the
+HTTP budget when the handshake response is handed to the client protocol.
