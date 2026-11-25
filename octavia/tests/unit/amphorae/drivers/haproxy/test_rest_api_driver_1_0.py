@@ -704,6 +704,63 @@ class TestHaproxyAmphoraLoadBalancerDriverTest(base.TestCase):
         client.upload_udp_config.assert_not_called()
         client.reload_listener.assert_not_called()
 
+    def test_udp_retirement_rejects_incomplete_allocated_peers(self):
+        graph, listener = self._guarded_udp_graph()
+        listener.default_pool.provisioning_status = constants.PENDING_DELETE
+        for removed_peer in range(2):
+            graph.amphorae.pop()
+            self.assertRaises(driver_except.ListenerProvisioningError,
+                              self.driver.update_udp_pool_listeners, graph,
+                              [listener.id])
+            self.assertRaises(driver_except.ListenerProvisioningError,
+                              self.driver.delete, listener)
+        self.assertFalse(self.driver.clients[API_VERSION].mock_calls)
+
+    def test_delete_managed_listener_needs_proof_from_each_peer(self):
+        # ListenerRepository.get supplies a DataModel with the default pool
+        # still attached, including on the PENDING_DELETE path.
+        graph, listener = self._guarded_udp_graph()
+        lb = data_models.LoadBalancer(
+            vip=graph.vip, amphorae=graph.amphorae,
+            enabled=True, topology=graph.topology)
+        pool = data_models.Pool(
+            protocol=constants.PROTOCOL_UDP,
+            lb_algorithm=constants.LB_ALGORITHM_ROUND_ROBIN,
+            provisioning_status=constants.ACTIVE, enabled=True,
+            udp_packet_drop={'numerator': 1, 'denominator': 4})
+        target = data_models.Listener(
+            id=listener.id, load_balancer=lb, default_pool=pool,
+            protocol=constants.PROTOCOL_UDP, protocol_port=18053,
+            provisioning_status=constants.PENDING_DELETE, enabled=True)
+        sibling = data_models.Listener(id='sibling', load_balancer=lb,
+                                       protocol=constants.PROTOCOL_UDP,
+                                       protocol_port=18054)
+        lb.listeners = [target, sibling]
+        client = self.driver.clients[API_VERSION]
+        unavailable = exc.NotFound()
+        client.check_udp_guard.side_effect = [unavailable, None]
+        self.assertRaises(driver_except.AmpDriverNotImplementedError,
+                          self.driver.delete, target)
+        legacy, current = lb.amphorae
+        client.close_legacy_udp_listener.assert_called_once_with(
+            legacy, target.id, timeout_dict=None)
+        self.assertEqual((current, target.id),
+                         client.stage_udp_guard.call_args.args[:2])
+        guard = client.stage_udp_guard.call_args.args[3]
+        self.assertTrue(guard['retiring'])
+        self.assertFalse(guard['has_service'])
+        client.delete_guarded_udp_listener.assert_called_once_with(
+            current, target.id)
+        client.delete_listener.assert_not_called()
+        client.activate_udp_guard.assert_not_called()
+        client.reload_listener.assert_not_called()
+
+        client.reset_mock()
+        client.check_udp_guard.side_effect = None
+        expected = tuple((amp.id, amp.role) for amp in lb.amphorae)
+        self.assertEqual(expected, self.driver.delete(target))
+        self.assertEqual(2, client.delete_guarded_udp_listener.call_count)
+
     def test_udp_stock_pool_retirement_only_reloads_target(self):
         graph, listener = self._guarded_udp_graph()
         listener.default_pool.udp_packet_drop = None
@@ -1871,6 +1928,22 @@ class TestAmphoraAPIClientTest(base.TestCase):
                           self.driver.activate_udp_guard,
                           self.amp, FAKE_UUID_1)
         self.driver.activate_udp_guard(self.amp, FAKE_UUID_1)
+
+    @requests_mock.mock()
+    def test_guarded_udp_delete_requires_kernel_receipt(self, router):
+        delete_url = f'{self.base_url_ver}/listeners/{FAKE_UUID_1}'
+        router.delete(delete_url, [
+            {'status_code': 404},
+            {'status_code': 200},
+            {'status_code': 200, 'headers': {'X-Octavia-UDP-Guard': '1'}},
+        ])
+        self.assertRaises(exc.NotFound,
+                          self.driver.delete_guarded_udp_listener,
+                          self.amp, FAKE_UUID_1)
+        self.assertRaises(driver_except.ListenerProvisioningError,
+                          self.driver.delete_guarded_udp_listener,
+                          self.amp, FAKE_UUID_1)
+        self.driver.delete_guarded_udp_listener(self.amp, FAKE_UUID_1)
 
     @requests_mock.mock()
     def test_legacy_udp_close_reobserves_only_the_target(self, router):

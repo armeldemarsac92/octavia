@@ -515,6 +515,28 @@ class GuardedKeepalivedLvsTestCase(base.TestCase):
                          f'delete table ip {self.guard.table}\n',
                          self._last_rules())
 
+    def test_compatible_listener_delete_reestablishes_proof_on_retry(self):
+        self.candidate['guard'].update(has_service=False, retiring=True,
+                                       destinations=[])
+        self.ipvs.return_value = self.IPVS_HEADER + 'UDP C000021E:4686 wrr\n'
+        for attempt in range(2):
+            response = self.client.put(self.listener_url + '/udp_guard',
+                                       json=self.candidate)
+            self.assertEqual(200, response.status_code)
+            response = self.client.delete(self.listener_url)
+            self.assertEqual(200, response.status_code)
+            self.assertEqual('1', response.headers[
+                udp_guard.CONFIRMATION_HEADER])
+            self.assertFalse(self.guard.path.exists())
+            self.assertFalse(os.path.exists(
+                util.keepalived_lvs_cfg_path(self.listener_id)))
+            self.assertEqual(f'table ip {self.guard.table} {{}}\n'
+                             f'delete table ip {self.guard.table}\n',
+                             self._last_rules())
+        self.assertEqual(2, self.ipvs.call_count)
+        self.assertNotIn(mock.call(consts.AMP_ACTION_RESTART, mock.ANY),
+                         self.systemctl.call_args_list)
+
     def test_listener_delete_removes_guard_and_blocks_legacy_upload(self):
         response = self.client.put(self.listener_url + '/udp_guard',
                                    json=self.candidate)

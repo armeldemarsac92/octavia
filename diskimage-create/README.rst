@@ -282,12 +282,13 @@ DIB_OCTAVIA_AMP_USE_NFTABLES
 Prepare each Amphora for managed UDP with a guard-capable image before
 configuring the pool. Upgrades must install the matching agent on each peer
 before the controller starts requiring its guard acknowledgement. To retire
-such a pool, keep its guard-capable agent installed until retirement completes.
+such a pool or delete its listener, keep the guard-capable agent installed on
+each peer until withdrawal completes.
 On an older agent, the controller stops and deletes only the target listener
 and re-reads the agent's listener inventory. Absence from that inventory proves
-only that the agent no longer reports the listener. Pool retirement remains in
-``ERROR`` until withdrawal from IPVS and nftables can be verified. Recover or
-replace the old Amphora with a guard-capable image, then retry pool deletion.
+only that the agent no longer reports the listener. The withdrawal remains in
+``ERROR`` until it can be verified in IPVS and nftables. Recover or replace the
+old Amphora with a guard-capable image, then retry the deletion.
 Use the affected VIP and UDP port to inspect residual configuration.
 
 Using distribution packages for amphora agent
