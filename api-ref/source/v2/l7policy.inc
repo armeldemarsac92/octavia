@@ -140,6 +140,7 @@ Response Parameters
    - request_url_rewrite: l7policy-request-url-rewrite
    - request_cors: l7policy-request-cors
    - http_request_policy: l7policy-http-request-policy
+   - request_mirrors: l7policy-request-mirrors
    - redirect_url: l7policy-redirect-url
    - rules: l7policy-rule-ids
    - tags: tags
@@ -219,6 +220,16 @@ The regional ``http_request_policy_v1`` provider capability enables
 ``REDIRECT_TO_POOL`` or ``WEIGHTED_TARGETS``. See the provider Gateway API
 capabilities for the timeout and retry semantics.
 
+The regional ``http_request_mirror_v1`` capability enables
+``request_mirrors`` for ``REDIRECT_TO_POOL``, ``WEIGHTED_TARGETS`` and
+``FIXED_RESPONSE`` policies on HTTP and ``TERMINATED_HTTPS`` listeners.
+A weighted pool target can also specify its own ``request_mirrors``.
+Its copies run after the policy-level copies and only for the selected
+target. Replacing ``targets`` replaces each target's mirror list.
+When adding mirrors to a ``FIXED_RESPONSE`` policy, the policy can also
+configure request header operations and URL rewrites for the copies.
+
+
 L7 policies with ``action`` of ``REJECT`` will return a ``Forbidden (403)``
 response code to the requester.
 
@@ -270,6 +281,7 @@ Request
    - request_url_rewrite: l7policy-request-url-rewrite
    - request_cors: l7policy-request-cors
    - http_request_policy: l7policy-http-request-policy
+   - request_mirrors: l7policy-request-mirrors
    - redirect_url: l7policy-redirect-url-optional
    - rules: l7policy-initial-rules
    - tags: tags-optional
@@ -310,6 +322,7 @@ Response Parameters
    - request_url_rewrite: l7policy-request-url-rewrite
    - request_cors: l7policy-request-cors
    - http_request_policy: l7policy-http-request-policy
+   - request_mirrors: l7policy-request-mirrors
    - redirect_url: l7policy-redirect-url
    - rules: l7policy-rule-ids
    - tags: tags
@@ -383,6 +396,7 @@ Response Parameters
    - request_url_rewrite: l7policy-request-url-rewrite
    - request_cors: l7policy-request-cors
    - http_request_policy: l7policy-http-request-policy
+   - request_mirrors: l7policy-request-mirrors
    - redirect_url: l7policy-redirect-url
    - rules: l7policy-rule-ids
    - tags: tags
@@ -446,6 +460,7 @@ Request
    - request_url_rewrite: l7policy-request-url-rewrite
    - request_cors: l7policy-request-cors
    - http_request_policy: l7policy-http-request-policy
+   - request_mirrors: l7policy-request-mirrors
    - redirect_url: l7policy-redirect-url-optional
    - tags: tags-optional
 
@@ -485,6 +500,7 @@ Response Parameters
    - request_url_rewrite: l7policy-request-url-rewrite
    - request_cors: l7policy-request-cors
    - http_request_policy: l7policy-http-request-policy
+   - request_mirrors: l7policy-request-mirrors
    - redirect_url: l7policy-redirect-url
    - rules: l7policy-rule-ids
    - tags: tags

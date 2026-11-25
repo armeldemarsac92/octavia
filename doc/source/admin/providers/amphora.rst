@@ -233,6 +233,31 @@ expanding or reactivating stored ones. Existing policies continue to run
 on upgraded Amphorae. Clear them with ``http_request_policy: null`` before
 rolling back Octavia, octavia-lib or Amphora images.
 
+HTTP request mirroring
+----------------------
+
+Apply migration ``b22da9155c2b`` and upgrade the regional API, octavia-lib,
+workers and Amphora agents. Qualify the eligible Amphora fleet before
+enabling the provider on each regional API replica.
+
+.. code-block:: ini
+
+   [api_settings]
+   enabled_http_request_mirror_providers = amphora
+
+Discovery advertises ``http_request_mirror_v1`` when regional enrollment,
+the provider and the installed octavia-lib support it. Amphora also checks
+the capability reported by the agent for the HAProxy build. Private HTTP
+delivery sockets are managed inside Amphora and use the target pool's
+members, balancing algorithm, health checks and transport profile.
+Copies use independent connection and I/O timeouts and a single attempt.
+They use pool balancing without primary session persistence.
+
+After withdrawing the regional capability, existing mirrors can be removed
+from prepared or active policies. Clear them before rolling back to an
+Octavia, octavia-lib or Amphora build that predates the capability. A
+destination pool remains in use until every mirror reference is removed.
+
 Full-value exact request header matching
 ----------------------------------------
 

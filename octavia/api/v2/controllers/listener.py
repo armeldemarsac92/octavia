@@ -139,19 +139,27 @@ def validate_policy_options_on_create(
                 policy.get('request_url_rewrite') is None and
                 policy.get('request_cors') is None and
                 policy.get('http_request_policy') is None and
+                not policy.get('request_mirrors') and
                 policy.get('targets') is None and
                 'request_header_operations' not in policy and
                 'response_header_operations' not in policy):
             continue
         checked = validate.sanitize_l7policy_api_args(
             policy.copy(), create=True)
+        if creating_load_balancer and validate.request_mirror_pool_ids(
+                checked.get('request_mirrors'), checked.get('targets')):
+            raise exceptions.ValidationException(
+                detail=_('Create request mirrors from the L7 policy '
+                         'endpoint after creating the load balancer and '
+                         'pools.'))
         driver_utils.require_gateway_policy_action(
             driver, checked['action'], protocol,
             tcp_tls_termination=tcp_tls_termination,
             request_url_rewrite=checked.get('request_url_rewrite'),
             targets=checked.get('targets'),
             request_cors=checked.get('request_cors'),
-            http_request_policy=checked.get('http_request_policy'))
+            http_request_policy=checked.get('http_request_policy'),
+            request_mirrors=checked.get('request_mirrors'))
         l7policy.validate_policy_headers(checked, protocol, driver)
         if not creating_load_balancer:
             raise exceptions.ValidationException(

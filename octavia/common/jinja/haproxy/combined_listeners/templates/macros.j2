@@ -292,7 +292,7 @@ bind {% if local_socket %}{{ local_socket }} accept-proxy{% else %}{{ lb_vip_add
 backend {{ fixed_response_backend_name(constants, listener, response_id) }}
     mode http
     {% set cors = listener.get('cors_by_backend', {}).get(('fixed', response_id), []) %}
-{{ cors_request(cors) }}    http-request return status {{ status_code }}
+{{ cors_request(cors) }}{{ mirrored_rule_requests(listener, 'fixed', response_id) }}    http-request return status {{ status_code }}
 {{ policy_response_headers(listener, 'fixed', response_id) -}}
 {{ cors_response(cors) -}}
 
@@ -325,6 +325,7 @@ backend {{ pool.id }}:{{ listener.id }}
     timeout server {{ listener.timeout_member_data }}
     {% set cors = listener.get('cors_by_backend', {}).get(('pool', pool.id), []) %}
 {{ cors_request(cors) -}}
+{{ mirrored_rule_requests(listener, 'pool', pool.id) -}}
 {{ policy_response_headers(listener, 'pool', pool.id) -}}
 {{ cors_response(cors) -}}
 
@@ -344,6 +345,15 @@ backend {{ pool.id }}:{{ listener.id }}
 
 {% macro selected_policy_match_macro(policy_id) -%}
     { var(txn.octavia_l7_policy) -m str {{ policy_id }} }
+{%- endmacro %}
+
+
+{% macro mirrored_rule_requests(listener, backend_type, backend_id) -%}
+    {% for policy_id, operations in listener.get('mirrored_rules_by_backend', {}).get((backend_type, backend_id), []) %}
+        {% for operation in operations %}
+    http-request {{ operation|safe }} if {{ selected_policy_match_macro(policy_id) }}
+        {% endfor %}
+    {% endfor %}
 {%- endmacro %}
 
 
@@ -459,6 +469,9 @@ frontend {{ listener.id }}
     {{ bind_macro(constants, lib_consts, listener, add_vip)|trim() }}
     {% endfor %}
     mode {{ listener.protocol_mode }}
+    {% if listener.request_mirror_pools is defined %}
+    filter octavia-mirror /run/octavia/mirror
+    {% endif %}
     {% if listener.inspect_tls_sni is defined %}
     tcp-request inspect-delay {{ listener.timeout_tcp_inspect }}
     tcp-request content accept if { req.ssl_hello_type 1 }
@@ -473,6 +486,7 @@ frontend {{ listener.id }}
                            listener.response_header_operations_by_backend is defined or
                            listener.request_url_rewrites_by_pool is defined or
                            listener.http_request_policies_by_pool is defined or
+                           listener.request_mirror_pools is defined or
                            listener.cors_by_backend is defined %}
     {% if select_policy or structured %}
         {% for l7policy in policies %}
@@ -598,7 +612,7 @@ backend {{ reject }}
 {% endmacro %}
 
 
-{% macro member_macro(constants, lib_consts, pool, member) %}
+{% macro member_macro(constants, lib_consts, pool, member, persistence=True) %}
     {% if pool.health_monitor and pool.health_monitor.enabled %}
         {% if member.monitor_address %}
             {% set monitor_addr_opt = " addr %s"|format(member.monitor_address) %}
@@ -632,7 +646,7 @@ backend {{ reject }}
     {% else %}
         {% set hm_opt = "" %}
     {% endif %}
-    {% if (pool.session_persistence.type ==
+    {% if persistence and (pool.session_persistence.type ==
            constants.SESSION_PERSISTENCE_HTTP_COOKIE) %}
         {% set persistence_opt = " cookie %s"|format(member.id) %}
     {% else %}
@@ -741,6 +755,58 @@ backend {{ reject }}
 {% endmacro %}
 
 
+{% macro pool_health_monitor(constants, pool, state_file) %}
+    {% if pool.health_monitor and pool.health_monitor.enabled %}
+    {% if state_file %}
+    load-server-state-from-file global
+    {% endif %}
+    timeout check {{ pool.health_monitor.timeout }}s
+        {% if (pool.health_monitor.type ==
+               constants.HEALTH_MONITOR_HTTP or pool.health_monitor.type ==
+               constants.HEALTH_MONITOR_HTTPS) %}
+            {% if pool.backend_tls_require_h2 %}
+    option httpchk
+    http-check send meth {{ pool.health_monitor.http_method }} uri {{ pool.health_monitor.url_path }} ver HTTP/2 hdr Host {{ pool.health_monitor.domain_name or pool.backend_tls_hostname }}
+            {% elif pool.health_monitor.http_version %}
+    option httpchk {{ pool.health_monitor.http_method }} {{ pool.health_monitor.url_path }} HTTP/{{ pool.health_monitor.http_version }}
+                {% if (pool.health_monitor.http_version == 1.1 and
+                       pool.health_monitor.domain_name) %}
+    http-check send hdr Host {{ pool.health_monitor.domain_name }}
+                {% endif %}
+            {% else %}
+    option httpchk {{ pool.health_monitor.http_method }} {{ pool.health_monitor.url_path }}
+            {% endif %}
+    http-check expect rstatus {{ pool.health_monitor.expected_codes }}
+        {% endif %}
+        {% if pool.health_monitor.type == constants.HEALTH_MONITOR_PING %}
+    option external-check
+    external-check command /var/lib/octavia/ping-wrapper.sh
+        {% endif %}
+    {% endif %}
+{% endmacro %}
+
+
+{% macro mirror_delivery_macro(constants, lib_consts, pool, state_file) %}
+listen octavia-mirror-{{ pool.id }}
+    bind /run/octavia/mirror/{{ pool.id }}.sock user nobody mode 600 octavia-mirror-socket
+    mode http
+    no log
+    retries 0
+    no option redispatch
+    http-request disable-l7-retry
+    option abortonclose
+    timeout client 5s
+    timeout connect 1s
+    timeout server 5s
+    balance {{ pool.lb_algorithm }}
+    option allbackups
+{{ pool_health_monitor(constants, pool, state_file) -}}
+    {% for member in pool.members %}
+        {{- member_macro(constants, lib_consts, pool, member, persistence=False) -}}
+    {% endfor %}
+{% endmacro %}
+
+
 {% macro backend_macro(constants, lib_consts, listener, pool, loadbalancer, state_file) %}
 backend {{ pool.id }}:{{ listener.id }}
     {% if pool.proxy_protocol is not none %}
@@ -762,6 +828,7 @@ backend {{ pool.id }}:{{ listener.id }}
     {% for policy_id, args in listener.get('http_request_policies_by_pool', {}).get(pool.id, []) %}
     http-request octavia-http-policy {{ args|join(' ') }} if {{ selected_policy_match_macro(policy_id) }}
     {% endfor %}
+{{ mirrored_rule_requests(listener, 'pool', pool.id) -}}
     {% for policy_id, operations in listener.get('request_header_operations_by_pool', {}).get(pool.id, []) %}
         {% for operation in operations %}
     http-request {{ operation|safe }} if {{ selected_policy_match_macro(policy_id) }}
@@ -804,33 +871,7 @@ backend {{ pool.id }}:{{ listener.id }}
     cookie SRV insert indirect nocache
         {% endif %}
     {% endif %}
-    {% if pool.health_monitor and pool.health_monitor.enabled %}
-    {% if state_file %}
-    load-server-state-from-file global
-    {% endif %}
-    timeout check {{ pool.health_monitor.timeout }}s
-        {% if (pool.health_monitor.type ==
-               constants.HEALTH_MONITOR_HTTP or pool.health_monitor.type ==
-               constants.HEALTH_MONITOR_HTTPS) %}
-            {% if pool.backend_tls_require_h2 %}
-    option httpchk
-    http-check send meth {{ pool.health_monitor.http_method }} uri {{ pool.health_monitor.url_path }} ver HTTP/2 hdr Host {{ pool.health_monitor.domain_name or pool.backend_tls_hostname }}
-            {% elif pool.health_monitor.http_version %}
-    option httpchk {{ pool.health_monitor.http_method }} {{ pool.health_monitor.url_path }} HTTP/{{ pool.health_monitor.http_version }}
-                {% if (pool.health_monitor.http_version == 1.1 and
-                       pool.health_monitor.domain_name) %}
-    http-check send hdr Host {{ pool.health_monitor.domain_name }}
-                {% endif %}
-            {% else %}
-    option httpchk {{ pool.health_monitor.http_method }} {{ pool.health_monitor.url_path }}
-            {% endif %}
-    http-check expect rstatus {{ pool.health_monitor.expected_codes }}
-        {% endif %}
-        {% if pool.health_monitor.type == constants.HEALTH_MONITOR_PING %}
-    option external-check
-    external-check command /var/lib/octavia/ping-wrapper.sh
-        {% endif %}
-    {% endif %}
+{{ pool_health_monitor(constants, pool, state_file) -}}
     {% if pool.protocol.lower() == constants.PROTOCOL_HTTP.lower() %}
         {% if listener.insert_headers.get('X-Forwarded-For',
                                           'False').lower() == 'true' %}

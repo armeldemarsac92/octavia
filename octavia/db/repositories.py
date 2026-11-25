@@ -49,6 +49,7 @@ from octavia.common import validate
 from octavia.db import api as db_api
 from octavia.db import base_models
 from octavia.db import models
+from octavia.i18n import _
 
 CONF = cfg.CONF
 
@@ -1159,6 +1160,10 @@ class PoolRepository(BaseRepository):
              subqueryload(models.L7PolicyTarget.l7policy).options(
                  subqueryload(models.L7Policy.l7rules),
                  subqueryload(models.L7Policy.listener))),
+            (subqueryload(models.Pool._l7policy_mirrors).
+             subqueryload(models.L7PolicyMirror.l7policy).options(
+                 subqueryload(models.L7Policy.l7rules),
+                 subqueryload(models.L7Policy.listener))),
             subqueryload(models.Pool.load_balancer),
             subqueryload(models.Pool.members),
             subqueryload(models.Pool.session_persistence),
@@ -2145,6 +2150,12 @@ class L7PolicyRepository(BaseRepository):
                    .filter(target_model.l7policy_id.in_(policies_by_id))
                    .order_by(target_model.position).populate_existing()
                    .with_for_update().all())
+        mirror_model = models.L7PolicyMirror
+        mirrors = (session.query(mirror_model)
+                   .filter(mirror_model.l7policy_id.in_(policies_by_id))
+                   .order_by(mirror_model.target_position,
+                             mirror_model.position)
+                   .populate_existing().with_for_update().all())
         tags_model = base_models.Tags
         tagged_objects = {**policies_by_id,
                           **{rule.id: rule for rule in rules}}
@@ -2155,6 +2166,7 @@ class L7PolicyRepository(BaseRepository):
         for rows, parents, parent_key, relationship in (
                 (rules, policies_by_id, 'l7policy_id', 'l7rules'),
                 (targets, policies_by_id, 'l7policy_id', '_targets'),
+                (mirrors, policies_by_id, 'l7policy_id', '_mirrors'),
                 (tags, tagged_objects, 'resource_id', '_tags')):
             by_parent = {id: [] for id in parents}
             for row in rows:
@@ -2392,6 +2404,26 @@ class L7PolicyRepository(BaseRepository):
                 .limit(1)
                 .scalar())
 
+    def get_mirroring_policy_using_pool(self, session, pool_id):
+        return (session.query(models.L7PolicyMirror.l7policy_id)
+                .filter_by(pool_id=pool_id)
+                .with_for_update().limit(1).scalar())
+
+    def validate_mirror_pools(self, session, listener, mirrors, targets):
+        pool_ids = validate.request_mirror_pool_ids(mirrors, targets)
+        if not pool_ids:
+            return {}
+        validate.validate_request_mirror_protocol(listener.protocol)
+        pools = {}
+        for pool_id in sorted(pool_ids):
+            pool = self.get_redirect_pool_for_update(session, listener,
+                                                     pool_id)
+            if pool.protocol != consts.PROTOCOL_HTTP:
+                raise exceptions.ValidationException(detail=_(
+                    'A request mirror must target an HTTP pool.'))
+            pools[pool_id] = pool
+        return pools
+
     def _active_http_policies(self, session):
         policy = self.model_class
         listener = models.Listener
@@ -2451,6 +2483,42 @@ class L7PolicyRepository(BaseRepository):
             return row.https_listener_hostname is None
         return row.https_listener_hostname in row.https_virtual_hosts
 
+    def _active_request_mirrors(self, *, restoring_pool, removed_pool):
+        policy = self.model_class
+        target = models.L7PolicyTarget
+        mirror = models.L7PolicyMirror
+        pool = self._active_pool(removed_pool=removed_pool)
+        redirect = self._active_pool(removed_pool=removed_pool,
+                                     include_closed=True)
+        if restoring_pool is not None:
+            restored = self._active_pool(restoring_pool=restoring_pool)
+            pool |= restored
+            redirect |= restored
+
+        copy_reachable = (mirror.numerator > 0) & mirror.pool.has(pool)
+        selected_target = (
+            (target.position == mirror.target_position) &
+            (target.weight > 0) & target.pool.has(pool))
+        rule_copy = copy_reachable & (mirror.target_position == -1)
+        if restoring_pool is not None:
+            rule_copy &= ((mirror.pool_id == restoring_pool) |
+                          (policy.redirect_pool_id == restoring_pool))
+            selected_target &= ((mirror.pool_id == restoring_pool) |
+                                (target.pool_id == restoring_pool))
+        target_matches = (select(target.position)
+                          .where(target.l7policy_id == mirror.l7policy_id,
+                                 selected_target)
+                          .correlate(mirror).exists())
+        target_copy = copy_reachable & target_matches
+        weighted = policy.action == consts.L7POLICY_ACTION_WEIGHTED_TARGETS
+        rule_runs = (
+            weighted |
+            (policy.action == consts.L7POLICY_ACTION_FIXED_RESPONSE) |
+            ((policy.action == consts.L7POLICY_ACTION_REDIRECT_TO_POOL) &
+             self._has_redirect_pool(redirect)))
+        return ((rule_runs & policy._mirrors.any(rule_copy)) |
+                (weighted & policy._mirrors.any(target_copy)))
+
     def get_active_request_transforms(
             self, session, *, transform, listener_id=None,
             load_balancer_id=None, reopening=None, restoring_pool=None,
@@ -2474,7 +2542,10 @@ class L7PolicyRepository(BaseRepository):
                                  include_closed=cors)
         active_target = (target.weight > 0) & target.pool.has(pool)
         query = self._active_http_policies(session)
-        if transform == 'target_filters':
+        if transform == 'request_mirrors':
+            query = query.filter(self._active_request_mirrors(
+                restoring_pool=restoring_pool, removed_pool=removed_pool))
+        elif transform == 'target_filters':
             query = query.filter(
                 policy.action == consts.L7POLICY_ACTION_WEIGHTED_TARGETS,
                 policy._targets.any(
@@ -2607,6 +2678,7 @@ class L7PolicyRepository(BaseRepository):
             subqueryload(models.L7Policy.listener),
             subqueryload(models.L7Policy.redirect_pool),
             subqueryload(models.L7Policy._targets),
+            subqueryload(models.L7Policy._mirrors),
             subqueryload(models.L7Policy._tags),
             noload('*'))
 
@@ -2690,6 +2762,12 @@ class L7PolicyRepository(BaseRepository):
                        .with_for_update()
                        .all())
         attributes.set_committed_value(policy, '_targets', targets)
+        mirror_model = models.L7PolicyMirror
+        mirrors = (session.query(mirror_model).filter_by(l7policy_id=id)
+                   .order_by(mirror_model.target_position,
+                             mirror_model.position)
+                   .populate_existing().with_for_update().all())
+        attributes.set_committed_value(policy, '_mirrors', mirrors)
         return policy
 
     def update(self, session, id, **model_kwargs):
@@ -2708,6 +2786,14 @@ class L7PolicyRepository(BaseRepository):
             model_kwargs, old_policy=l7policy_db)
         update_targets = 'targets' in model_kwargs
         targets = model_kwargs.pop('targets', None) or []
+        if update_targets or 'request_mirrors' in model_kwargs:
+            mirrors = model_kwargs.pop('request_mirrors',
+                                       l7policy_db.request_mirrors)
+            mirror_targets = targets if update_targets else l7policy_db.targets
+            listener = session.get(models.Listener, l7policy_db.listener_id)
+            mirror_pools = self.validate_mirror_pools(
+                session, listener, mirrors, mirror_targets)
+            l7policy_db._replace_mirrors(mirrors, mirror_targets, mirror_pools)
         l7policy = self.model_class(**model_kwargs)
         self._validate_l7policy_pool_data(session, l7policy, l7policy_db)
         if update_targets:
@@ -2773,6 +2859,9 @@ class L7PolicyRepository(BaseRepository):
         model_kwargs = validate.sanitize_l7policy_api_args(
             model_kwargs, create=True)
         targets = model_kwargs.pop('targets', None)
+        mirrors = model_kwargs.pop('request_mirrors', [])
+        mirror_pools = self.validate_mirror_pools(
+            session, listener_db, mirrors, targets)
         if targets:
             pools = self._weighted_target_pools(
                 session, model_kwargs['listener_id'], targets)
@@ -2780,6 +2869,8 @@ class L7PolicyRepository(BaseRepository):
         self._validate_l7policy_pool_data(session, l7policy)
         if targets:
             l7policy._replace_targets(targets, pools)
+        if mirrors or targets:
+            l7policy._replace_mirrors(mirrors, targets or [], mirror_pools)
         session.add(l7policy)
         session.flush()
 

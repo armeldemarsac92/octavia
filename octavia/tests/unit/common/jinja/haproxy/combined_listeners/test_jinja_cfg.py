@@ -1846,6 +1846,157 @@ class TestHaproxyCfg(base.TestCase):
             f'use_backend {backend_prefix}{listener_id}-later if later_rule',
         ], routes)
 
+    def test_request_mirrors_render_at_selected_backend_filter_positions(self):
+        amp = sample_configs_combined.sample_amphora_tuple()
+        listener = sample_configs_combined.sample_listener_tuple(l7=True)
+        first_pool, second_pool = listener.pools
+        copy_id = '8f388635-d55a-4f89-9937-a7550b72e710'
+        unused_id = '8f388635-d55a-4f89-9937-a7550b72e711'
+        copy = SimpleNamespace(**dict(second_pool._asdict(), id=copy_id),
+                               backend_h2c=True)
+        unused = second_pool._replace(id=unused_id)
+        mirror = dict(pool_id=copy_id, numerator=7, denominator=13)
+        before = dict(mirror, numerator=1, denominator=1,
+                      phase='before_transforms')
+        after_headers = dict(mirror, numerator=2, denominator=3,
+                             phase='after_headers')
+        zero = dict(mirror, pool_id=unused_id, numerator=0)
+        policy = SimpleNamespace(**dict(
+            listener.l7policies[0]._asdict(),
+            id='weighted',
+            action=constants.L7POLICY_ACTION_WEIGHTED_TARGETS,
+            redirect_pool=None,
+            request_header_operations=[
+                dict(operation='SET', name='x-rule', value='rule')],
+            request_url_rewrite={'hostname': 'rule.test'},
+            targets=[
+                dict(weight=2, pool_id=first_pool.id, request_mirrors=[mirror],
+                     request_header_operations=[
+                         dict(operation='ADD', name='x-target', value='one')]),
+                dict(weight=3, pool_id=second_pool.id),
+                dict(weight=1, fixed_response={'status_code': 500}),
+                dict(weight=0, pool_id=first_pool.id,
+                     request_mirrors=[mirror]),
+            ]), request_mirrors=[before, after_headers, mirror, zero])
+        listener = listener._replace(
+            l7policies=[policy], pools=[first_pool, second_pool, copy, unused])
+        capability = constants.GATEWAY_CAPABILITY_HTTP_REQUEST_MIRROR
+        with self.assertRaisesRegex(driver_except.AmpVersionUnsupported,
+                                    'lacks HTTP request mirror'):
+            self.jinja_cfg.build_config(
+                amp, [listener], None, haproxy_versions=['3', '0', '19'],
+                amp_details={})
+        rendered = self.jinja_cfg.build_config(
+            amp, [listener], None, haproxy_versions=['3', '0', '19'],
+            amp_details={capability: True})
+        self.assertEqual(1, rendered.count('filter octavia-mirror'))
+        self.assertEqual(1, rendered.count('rand(6)'))
+        self.assertNotIn(unused_id, rendered)
+        self.assertNotIn(f'backend {copy_id}:', rendered)
+        first = rendered.split(
+            f'\nbackend {first_pool.id}:{listener.id}\n', 1)[1].split(
+                '\nbackend ', 1)[0]
+        match = '{ var(txn.octavia_l7_policy) -m str weighted }'
+        weighted = match + ' { var(txn.octavia_weighted_draw) -m int 0:1 }'
+        mirrors = [line.strip() for line in first.splitlines()
+                   if 'octavia-mirror' in line]
+        self.assertEqual([
+            f'http-request octavia-mirror {copy_id} 1 1 if {match}',
+            f'http-request octavia-mirror {copy_id} 2 3 if {match}',
+            f'http-request octavia-mirror {copy_id} 7 13 if {match}',
+            f'http-request octavia-mirror {copy_id} 7 13 if {weighted}',
+        ], mirrors)
+        self.assertLess(first.index(mirrors[0]),
+                        first.index('set-header "x-rule"'))
+        self.assertLess(first.index('set-header "x-rule"'),
+                        first.index(mirrors[1]))
+        self.assertLess(first.index(mirrors[1]), first.index('rule.test'))
+        self.assertLess(first.index('rule.test'), first.index(mirrors[2]))
+        self.assertLess(first.index(mirrors[2]),
+                        first.index('add-header "x-target"'))
+        self.assertLess(first.index('add-header "x-target"'),
+                        first.index(mirrors[3]))
+        private = rendered.split(f'listen octavia-mirror-{copy_id}\n', 1)[1]
+        self.assertIn(f'bind /run/octavia/mirror/{copy_id}.sock user nobody '
+                      'mode 600 octavia-mirror-socket', private)
+        self.assertIn('retries 0', private)
+        self.assertIn('http-request disable-l7-retry', private)
+        self.assertIn('option abortonclose', private)
+        self.assertIn(' proto h2', private)
+        self.assertNotIn('http-request octavia-mirror', private)
+
+    def test_request_mirrors_keep_tls_identity_and_alpn(self):
+        amp = sample_configs_combined.sample_amphora_tuple()
+        listener = sample_configs_combined.sample_listener_tuple(l7=True)
+        pool_id = '8f388635-d55a-4f89-9937-a7550b72e710'
+        mirror_pool = SimpleNamespace(**dict(
+            listener.pools[1]._asdict(), id=pool_id, tls_enabled=True,
+            backend_tls_hostname='sni.example.test',
+            backend_tls_require_h2=True,
+            backend_tls_subject_alt_names=[
+                {'type': 'Hostname', 'hostname': '*.example.test'}],
+            ca_tls_certificate_id='ca-certificate'))
+        policy = SimpleNamespace(
+            **listener.l7policies[0]._asdict(),
+            request_mirrors=[
+                dict(pool_id=pool_id, numerator=1, denominator=1)])
+        listener = listener._replace(
+            l7policies=[policy], pools=[*listener.pools, mirror_pool])
+        details = {
+            constants.GATEWAY_CAPABILITY_HTTP_REQUEST_MIRROR: True,
+            constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME: True,
+            constants.GATEWAY_CAPABILITY_BACKEND_TLS_H2_ALPN: True,
+            constants.GATEWAY_CAPABILITY_BACKEND_TLS_SUBJECT_ALT_NAMES: True,
+        }
+        rendered = self.jinja_cfg.build_config(
+            amp, [listener], {pool_id: {'ca_cert': '/path/to/backend-ca.pem'}},
+            haproxy_versions=['3', '0', '19'], amp_details=details)
+        private = rendered.split(f'listen octavia-mirror-{pool_id}\n', 1)[1]
+        self.assertIn('ca-file /path/to/backend-ca.pem verify required',
+                      private)
+        self.assertIn('sni str(sni.example.test) '
+                      'verify-san dns:*.example.test',
+                      private)
+        self.assertIn('check-ssl check-sni sni.example.test check-alpn h2',
+                      private)
+        self.assertIn('alpn h2 require-alpn-h2', private)
+
+    def test_mirror_sees_transforms_before_a_fixed_response(self):
+        amp = sample_configs_combined.sample_amphora_tuple()
+        listener = sample_configs_combined.sample_listener_tuple(l7=True)
+        pool_id = '8f388635-d55a-4f89-9937-a7550b72e710'
+        copy_pool = listener.pools[1]._replace(id=pool_id)
+        initial = listener.l7policies[0]
+        for action, settings in (
+                ('FIXED_RESPONSE', {'fixed_response': {'status_code': 500}}),
+                ('WEIGHTED_TARGETS', {'targets': [
+                    {'weight': 1, 'fixed_response': {'status_code': 500}}
+                ]})):
+            with self.subTest(action=action):
+                policy_data = dict(
+                    initial._asdict(), action=action, redirect_pool=None,
+                    request_header_operations=[{
+                        'operation': 'SET', 'name': 'x-copy', 'value': 'yes'}],
+                    request_url_rewrite={'replace_full_path': '/copy'})
+                policy_data.update(settings)
+                policy = SimpleNamespace(
+                    **policy_data, request_mirrors=[{
+                        'pool_id': pool_id, 'numerator': 1, 'denominator': 1}])
+                config = self.jinja_cfg.build_config(
+                    amp, [listener._replace(l7policies=[policy],
+                                            pools=[copy_pool])],
+                    None, haproxy_versions=['3', '0', '19'],
+                    amp_details={
+                        constants.GATEWAY_CAPABILITY_HTTP_REQUEST_MIRROR:
+                        True})
+                positions = [config.index(fragment) for fragment in (
+                    'http-request set-header "x-copy" "yes"',
+                    'http-request set-path "/copy"',
+                    f'http-request octavia-mirror {pool_id} 1 1',
+                    'http-request return status 500',
+                )]
+                self.assertEqual(sorted(positions), positions)
+
     def test_http_method_and_path_rules_share_policy_condition(self):
         amp = sample_configs_combined.sample_amphora_tuple()
         rule = sample_configs_combined.sample_l7rule_tuple

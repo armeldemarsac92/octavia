@@ -314,6 +314,25 @@ A policy can combine both deadlines with status-based retries.
 Omission in an update preserves the object. Send
 ``http_request_policy: null`` to clear it.
 
+``http_request_mirror_v1`` enables an ordered ``request_mirrors`` list
+on a winning HTTP policy and on each selected weighted HTTP pool target.
+A list can hold up to 16 entries. Each entry identifies an HTTP pool
+in the listener's project and load balancer by ``pool_id``. A pool can
+appear multiple times.
+
+Set ``numerator`` and ``denominator`` to integers from 0 to 2147483647.
+The denominator must be positive and the numerator must be at most the
+denominator. Zero keeps the pool reference and disables sampling for that
+entry. Each positive ratio is sampled independently of the primary backend
+selection. The copy's response is discarded.
+
+At each level, an optional ``phase`` selects ``before_transforms``,
+``after_headers`` or ``after_rewrite``. These phases follow request
+header operations and URL rewrites in that order. The default is
+``after_rewrite``. List entries follow phase order and preserve their
+relative order within a phase. A CORS preflight answered by the policy
+completes before request transformation and mirroring.
+
 ``weighted_http_target_request_filters_v1`` adds optional
 ``request_header_operations`` and ``request_url_rewrite`` to each
 ``WEIGHTED_TARGETS.targets`` item with a ``pool_id``. Both fields have

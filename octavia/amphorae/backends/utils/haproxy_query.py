@@ -99,43 +99,48 @@ class HAProxyQuery:
         list_results = results[2:].split('\n')
         csv_reader = csv.DictReader(list_results)
         stats_list = list(csv_reader)
-        # Count listener traffic and pool status only on public proxies.
+        # Only public frontends contribute listener traffic.
         return [stat for stat in stats_list
                 if "prometheus" not in stat['pxname'] and
                 not stat['pxname'].startswith((
                     consts.HAPROXY_FIXED_RESPONSE_BACKEND_PREFIX,
-                    consts.HAPROXY_TCP_TLS_MIXED_PREFIX))]
+                    consts.HAPROXY_TCP_TLS_MIXED_PREFIX)) and
+                not (stat['svname'] == 'FRONTEND' and
+                     stat['pxname'].startswith(
+                         consts.HAPROXY_MIRROR_PROXY_PREFIX))]
 
     def get_pool_status(self):
         """Get status for each server and the pool as a whole.
 
-        :returns: pool data structure
-                  {<pool-name>: {
-                  'uuid': <uuid>,
-                  'status': 'UP'|'DOWN',
-                  'members': [<name>: 'UP'|'DOWN'|'DRAIN'|'no check'] }}
+        :returns: pool status and members keyed by pool and listener IDs,
+                  or by pool ID for a mirror-only destination.
         """
 
         results = self.show_stat(object_type=6)  # servers + pool
 
+        public_pools = {line['pxname'].partition(':')[0] for line in results
+                        if ':' in line['pxname']}
         final_results = {}
+        prefix = consts.HAPROXY_MIRROR_PROXY_PREFIX
         for line in results:
-            # pxname: pool, svname: server_name, status: status
-
-            # We don't want to report the internal prometheus proxy stats
-            # up to health manager as it shouldn't be billed traffic
-            if 'prometheus' in line['pxname']:
+            proxy = line['pxname']
+            pool_id, _, listener_id = proxy.partition(':')
+            if proxy.startswith(prefix):
+                pool_id = proxy.removeprefix(prefix)
+                if pool_id in public_pools:
+                    continue
+                key = pool_id
+            elif listener_id:
+                key = proxy
+            else:
                 continue
 
-            if line['pxname'] not in final_results:
-                final_results[line['pxname']] = {'members': {}}
-
+            pool = final_results.setdefault(key, {'members': {}})
             if line['svname'] == 'BACKEND':
-                # BACKEND describes a pool of servers in HAProxy
-                pool_id, listener_id = line['pxname'].split(':')
-                final_results[line['pxname']]['pool_uuid'] = pool_id
-                final_results[line['pxname']]['listener_uuid'] = listener_id
-                final_results[line['pxname']]['status'] = line['status']
+                pool['pool_uuid'] = pool_id
+                if listener_id:
+                    pool['listener_uuid'] = listener_id
+                pool['status'] = line['status']
             else:
                 # Due to a bug in some versions of HAProxy, DRAIN mode isn't
                 # calculated correctly, but we can spoof the correct
@@ -143,8 +148,7 @@ class HAProxyQuery:
                 if line['status'] == consts.UP and line['weight'] == '0':
                     line['status'] = consts.DRAIN
 
-                final_results[line['pxname']]['members'][line['svname']] = (
-                    line['status'])
+                pool['members'][line['svname']] = line['status']
         return final_results
 
     def save_state(self, state_file_path):

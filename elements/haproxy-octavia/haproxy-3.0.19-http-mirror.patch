@@ -1,0 +1,1280 @@
+diff --git a/Makefile b/Makefile
+index 9669891cef77772483143468617763ff4c9281ca..aba96417ff34f0e46354af688a3629033c13629a 100644
+--- a/Makefile
++++ b/Makefile
+@@ -968,7 +968,7 @@ OBJS += src/mux_h2.o src/mux_h1.o src/mux_fcgi.o src/stream.o		\
+         src/map.o src/trace.o src/tcp_sample.o src/tcp_act.o		\
+         src/session.o src/htx.o src/cfgparse-global.o src/mjson.o	\
+         src/h2.o src/ring.o src/fd.o src/sock.o src/mworker.o		\
+-        src/flt_trace.o src/thread.o src/proto_rhttp.o src/acl.o	\
++        src/flt_octavia_mirror.o src/flt_trace.o src/thread.o src/proto_rhttp.o src/acl.o \
+         src/http.o src/flt_bwlim.o src/channel.o src/queue.o		\
+         src/mqtt.o src/proto_tcp.o src/lb_chash.o src/http_rules.o	\
+         src/errors.o src/extcheck.o src/dns_ring.o src/stats-json.o	\
+diff --git a/include/haproxy/http_client-t.h b/include/haproxy/http_client-t.h
+index 5b5be551f04d4d4c3c8f24f8055c83828d5e4d47..dc8241c4c39386627876620c8b13252a7b63ff58 100644
+--- a/include/haproxy/http_client-t.h
++++ b/include/haproxy/http_client-t.h
+@@ -28,6 +28,7 @@ struct httpclient {
+ 		void (*res_end)(struct httpclient *hc);             /* end of the response */
+ 	} ops;
+ 	struct sockaddr_storage *dst;         /* destination address */
++	struct ist local_proxy_metadata;      /* PROXYv2 data owned by the local client caller */
+ 	struct appctx *appctx;                /* HTTPclient appctx */
+ 	int timeout_server;                   /* server timeout in ms */
+ 	void *caller;                         /* ptr of the caller */
+@@ -51,6 +52,7 @@ struct httpclient {
+ 
+ /* options */
+ #define    HTTPCLIENT_O_HTTPPROXY     0x00000001 /* the request must be use an absolute URI */
++#define    HTTPCLIENT_O_IGNORE_RESPONSE 0x00000002 /* discard mirror replies */
+ 
+ /* States of the HTTP Client Appctx */
+ enum {
+diff --git a/include/haproxy/http_client.h b/include/haproxy/http_client.h
+index 93f3fc1af66e0f70b9a78ead7978cd6d9d8ac30e..222df6dae6263e370903f71e78b6a8ba0664bdaf 100644
+--- a/include/haproxy/http_client.h
++++ b/include/haproxy/http_client.h
+@@ -4,10 +4,14 @@
+ #include <haproxy/buf.h>
+ #include <haproxy/http_client-t.h>
+ 
++struct session;
++
+ void httpclient_destroy(struct httpclient *hc);
+ void httpclient_stop_and_destroy(struct httpclient *hc);
+ 
+ struct proxy *httpclient_create_proxy(const char *id);
++struct proxy *httpclient_create_local_proxy(const char *id);
++struct ist httpclient_local_proxy_metadata(const struct session *sess);
+ struct httpclient *httpclient_new(void *caller, enum http_meth_t meth, struct ist url);
+ struct httpclient *httpclient_new_from_proxy(struct proxy *px, void *caller, enum http_meth_t meth, struct ist url);
+ int httpclient_set_proxy(struct httpclient *hc, struct proxy *px);
+diff --git a/include/haproxy/listener-t.h b/include/haproxy/listener-t.h
+index b9a8447cbaecd93d1b44778d854f9259a28f8892..b94b36681a445e93728d676e7e7b6642f0a279f0 100644
+--- a/include/haproxy/listener-t.h
++++ b/include/haproxy/listener-t.h
+@@ -114,6 +114,7 @@ enum li_status {
+ #define BC_O_NOSTOP             0x00004000 /* keep the listeners active even after a soft stop */
+ #define BC_O_REVERSE_HTTP       0x00008000 /* a reverse HTTP bind is used */
+ #define BC_O_XPRT_MAXCONN       0x00010000 /* transport layer allocates its own resource prior to accept and is responsible to check maxconn limit */
++#define BC_O_OCTAVIA_MIRROR     0x00020000 /* private Octavia HTTP mirror delivery */
+ 
+ 
+ /* flags used with bind_conf->ssl_options */
+diff --git a/include/haproxy/octavia_mirror.h b/include/haproxy/octavia_mirror.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..fcdf7e8bf1c37983910d56a87570dacd808bf893
+--- /dev/null
++++ b/include/haproxy/octavia_mirror.h
+@@ -0,0 +1,22 @@
++#ifndef _HAPROXY_OCTAVIA_MIRROR_H
++#define _HAPROXY_OCTAVIA_MIRROR_H
++
++#include <import/ist.h>
++
++struct session;
++
++/* Private PROXYv2 TLV. Octavia's mixed TLS listener uses 0xe0. The value
++ * starts with a scheme byte and contains the frontend TLS SNI, if present.
++ */
++#define OCTAVIA_MIRROR_TLV 0xe1
++#define OCTAVIA_MIRROR_SNI_MAX 255
++
++enum octavia_mirror_scheme {
++	OCTAVIA_MIRROR_SCHEME_UNSET,
++	OCTAVIA_MIRROR_SCHEME_HTTP,
++	OCTAVIA_MIRROR_SCHEME_HTTPS,
++};
++
++struct ist octavia_mirror_metadata(const struct session *sess);
++
++#endif /* _HAPROXY_OCTAVIA_MIRROR_H */
+diff --git a/include/haproxy/server-t.h b/include/haproxy/server-t.h
+index aea9d844d88399651ef473fbc6767825c61b792d..413acac1544d8ac0cf942441c38ebcc769b6ced3 100644
+--- a/include/haproxy/server-t.h
++++ b/include/haproxy/server-t.h
+@@ -172,6 +172,7 @@ enum srv_initaddr {
+ #define SRV_PP_V2_AUTHORITY     0x0080   /* proxy protocol version 2 with authority */
+ #define SRV_PP_V2_CRC32C        0x0100   /* proxy protocol version 2 with crc32c */
+ #define SRV_PP_V2_UNIQUE_ID     0x0200   /* proxy protocol version 2 with unique ID */
++#define SRV_PP_V2_OCTAVIA_MIRROR 0x0400  /* private Octavia mirror metadata */
+ 
+ /* function which act on servers need to return various errors */
+ #define SRV_STATUS_OK       0   /* everything is OK. */
+diff --git a/include/haproxy/ssl_sock.h b/include/haproxy/ssl_sock.h
+index 0f91fbf062d89e2cc4145ac33a6e29b3b9e79026..d1b8eafd190971fe23d8ec0c938fb565929e13b9 100644
+--- a/include/haproxy/ssl_sock.h
++++ b/include/haproxy/ssl_sock.h
+@@ -74,6 +74,7 @@ void ssl_sock_free_ca(struct bind_conf *bind_conf);
+ int ssl_bio_and_sess_init(struct connection *conn, SSL_CTX *ssl_ctx,
+                           SSL **ssl, BIO **bio, BIO_METHOD *bio_meth, void *ctx);
+ const char *ssl_sock_get_sni(struct connection *conn);
++const char *ssl_sock_get_client_sni(struct connection *conn);
+ const char *ssl_sock_get_cert_sig(struct connection *conn);
+ const char *ssl_sock_get_cipher_name(struct connection *conn);
+ const char *ssl_sock_get_proto_version(struct connection *conn);
+diff --git a/src/connection.c b/src/connection.c
+index 07fa01742297c1db93b8012fdffd86f24c9a3680..b94c0825caac7f58d2540237da4735cb364d046d 100644
+--- a/src/connection.c
++++ b/src/connection.c
+@@ -21,10 +21,12 @@
+ #include <haproxy/fd.h>
+ #include <haproxy/frontend.h>
+ #include <haproxy/hash.h>
++#include <haproxy/http_client.h>
+ #include <haproxy/list.h>
+ #include <haproxy/log.h>
+ #include <haproxy/namespace.h>
+ #include <haproxy/net_helper.h>
++#include <haproxy/octavia_mirror.h>
+ #include <haproxy/proto_rhttp.h>
+ #include <haproxy/proto_tcp.h>
+ #include <haproxy/sample.h>
+@@ -2086,6 +2088,21 @@ static int make_proxy_line_v2(char *buf, int buf_len, struct server *srv, struct
+ 		return 0;
+ 	memcpy(hdr->sig, pp2_signature, PP2_SIGNATURE_LEN);
+ 
++	if (srv->pp_opts & SRV_PP_V2_OCTAVIA_MIRROR) {
++		struct ist metadata = sess ? httpclient_local_proxy_metadata(sess) : IST_NULL;
++
++		if (!istlen(metadata))
++			return 0;
++		ret = make_tlv(buf + PP2_HEADER_LEN, buf_len - PP2_HEADER_LEN,
++		               OCTAVIA_MIRROR_TLV, istlen(metadata), istptr(metadata));
++		if (!ret)
++			return 0;
++		hdr->ver_cmd = PP2_VERSION | PP2_CMD_LOCAL;
++		hdr->fam = PP2_FAM_UNSPEC | PP2_TRANS_UNSPEC;
++		hdr->len = htons(ret);
++		return PP2_HEADER_LEN + ret;
++	}
++
+ 	if (strm) {
+ 		src = sc_src(strm->scf);
+ 		dst = sc_dst(strm->scf);
+diff --git a/src/flt_octavia_mirror.c b/src/flt_octavia_mirror.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..32d17d95f30ce55f2f6f0695a9e6038d8e0fa38a
+--- /dev/null
++++ b/src/flt_octavia_mirror.c
+@@ -0,0 +1,781 @@
++/*
++ * Streaming HTTP request mirrors for Octavia Amphora.
++ * SPDX-License-Identifier: GPL-2.0-or-later
++ */
++
++#include <errno.h>
++#include <sys/un.h>
++#include <syslog.h>
++
++#include <haproxy/action.h>
++#include <haproxy/api.h>
++#include <haproxy/applet.h>
++#include <haproxy/cfgparse.h>
++#include <haproxy/cli.h>
++#include <haproxy/connection.h>
++#include <haproxy/filters.h>
++#include <haproxy/http_client.h>
++#include <haproxy/http_htx.h>
++#include <haproxy/http_rules.h>
++#include <haproxy/htx.h>
++#include <haproxy/listener.h>
++#include <haproxy/octavia_mirror.h>
++#include <haproxy/proxy.h>
++#include <haproxy/ssl_sock.h>
++#include <haproxy/stream.h>
++#include <haproxy/task.h>
++#include <haproxy/tools.h>
++
++#define MIRROR_ACTIVE_LIMIT 128
++#define MIRROR_QUEUE_LENGTH 8
++#define MIRROR_LIFETIME_MS 30000
++#define MIRROR_IDLE_MS 5000
++#define MIRROR_POOL_ID_LENGTH 36
++
++static const char mirror_filter_id[] = "octavia-mirror";
++static struct proxy *mirror_proxy;
++static char mirror_directory[sizeof(((struct sockaddr_un *)0)->sun_path)];
++
++static struct {
++	unsigned int active;
++	unsigned long long started;
++	unsigned long long capacity_drops;
++	unsigned long long queue_drops;
++	unsigned long long preparation_drops;
++	unsigned long long incomplete_uploads;
++	unsigned long long expired;
++} mirror_stats;
++
++struct mirror_rule {
++	char pool[MIRROR_POOL_ID_LENGTH + 1];
++	struct sockaddr_storage address;
++	unsigned int numerator;
++	unsigned int denominator;
++};
++
++/* Both the source filter and HTTP client execute on the source stream thread.
++ * The client owns the copy from startup to release. Once the full request is
++ * queued it no longer refers to the source stream.
++ */
++struct mirror_copy {
++	struct mirror_copy *next;
++	struct filter *filter;
++	struct httpclient *client;
++	struct task *timer;
++	struct buffer queue[MIRROR_QUEUE_LENGTH];
++	char metadata[1 + OCTAVIA_MIRROR_SNI_MAX];
++	unsigned int first;
++	unsigned int count;
++};
++
++/* Metadata follows the copy's lifetime, independently of the source stream. */
++static struct ist capture_mirror_metadata(struct mirror_copy *copy, const struct session *sess,
++                                          const struct htx_sl *line)
++{
++#ifdef USE_OPENSSL
++	const char *sni = ssl_sock_get_client_sni(objt_conn(sess->origin));
++#endif
++	size_t length = 1;
++
++	copy->metadata[0] = OCTAVIA_MIRROR_SCHEME_UNSET;
++	if (line->flags & HTX_SL_F_HAS_SCHM) {
++		if (line->flags & HTX_SL_F_SCHM_HTTP)
++			copy->metadata[0] = OCTAVIA_MIRROR_SCHEME_HTTP;
++		else if (line->flags & HTX_SL_F_SCHM_HTTPS)
++			copy->metadata[0] = OCTAVIA_MIRROR_SCHEME_HTTPS;
++	}
++#ifdef USE_OPENSSL
++	if (sni) {
++		size_t sni_length = strlen(sni);
++
++		if (sni_length <= OCTAVIA_MIRROR_SNI_MAX) {
++			memcpy(copy->metadata + 1, sni, sni_length);
++			length += sni_length;
++		}
++	}
++#endif
++	return ist2(copy->metadata, length);
++}
++
++struct ist octavia_mirror_metadata(const struct session *sess)
++{
++	struct connection *conn;
++	struct conn_tlv_list *tlv;
++
++	if (!sess || !sess->listener || !(sess->listener->bind_conf->options & BC_O_OCTAVIA_MIRROR))
++		return IST_NULL;
++
++	conn = objt_conn(sess->origin);
++	if (!conn || !(conn->flags & CO_FL_RCVD_PROXY))
++		return IST_NULL;
++	tlv = conn_get_tlv(conn, OCTAVIA_MIRROR_TLV);
++	if (!tlv || tlv->len < 1 || tlv->len > 1 + OCTAVIA_MIRROR_SNI_MAX ||
++	    (unsigned char)tlv->value[0] > OCTAVIA_MIRROR_SCHEME_HTTPS)
++		return IST_NULL;
++
++	return ist2(tlv->value, tlv->len);
++}
++
++static int reserve_mirror(void)
++{
++	unsigned int active = HA_ATOMIC_LOAD(&mirror_stats.active);
++
++	do {
++		if (active >= MIRROR_ACTIVE_LIMIT)
++			return 0;
++	} while (!HA_ATOMIC_CAS(&mirror_stats.active, &active, active + 1));
++	return 1;
++}
++
++static void unlink_mirror(struct mirror_copy *copy)
++{
++	struct mirror_copy *prev;
++
++	if (!copy->filter)
++		return;
++	prev = copy->filter->ctx;
++	if (prev == copy)
++		copy->filter->ctx = copy->next;
++	else {
++		while (prev->next != copy)
++			prev = prev->next;
++		prev->next = copy->next;
++	}
++	copy->filter = NULL;
++}
++
++static void free_mirror(struct mirror_copy *copy)
++{
++	unsigned int i;
++	unsigned int freed = 0;
++
++	unlink_mirror(copy);
++	task_destroy(copy->timer);
++	for (i = 0; i < MIRROR_QUEUE_LENGTH; i++) {
++		freed += !!copy->queue[i].size;
++		b_free(&copy->queue[i]);
++	}
++	if (freed)
++		offer_buffers(NULL, freed);
++	free(copy);
++	HA_ATOMIC_DEC(&mirror_stats.active);
++}
++
++static void release_mirror_client(struct httpclient *client)
++{
++	free_mirror(client->caller);
++}
++
++static void cancel_mirror(struct mirror_copy *copy)
++{
++	unlink_mirror(copy);
++	copy->client->flags |= HTTPCLIENT_FA_STOP;
++	appctx_wakeup(copy->client->appctx);
++}
++
++static struct task *expire_mirror(struct task *task, void *context, unsigned int state)
++{
++	struct mirror_copy *copy = context;
++
++	if (!tick_is_expired(task->expire, now_ms))
++		return task;
++	copy->timer = NULL;
++	task_destroy(task);
++	HA_ATOMIC_INC(&mirror_stats.expired);
++	cancel_mirror(copy);
++	return NULL;
++}
++
++static struct buffer *push_mirror_buffer(struct mirror_copy *copy)
++{
++	struct buffer *tail;
++
++	if (copy->count == MIRROR_QUEUE_LENGTH)
++		return NULL;
++	tail = &copy->queue[(copy->first + copy->count) % MIRROR_QUEUE_LENGTH];
++	if (!b_alloc(tail, DB_UNLIKELY))
++		return NULL;
++	copy->count++;
++	return tail;
++}
++
++static struct buffer *mirror_tail(struct mirror_copy *copy)
++{
++	if (!copy->count)
++		return push_mirror_buffer(copy);
++	return &copy->queue[(copy->first + copy->count - 1) % MIRROR_QUEUE_LENGTH];
++}
++
++static void pull_mirror_payload(struct httpclient *client)
++{
++	struct mirror_copy *copy = client->caller;
++	struct buffer *head;
++
++	if (!copy->count || b_data(&client->req.buf))
++		return;
++	head = &copy->queue[copy->first];
++	b_xfer(&client->req.buf, head, b_data(head));
++	if (head->size) {
++		b_free(head);
++		offer_buffers(NULL, 1);
++	}
++	copy->first = (copy->first + 1) % MIRROR_QUEUE_LENGTH;
++	copy->count--;
++}
++
++static int mirror_hop_header(struct ist name)
++{
++	return isteq(name, ist("connection")) || isteq(name, ist("keep-alive")) ||
++	       isteq(name, ist("proxy-connection")) || isteq(name, ist("upgrade")) ||
++	       isteq(name, ist("te")) || isteq(name, ist("expect")) ||
++	       isteq(name, ist("proxy-authenticate")) ||
++	       isteq(name, ist("proxy-authorization"));
++}
++
++static int mirror_connection_option(const struct htx *source, struct ist name)
++{
++	struct http_hdr_ctx ctx = { .blk = NULL };
++
++	while (http_find_header(source, ist("connection"), &ctx, 0)) {
++		if (isteqi(ctx.value, name))
++			return 1;
++	}
++	return 0;
++}
++
++/* Copy only the start line and headers as seen at the action. A private H1.1
++ * hop uses chunked framing for streaming requests, including H2 trailers.
++ */
++static int mirror_headers(struct buffer *buffer, const struct htx *source, const struct htx_sl *line)
++{
++	struct htx *dest = htx_from_buf(buffer);
++	struct htx_blk *blk;
++	struct htx_sl *sl;
++	unsigned int flags = (line->flags | HTX_SL_F_VER_11) & ~HTX_SL_F_CONN_UPG;
++	int bodyless = !!(flags & HTX_SL_F_BODYLESS);
++	int transfer_added = 0;
++
++	if (!bodyless) {
++		flags &= ~HTX_SL_F_CLEN;
++		flags |= HTX_SL_F_CHNK | HTX_SL_F_XFER_ENC | HTX_SL_F_XFER_LEN;
++	}
++	sl = htx_add_stline(dest, HTX_BLK_REQ_SL, flags, htx_sl_req_meth(line),
++	                    htx_sl_req_uri(line), ist("HTTP/1.1"));
++	if (!sl)
++		return 0;
++	sl->info.req.meth = line->info.req.meth;
++
++	for (blk = htx_get_next_blk(source, htx_get_first_blk(source)); blk;
++	     blk = htx_get_next_blk(source, blk)) {
++		struct ist name;
++
++		if (htx_get_blk_type(blk) == HTX_BLK_EOH)
++			break;
++		if (htx_get_blk_type(blk) != HTX_BLK_HDR)
++			continue;
++		name = htx_get_blk_name(source, blk);
++		if (mirror_hop_header(name) || mirror_connection_option(source, name))
++			continue;
++		if (!bodyless && isteq(name, ist("content-length")))
++			continue;
++		if (isteq(name, ist("transfer-encoding"))) {
++			if (bodyless || !(line->flags & HTX_SL_F_CHNK))
++				continue;
++			transfer_added = 1;
++		}
++		if (!htx_add_header(dest, name, htx_get_blk_value(source, blk)))
++			return 0;
++	}
++	if (!bodyless && !transfer_added &&
++	    !htx_add_header(dest, ist("transfer-encoding"), ist("chunked")))
++		return 0;
++	if (!htx_add_endof(dest, HTX_BLK_EOH))
++		return 0;
++	if (bodyless)
++		dest->flags |= HTX_FL_EOM;
++	htx_to_buf(dest, buffer);
++	return 1;
++}
++
++static int mirror_payload_block(struct mirror_copy *copy, const struct htx *source,
++                                const struct htx_blk *blk, unsigned int offset, unsigned int len)
++{
++	enum htx_blk_type type = htx_get_blk_type(blk);
++	struct ist data = ist2(htx_get_blk_ptr(source, blk) + offset, len);
++	struct buffer *tail = mirror_tail(copy);
++
++	while (tail) {
++		struct htx *dest = htx_from_buf(tail);
++
++		if (type == HTX_BLK_TLR) {
++			if (mirror_hop_header(htx_get_blk_name(source, blk)) ||
++			    htx_add_trailer(dest, htx_get_blk_name(source, blk),
++			                    htx_get_blk_value(source, blk))) {
++				htx_to_buf(dest, tail);
++				return 1;
++			}
++		}
++		else if (type == HTX_BLK_EOT) {
++			if (htx_add_endof(dest, HTX_BLK_EOT)) {
++				htx_to_buf(dest, tail);
++				return 1;
++			}
++		}
++		else {
++			data = istadv(data, htx_add_data(dest, data));
++			htx_to_buf(dest, tail);
++			if (!istlen(data))
++				return 1;
++		}
++		tail = push_mirror_buffer(copy);
++	}
++	return 0;
++}
++
++static int filter_mirror_headers(struct stream *stream, struct filter *filter, struct http_msg *msg)
++{
++	if (msg->chn == &stream->req && filter->ctx)
++		register_data_filter(stream, msg->chn, filter);
++	return 1;
++}
++
++static int filter_mirror_payload(struct stream *stream, struct filter *filter, struct http_msg *msg,
++                                 unsigned int offset, unsigned int len)
++{
++	struct htx *htx = htxbuf(&msg->chn->buf);
++	struct htx_ret pos = htx_find_offset(htx, offset);
++	struct htx_blk *blk = pos.blk;
++	unsigned int nr = len;
++
++	for (; blk && nr && filter->ctx; blk = htx_get_next_blk(htx, blk)) {
++		enum htx_blk_type type = htx_get_blk_type(blk);
++		unsigned int size = MIN(nr, htx_get_blksz(blk) - pos.ret);
++		struct mirror_copy *copy, *next;
++
++		if (type == HTX_BLK_DATA || type == HTX_BLK_TLR || type == HTX_BLK_EOT) {
++			for (copy = filter->ctx; copy; copy = next) {
++				next = copy->next;
++				if (!mirror_payload_block(copy, htx, blk, pos.ret, size)) {
++					HA_ATOMIC_INC(&mirror_stats.queue_drops);
++					cancel_mirror(copy);
++				}
++				else
++					appctx_wakeup(copy->client->appctx);
++			}
++		}
++		pos.ret = 0;
++		nr -= size;
++	}
++	return len;
++}
++
++static int finish_mirror_payload(struct mirror_copy *copy)
++{
++	struct buffer *tail = mirror_tail(copy);
++	struct htx *htx;
++
++	if (!tail)
++		return 0;
++	htx = htx_from_buf(tail);
++	if (htx_is_empty(htx) && !htx_add_endof(htx, HTX_BLK_EOT))
++		return 0;
++	htx->flags |= HTX_FL_EOM;
++	htx_to_buf(htx, tail);
++	return 1;
++}
++
++/* A rule can generate a local response later in the HTTP rules. Preserve
++ * a request already received in full even if the body analyser won't run.
++ */
++static int mirror_complete_payload(struct mirror_copy *copy, const struct htx *source)
++{
++	const struct htx_blk *blk;
++
++	for (blk = htx_get_first_blk(source); blk; blk = htx_get_next_blk(source, blk)) {
++		enum htx_blk_type type = htx_get_blk_type(blk);
++
++		if ((type == HTX_BLK_DATA || type == HTX_BLK_TLR || type == HTX_BLK_EOT) &&
++		    !mirror_payload_block(copy, source, blk, 0, htx_get_blksz(blk)))
++			return 0;
++	}
++	return finish_mirror_payload(copy);
++}
++
++static int filter_mirror_end(struct stream *stream, struct filter *filter, struct http_msg *msg)
++{
++	struct mirror_copy *copy;
++
++	while ((copy = filter->ctx)) {
++		if (finish_mirror_payload(copy)) {
++			unlink_mirror(copy);
++			appctx_wakeup(copy->client->appctx);
++			continue;
++		}
++		HA_ATOMIC_INC(&mirror_stats.queue_drops);
++		cancel_mirror(copy);
++	}
++	return 1;
++}
++
++static void filter_mirror_detach(struct stream *stream, struct filter *filter)
++{
++	struct mirror_copy *copy;
++
++	while ((copy = filter->ctx)) {
++		HA_ATOMIC_INC(&mirror_stats.incomplete_uploads);
++		cancel_mirror(copy);
++	}
++}
++
++static int filter_mirror_channel_end(struct stream *stream, struct filter *filter, struct channel *channel)
++{
++	if (channel == &stream->req)
++		filter_mirror_detach(stream, filter);
++	return 1;
++}
++
++static int has_octavia_mirror_filter(const struct proxy *px)
++{
++	struct flt_conf *filter;
++
++	list_for_each_entry(filter, &px->filter_configs, list) {
++		if (filter->id == mirror_filter_id)
++			return 1;
++	}
++	return 0;
++}
++
++static struct flt_ops mirror_ops = {
++	.http_headers = filter_mirror_headers,
++	.http_payload = filter_mirror_payload,
++	.http_end = filter_mirror_end,
++	.channel_end_analyze = filter_mirror_channel_end,
++	.detach = filter_mirror_detach,
++};
++
++static enum act_return action_octavia_mirror(struct act_rule *rule, struct proxy *px,
++                                             struct session *sess, struct stream *stream, int opts)
++{
++	const struct mirror_rule *target = rule->arg.act.p[0];
++	struct htx *incoming;
++	struct htx_sl *line;
++	struct mirror_copy *copy;
++	struct filter *filter, *source = NULL;
++	int bodyless, complete;
++
++	if (!target->numerator ||
++	    (target->numerator != target->denominator &&
++	     mul32hi(statistical_prng(), target->denominator) >= target->numerator))
++		return ACT_RET_CONT;
++
++	incoming = htxbuf(&stream->req.buf);
++	line = http_get_stline(incoming);
++	if (!line || (line->flags & HTX_SL_F_CONN_UPG) || line->info.req.meth == HTTP_METH_CONNECT)
++		return ACT_RET_CONT;
++	bodyless = !!(line->flags & HTX_SL_F_BODYLESS);
++	complete = !!(incoming->flags & HTX_FL_EOM);
++
++	list_for_each_entry(filter, &strm_flt(stream)->filters, list) {
++		if (FLT_ID(filter) != mirror_filter_id)
++			continue;
++		if (!(filter->flags & FLT_FL_IS_BACKEND_FILTER)) {
++			source = filter;
++			break;
++		}
++		/* A pure backend can also supply the filter when the frontend
++		 * did not install it. Either sees body bytes after all rules.
++		 */
++		source = filter;
++	}
++	if (!source)
++		return ACT_RET_CONT;
++
++	if (!reserve_mirror()) {
++		HA_ATOMIC_INC(&mirror_stats.capacity_drops);
++		return ACT_RET_CONT;
++	}
++
++	copy = calloc(1, sizeof(*copy));
++	if (!copy) {
++		HA_ATOMIC_DEC(&mirror_stats.active);
++		goto preparation_failed;
++	}
++	copy->timer = task_new_here();
++	copy->client = httpclient_new_from_proxy(mirror_proxy, copy, line->info.req.meth,
++	                                         ist("http://localhost/"));
++	if (!copy->timer || !copy->client ||
++	    !sockaddr_alloc(&copy->client->dst, &target->address, sizeof(target->address)) ||
++	    !b_alloc(&copy->client->req.buf, DB_UNLIKELY) ||
++	    !mirror_headers(&copy->client->req.buf, incoming, line) ||
++	    (!bodyless && complete && !mirror_complete_payload(copy, incoming)))
++		goto free_copy;
++
++	copy->client->options |= HTTPCLIENT_O_IGNORE_RESPONSE;
++	copy->client->local_proxy_metadata = capture_mirror_metadata(copy, sess, line);
++	copy->client->ops.res_end = release_mirror_client;
++	if (!bodyless)
++		copy->client->ops.req_payload = pull_mirror_payload;
++	httpclient_set_timeout(copy->client, MIRROR_IDLE_MS);
++	if (!httpclient_start(copy->client))
++		goto free_copy;
++	copy->client->flags |= HTTPCLIENT_FA_AUTOKILL;
++	copy->timer->process = expire_mirror;
++	copy->timer->context = copy;
++	task_schedule(copy->timer, tick_add(now_ms, MS_TO_TICKS(MIRROR_LIFETIME_MS)));
++
++	if (!bodyless && !complete) {
++		copy->next = source->ctx;
++		copy->filter = source;
++		source->ctx = copy;
++	}
++	HA_ATOMIC_INC(&mirror_stats.started);
++	return ACT_RET_CONT;
++
++ free_copy:
++	if (copy->client && copy->client->req.buf.size) {
++		b_free(&copy->client->req.buf);
++		offer_buffers(NULL, 1);
++	}
++	httpclient_destroy(copy->client);
++	free_mirror(copy);
++ preparation_failed:
++	HA_ATOMIC_INC(&mirror_stats.preparation_drops);
++	return ACT_RET_CONT;
++}
++
++static void release_octavia_mirror_rule(struct act_rule *rule)
++{
++	free(rule->arg.act.p[0]);
++}
++
++static int check_octavia_mirror_rule(struct act_rule *rule, struct proxy *px, char **err)
++{
++	struct mirror_rule *target = rule->arg.act.p[0];
++	struct sockaddr_un address = { .sun_family = AF_UNIX };
++	struct proxy *delivery;
++	size_t directory_len;
++
++	if (!*mirror_directory || px->mode != PR_MODE_HTTP ||
++	    ((px->cap & PR_CAP_FE) && !has_octavia_mirror_filter(px))) {
++		memprintf(err, "octavia-mirror requires an octavia-mirror filter on the HTTP request path");
++		return 0;
++	}
++	directory_len = strlen(mirror_directory);
++	memcpy(address.sun_path, mirror_directory, directory_len);
++	address.sun_path[directory_len++] = '/';
++	memcpy(address.sun_path + directory_len, target->pool, MIRROR_POOL_ID_LENGTH);
++	memcpy(address.sun_path + directory_len + MIRROR_POOL_ID_LENGTH, ".sock", sizeof(".sock"));
++	memcpy(&target->address, &address, sizeof(address));
++
++	if (!target->numerator)
++		return 1;
++	for (delivery = proxies_list; delivery; delivery = delivery->next) {
++		struct bind_conf *bind;
++
++		list_for_each_entry(bind, &delivery->conf.bind, by_fe) {
++			struct listener *listener;
++
++			if (!(bind->options & BC_O_OCTAVIA_MIRROR))
++				continue;
++			list_for_each_entry(listener, &bind->listeners, by_bind) {
++				const struct sockaddr_un *bound = (const struct sockaddr_un *)&listener->rx.addr;
++
++				if (!strcmp(bound->sun_path, address.sun_path))
++					return 1;
++			}
++		}
++	}
++	memprintf(err, "octavia-mirror pool %s has no private delivery listener", target->pool);
++	return 0;
++}
++
++static int parse_mirror_number(const char *arg, unsigned int *value)
++{
++	unsigned long parsed;
++
++	if (!*arg || arg[strspn(arg, "0123456789")])
++		return 0;
++	errno = 0;
++	parsed = strtoul(arg, NULL, 10);
++	if (errno || parsed > INT_MAX)
++		return 0;
++	*value = parsed;
++	return 1;
++}
++
++static enum act_parse_ret parse_octavia_mirror_rule(const char **args, int *cur_arg,
++                                                     struct proxy *px, struct act_rule *rule, char **err)
++{
++	struct mirror_rule parsed = {};
++	struct mirror_rule *target;
++	const char *id = args[*cur_arg];
++	unsigned int i;
++
++	if (strlen(id) != MIRROR_POOL_ID_LENGTH)
++		goto invalid;
++	for (i = 0; i < MIRROR_POOL_ID_LENGTH; i++) {
++		if (i == 8 || i == 13 || i == 18 || i == 23) {
++			if (id[i] != '-')
++				goto invalid;
++		}
++		else if (!isxdigit((unsigned char)id[i]))
++			goto invalid;
++		parsed.pool[i] = tolower((unsigned char)id[i]);
++	}
++	if (!parse_mirror_number(args[*cur_arg + 1], &parsed.numerator) ||
++	    !parse_mirror_number(args[*cur_arg + 2], &parsed.denominator) ||
++	    !parsed.denominator || parsed.numerator > parsed.denominator)
++		goto invalid;
++
++	target = malloc(sizeof(*target));
++	if (!target) {
++		memprintf(err, "out of memory");
++		return ACT_RET_PRS_ERR;
++	}
++	*target = parsed;
++	rule->arg.act.p[0] = target;
++	rule->action = ACT_CUSTOM;
++	rule->action_ptr = action_octavia_mirror;
++	rule->check_ptr = check_octavia_mirror_rule;
++	rule->release_ptr = release_octavia_mirror_rule;
++	*cur_arg += 3;
++	return ACT_RET_PRS_OK;
++
++ invalid:
++	memprintf(err, "expected a pool UUID and a ratio 0 <= numerator <= denominator <= INT_MAX");
++	return ACT_RET_PRS_ERR;
++}
++
++static int parse_octavia_mirror_filter(char **args, int *cur_arg, struct proxy *px,
++                                       struct flt_conf *fconf, char **err, void *private)
++{
++	const char *directory = args[*cur_arg + 1];
++	const size_t len = strlen(directory);
++
++	/* The suffix must fit sun_path with the temporary Unix bind name
++	 * (a dot, the worker PID and ".tmp") used on start and reload.
++	 */
++	if (len < 2 || directory[0] != '/' || directory[len - 1] == '/' ||
++	    len + sizeof("/00000000-0000-0000-0000-000000000000.sock.2147483647.tmp") >
++	    sizeof(mirror_directory)) {
++		memprintf(err, "octavia-mirror requires an absolute private socket directory that fits sun_path");
++		return -1;
++	}
++
++	if (has_octavia_mirror_filter(px)) {
++		memprintf(err, "only one octavia-mirror filter is allowed per proxy");
++		return -1;
++	}
++	if (*mirror_directory && strcmp(mirror_directory, directory)) {
++		memprintf(err, "octavia-mirror filters must share the same private socket directory");
++		return -1;
++	}
++
++	memcpy(mirror_directory, directory, len + 1);
++	fconf->id = mirror_filter_id;
++	fconf->ops = &mirror_ops;
++	fconf->flags |= FLT_CFG_FL_HTX;
++	*cur_arg += 2;
++	return 0;
++}
++
++static int precheck_mirror(void)
++{
++	struct proxy *px;
++
++	if (global.mode & MODE_MWORKER_WAIT)
++		return ERR_NONE;
++
++	for (px = proxies_list; px; px = px->next) {
++		struct bind_conf *bind;
++
++		list_for_each_entry(bind, &px->conf.bind, by_fe) {
++			struct listener *listener;
++
++			if (!(bind->options & BC_O_OCTAVIA_MIRROR))
++				continue;
++#if !defined(__linux__) || !defined(SO_PEERCRED)
++			ha_alert("Proxy '%s': an octavia-mirror-socket requires UNIX peer credentials.\n", px->id);
++			return ERR_FATAL;
++#endif
++
++			if (px->mode != PR_MODE_HTTP || (px->cap & PR_CAP_LISTEN) != PR_CAP_LISTEN ||
++			    px->conn_retries || !LIST_ISEMPTY(&px->filter_configs) ||
++			    !LIST_ISEMPTY(&px->switching_rules) || px->defbe.name ||
++			    px->conf.bind.n != px->conf.bind.p ||
++			    bind->listeners.n != bind->listeners.p ||
++			    bind->settings.ux.mode != 0600 ||
++			    (bind->options & (BC_O_USE_SSL | BC_O_ACC_PROXY | BC_O_ACC_CIP))) {
++				ha_alert("Proxy '%s': an octavia-mirror-socket requires HTTP, mode 600, retries 0, and a dedicated delivery pool.\n",
++				         px->id);
++				return ERR_FATAL;
++			}
++			list_for_each_entry(listener, &bind->listeners, by_bind) {
++				const struct sockaddr_un *bound = (const struct sockaddr_un *)&listener->rx.addr;
++
++				if (bound->sun_family != AF_UNIX || bound->sun_path[0] != '/') {
++					ha_alert("Proxy '%s': an octavia-mirror-socket must use a filesystem UNIX socket.\n", px->id);
++					return ERR_FATAL;
++				}
++			}
++			bind->options |= BC_O_UNLIMITED;
++			px->maxconn = MIRROR_ACTIVE_LIMIT;
++		}
++	}
++	if (!*mirror_directory)
++		return ERR_NONE;
++	/* Internal client socket, private listener's accepted socket and pool-side socket. */
++	global.maxsock += 3 * MIRROR_ACTIVE_LIMIT;
++	mirror_proxy = httpclient_create_local_proxy("<OCTAVIA-MIRROR>");
++	return mirror_proxy ? ERR_NONE : ERR_FATAL;
++}
++
++static int parse_mirror_bind(char **args, int cur_arg, struct proxy *px,
++                             struct bind_conf *bind, char **err)
++{
++	bind->options |= BC_O_OCTAVIA_MIRROR;
++	return 0;
++}
++
++static int cli_show_mirrors(char **args, char *payload, struct appctx *appctx, void *private)
++{
++	char *result = NULL;
++
++	memprintf(&result, "active %u\nstarted %llu\ncapacity_drops %llu\nqueue_drops %llu\n"
++	          "preparation_drops %llu\nincomplete_uploads %llu\nexpired %llu\n",
++	          HA_ATOMIC_LOAD(&mirror_stats.active), HA_ATOMIC_LOAD(&mirror_stats.started),
++	          HA_ATOMIC_LOAD(&mirror_stats.capacity_drops), HA_ATOMIC_LOAD(&mirror_stats.queue_drops),
++	          HA_ATOMIC_LOAD(&mirror_stats.preparation_drops), HA_ATOMIC_LOAD(&mirror_stats.incomplete_uploads),
++	          HA_ATOMIC_LOAD(&mirror_stats.expired));
++	if (!result)
++		return cli_err(appctx, "Out of memory\n");
++	return cli_dynmsg(appctx, LOG_INFO, result);
++}
++
++static struct action_kw_list mirror_actions = {
++	.kw = {
++		{ "octavia-mirror", parse_octavia_mirror_rule, 0 },
++		{ NULL, NULL, 0 },
++	},
++};
++
++static struct flt_kw_list mirror_filters = { "OCTAVIA", { }, {
++	{ "octavia-mirror", parse_octavia_mirror_filter, NULL },
++	{ NULL, NULL, NULL },
++} };
++
++static struct cli_kw_list mirror_cli = {{ },{
++	{{ "show", "octavia", "mirrors", NULL }, "show octavia mirrors : Show HTTP mirror counters", cli_show_mirrors },
++	{{ }, },
++}};
++
++static struct bind_kw_list mirror_bind = { "OCTAVIA", { }, {
++	{ "octavia-mirror-socket", parse_mirror_bind, 0 },
++	{ NULL, NULL, 0 },
++} };
++
++INITCALL1(STG_REGISTER, http_req_keywords_register, &mirror_actions);
++INITCALL1(STG_REGISTER, flt_register_keywords, &mirror_filters);
++INITCALL1(STG_REGISTER, cli_register_kw, &mirror_cli);
++INITCALL1(STG_REGISTER, bind_register_keywords, &mirror_bind);
++REGISTER_PRE_CHECK(precheck_mirror);
+diff --git a/src/http_ana.c b/src/http_ana.c
+index fe53a20ef7d562538956d093f89036d6d30fe4df..1d6851279307c5ed054455b05e950311aad5c707 100644
+--- a/src/http_ana.c
++++ b/src/http_ana.c
+@@ -31,6 +31,7 @@
+ #include <haproxy/htx.h>
+ #include <haproxy/log.h>
+ #include <haproxy/net_helper.h>
++#include <haproxy/octavia_mirror.h>
+ #include <haproxy/proxy.h>
+ #include <haproxy/queue.h>
+ #include <haproxy/regex.h>
+@@ -167,6 +168,20 @@ int http_wait_for_request(struct stream *s, struct channel *req, int an_bit)
+ 
+ 	BUG_ON(htx_get_first_type(htx) != HTX_BLK_REQ_SL);
+ 
++	if (sess->listener && (sess->listener->bind_conf->options & BC_O_OCTAVIA_MIRROR)) {
++		struct ist metadata = octavia_mirror_metadata(sess);
++
++		if (!istlen(metadata))
++			goto return_bad_req;
++		/* The private H1 hop serializes normalized H2 URIs in origin form,
++		 * so its H1 parser cannot recover these flags from the request line.
++		 */
++		if (metadata.ptr[0] == OCTAVIA_MIRROR_SCHEME_HTTP)
++			sl->flags |= HTX_SL_F_HAS_SCHM | HTX_SL_F_SCHM_HTTP;
++		else if (metadata.ptr[0] == OCTAVIA_MIRROR_SCHEME_HTTPS)
++			sl->flags |= HTX_SL_F_HAS_SCHM | HTX_SL_F_SCHM_HTTPS;
++	}
++
+ 	/* 0: we might have to print this header in debug mode */
+ 	if (unlikely((global.mode & MODE_DEBUG) &&
+ 		     (!(global.mode & MODE_QUIET) || (global.mode & MODE_VERBOSE)))) {
+diff --git a/src/http_client.c b/src/http_client.c
+index 6eb7cc9ce83757aa6cfd034ee901d12897cf5e4c..8fb3a6dc2e3cf9bbd0e1e756c1f32d981e96f274 100644
+--- a/src/http_client.c
++++ b/src/http_client.c
+@@ -732,6 +732,44 @@ void httpclient_applet_io_handler(struct appctx *appctx)
+ 		if (hc->flags & HTTPCLIENT_FA_STOP)
+ 			goto error;
+ 
++		/* Mirrors consume replies without allocating copies of the headers
++		 * or body. Interim replies never interrupt the upload.
++		 */
++		while ((hc->options & HTTPCLIENT_O_IGNORE_RESPONSE) && co_data(res)) {
++			htx = htxbuf(&res->buf);
++			if (appctx->st0 == HTTPCLIENT_S_RES_BODY) {
++				co_htx_skip(res, htx, co_data(res));
++				if (htx_is_empty(htx) && (htx->flags & HTX_FL_EOM))
++					appctx->st0 = HTTPCLIENT_S_RES_END;
++				htx_to_buf(htx, &res->buf);
++				sc_will_read(sc);
++				break;
++			}
++			blk = htx_get_head_blk(htx);
++			if (!blk || htx_get_blk_type(blk) != HTX_BLK_RES_SL)
++				goto error;
++			sl = htx_get_blk_ptr(htx, blk);
++			if (sl->info.res.status >= 200 || sl->info.res.status == 101) {
++				if (appctx->st0 < HTTPCLIENT_S_RES_STLINE)
++					goto error;
++				appctx->st0 = HTTPCLIENT_S_RES_BODY;
++				continue;
++			}
++			do {
++				enum htx_blk_type type = htx_get_blk_type(blk);
++
++				c_rew(res, htx_get_blksz(blk));
++				blk = htx_remove_blk(htx, blk);
++				if (type == HTX_BLK_EOH)
++					break;
++			} while (blk);
++			sl = NULL;
++			htx_to_buf(htx, &res->buf);
++			sc_will_read(sc);
++		}
++		if ((hc->options & HTTPCLIENT_O_IGNORE_RESPONSE) && appctx->st0 == HTTPCLIENT_S_RES_BODY)
++			goto out;
++
+ 		switch(appctx->st0) {
+ 
+ 			case HTTPCLIENT_S_REQ:
+@@ -1187,6 +1225,16 @@ static struct applet httpclient_applet = {
+ 	.release = httpclient_applet_release,
+ };
+ 
++struct ist httpclient_local_proxy_metadata(const struct session *sess)
++{
++	struct appctx *appctx = objt_appctx(sess->origin);
++	struct httpclient *hc;
++
++	if (!appctx || appctx->applet != &httpclient_applet)
++		return IST_NULL;
++	hc = appctx->svcctx;
++	return hc ? hc->local_proxy_metadata : IST_NULL;
++}
+ 
+ static int httpclient_resolve_init(struct proxy *px)
+ {
+@@ -1244,7 +1292,7 @@ static int httpclient_resolve_init(struct proxy *px)
+  *
+  * Return a proxy or NULL.
+  */
+-struct proxy *httpclient_create_proxy(const char *id)
++static struct proxy *httpclient_create_proxy_mode(const char *id, int local)
+ {
+ 	int err_code = ERR_NONE;
+ 	char *errmsg = NULL;
+@@ -1264,18 +1312,26 @@ struct proxy *httpclient_create_proxy(const char *id)
+ 		goto err;
+ 	}
+ 
+-	px->options |= PR_O_WREQ_BODY;
+-	px->retry_type |= PR_RE_CONN_FAILED | PR_RE_DISCONNECTED | PR_RE_TIMEOUT;
++	if (!local) {
++		px->options |= PR_O_WREQ_BODY;
++		px->retry_type |= PR_RE_CONN_FAILED | PR_RE_DISCONNECTED | PR_RE_TIMEOUT;
++	}
++	else {
++		px->options &= ~PR_O_REUSE_MASK;
++		px->retry_type = 0;
++	}
+ 	px->options2 |= PR_O2_INDEPSTR;
+ 	px->mode = PR_MODE_HTTP;
+ 	px->maxconn = 0;
+ 	px->accept = NULL;
+-	px->conn_retries = httpclient_retries;
+-	px->timeout.connect = httpclient_timeout_connect;
++	px->conn_retries = local ? 0 : httpclient_retries;
++	px->timeout.connect = local ? MS_TO_TICKS(2000) : httpclient_timeout_connect;
+ 	px->timeout.client = TICK_ETERNITY;
+-	/* The HTTP Client use the "option httplog" with the global loggers */
+-	px->logformat.str = httpclient_log_format;
+-	px->logformat.conf.file = strdup("httpclient");
++	if (!local) {
++		/* The HTTP Client uses the "option httplog" with the global loggers */
++		px->logformat.str = httpclient_log_format;
++		px->logformat.conf.file = strdup("httpclient");
++	}
+ 	px->http_needed = 1;
+ 
+ 	/* clear HTTP server */
+@@ -1290,7 +1346,10 @@ struct proxy *httpclient_create_proxy(const char *id)
+ 	srv_raw->iweight = 0;
+ 	srv_raw->uweight = 0;
+ 	srv_raw->xprt = xprt_get(XPRT_RAW);
+-	srv_raw->flags |= SRV_F_MAPPORTS;  /* needed to apply the port change with resolving */
++	if (!local)
++		srv_raw->flags |= SRV_F_MAPPORTS;  /* needed to apply the port change with resolving */
++	else
++		srv_raw->pp_opts |= SRV_PP_V2 | SRV_PP_V2_OCTAVIA_MIRROR;
+ 	srv_raw->id = strdup("<HTTPCLIENT>");
+ 	if (!srv_raw->id) {
+ 		memprintf(&errmsg, "out of memory.");
+@@ -1299,6 +1358,9 @@ struct proxy *httpclient_create_proxy(const char *id)
+ 	}
+ 
+ #ifdef USE_OPENSSL
++	if (local)
++		goto add_proxy;
++
+ 	/* SSL HTTP server */
+ 	srv_ssl = new_server(px);
+ 	if (!srv_ssl) {
+@@ -1348,16 +1410,19 @@ struct proxy *httpclient_create_proxy(const char *id)
+ 
+ #endif
+ 
+-	/* add the proxy in the proxy list only if everything is successful */
+-	px->next = proxies_list;
+-	proxies_list = px;
+-
+-	if (httpclient_resolve_init(px) != 0) {
++#ifdef USE_OPENSSL
++ add_proxy:
++#endif
++	if (!local && httpclient_resolve_init(px) != 0) {
+ 		memprintf(&errmsg, "cannot initialize resolvers.");
+ 		err_code |= ERR_ALERT | ERR_FATAL;
+ 		goto err;
+ 	}
+ 
++	/* add the proxy in the proxy list only if everything is successful */
++	px->next = proxies_list;
++	proxies_list = px;
++
+ 	/* link the 2 servers in the proxy */
+ 	srv_raw->next = px->srv;
+ 	px->srv = srv_raw;
+@@ -1385,6 +1450,17 @@ struct proxy *httpclient_create_proxy(const char *id)
+ 	return px;
+ }
+ 
++struct proxy *httpclient_create_proxy(const char *id)
++{
++	return httpclient_create_proxy_mode(id, 0);
++}
++
++/* Cleartext HTX over an explicit local socket, without DNS or request replay. */
++struct proxy *httpclient_create_local_proxy(const char *id)
++{
++	return httpclient_create_proxy_mode(id, 1);
++}
++
+ /*
+  * Initialize the proxy for the HTTP client with 2 servers, one for raw HTTP,
+  * the other for HTTPS.
+diff --git a/src/session.c b/src/session.c
+index 2539c8fb23a127f8d9ae4e2d3ab565d3b9738172..47f0b5a02c1ca3cda2f7706854b0966a731a201a 100644
+--- a/src/session.c
++++ b/src/session.c
+@@ -10,6 +10,7 @@
+  *
+  */
+ 
++#define _GNU_SOURCE
+ #include <haproxy/ssl_sock-t.h>
+ 
+ #include <haproxy/api.h>
+@@ -159,6 +160,25 @@ int session_accept_fd(struct connection *cli_conn)
+ 
+ 	ret = -1; /* assume unrecoverable error by default */
+ 
++	if (l->bind_conf->options & BC_O_OCTAVIA_MIRROR) {
++		/* Only the worker's UNIX identity may supply mirror metadata.
++		 * A graceful reload retains that identity across workers.
++		 */
++#if defined(__linux__) && defined(SO_PEERCRED)
++		struct ucred peer;
++		socklen_t len = sizeof(peer);
++
++		if (getsockopt(cfd, SOL_SOCKET, SO_PEERCRED, &peer, &len) < 0 ||
++		    len != sizeof(peer) || peer.uid != geteuid()) {
++			ret = 0;
++			goto out_free_conn;
++		}
++#else
++		ret = 0;
++		goto out_free_conn;
++#endif
++	}
++
+ 	cli_conn->proxy_netns = l->rx.settings->netns;
+ 
+ 	/* Active reversed connection has already been initialized before being
+@@ -172,7 +192,7 @@ int session_accept_fd(struct connection *cli_conn)
+ 		conn_ctrl_init(cli_conn);
+ 
+ 		/* wait for a PROXY protocol header */
+-		if (l->bind_conf->options & BC_O_ACC_PROXY)
++		if (l->bind_conf->options & (BC_O_ACC_PROXY | BC_O_OCTAVIA_MIRROR))
+ 			cli_conn->flags |= CO_FL_ACCEPT_PROXY;
+ 
+ 		/* wait for a NetScaler client IP insertion protocol header */
+diff --git a/src/ssl_sample.c b/src/ssl_sample.c
+index a721352ede712dbd39940339ecbdd399727fea9d..69e1e03ddb14444c9386f3e65b9e14e185983b14 100644
+--- a/src/ssl_sample.c
++++ b/src/ssl_sample.c
+@@ -28,6 +28,7 @@
+ #include <haproxy/obj_type.h>
+ #include <haproxy/openssl-compat.h>
+ #include <haproxy/sample.h>
++#include <haproxy/octavia_mirror.h>
+ #include <haproxy/ssl_sock.h>
+ #include <haproxy/ssl_utils.h>
+ #include <haproxy/stconn.h>
+@@ -1753,32 +1754,30 @@ smp_fetch_ssl_fc_sni(const struct arg *args, struct sample *smp, const char *kw,
+ {
+ #ifdef SSL_CTRL_SET_TLSEXT_HOSTNAME
+ 	struct connection *conn;
+-	SSL *ssl;
+ 
+ 	smp->flags = SMP_F_VOL_SESS | SMP_F_CONST;
+ 	smp->data.type = SMP_T_STR;
+ 
++	if (kw[4] != 'b') {
++		struct ist metadata = octavia_mirror_metadata(smp->sess);
++
++		if (istlen(metadata) > 1) {
++			smp->data.u.str.area = metadata.ptr + 1;
++			smp->data.u.str.data = metadata.len - 1;
++			return 1;
++		}
++	}
++
+ 	if (obj_type(smp->sess->origin) == OBJ_TYPE_CHECK)
+ 		conn = (kw[4] == 'b') ? sc_conn(__objt_check(smp->sess->origin)->sc) : NULL;
+ 	else
+ 		conn = (kw[4] != 'b') ? objt_conn(smp->sess->origin) :
+ 			smp->strm ? sc_conn(smp->strm->scb) : NULL;
+ 
+-	ssl = ssl_sock_get_ssl_object(conn);
+-	if (!ssl)
++	smp->data.u.str.area = (char *)ssl_sock_get_client_sni(conn);
++	if (!smp->data.u.str.area)
+ 		return 0;
+ 
+-	smp->data.u.str.area = (char *)SSL_get_servername(ssl, TLSEXT_NAMETYPE_host_name);
+-	if (!smp->data.u.str.area) {
+-		/* We might have stored the SNI ourselves, look for it in the
+-		 * context's ex_data.
+-		 */
+-		smp->data.u.str.area = SSL_get_ex_data(ssl, ssl_client_sni_index);
+-
+-		if (!smp->data.u.str.area)
+-			return 0;
+-	}
+-
+ 	smp->data.u.str.data = strlen(smp->data.u.str.area);
+ 
+ 	return 1;
+diff --git a/src/ssl_sock.c b/src/ssl_sock.c
+index 927ed2e73c6e6f3a5d44c0f653f53e61123af28e..a85cfe0d8e7f834b348888b6706482ac273e7963 100644
+--- a/src/ssl_sock.c
++++ b/src/ssl_sock.c
+@@ -7010,6 +7010,22 @@ const char *ssl_sock_get_sni(struct connection *conn)
+ #endif
+ }
+ 
++/* SNI from the TLS handshake, including the ClientHello callback's copy. */
++const char *ssl_sock_get_client_sni(struct connection *conn)
++{
++#ifdef SSL_CTRL_SET_TLSEXT_HOSTNAME
++	SSL *ssl = ssl_sock_get_ssl_object(conn);
++	const char *name;
++
++	if (!ssl)
++		return NULL;
++	name = SSL_get_servername(ssl, TLSEXT_NAMETYPE_host_name);
++	return name ? name : SSL_get_ex_data(ssl, ssl_client_sni_index);
++#else
++	return NULL;
++#endif
++}
++
+ /* used for logging/ppv2, may be changed for a sample fetch later */
+ const char *ssl_sock_get_cipher_name(struct connection *conn)
+ {

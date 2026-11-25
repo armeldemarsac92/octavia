@@ -363,6 +363,8 @@ class Pool(base_models.BASE, base_models.IdMixin, base_models.ProjectMixin,
                                   back_populates="redirect_pool")
     _l7policy_targets = orm.relationship(
         "L7PolicyTarget", back_populates="pool", passive_deletes="all")
+    _l7policy_mirrors = orm.relationship(
+        "L7PolicyMirror", back_populates="pool", passive_deletes="all")
     _tags = orm.relationship(
         'Tags',
         single_parent=True,
@@ -396,7 +398,9 @@ class Pool(base_models.BASE, base_models.IdMixin, base_models.ProjectMixin,
         _l_ids = [li.id for li in _listeners]
         l7policies = self.l7policies + [
             target.l7policy for target in self._l7policy_targets
-            if target.l7policy is not None]
+            if target.l7policy is not None] + [
+            mirror.l7policy for mirror in self._l7policy_mirrors
+            if mirror.numerator and mirror.l7policy is not None]
         l7_listeners = [p.listener for p in l7policies
                         if len(p.l7rules) > 0 and p.enabled is True]
         for li in l7_listeners:
@@ -873,6 +877,10 @@ class L7Policy(base_models.BASE, base_models.IdMixin, base_models.ProjectMixin,
     _targets = orm.relationship(
         "L7PolicyTarget", back_populates="l7policy",
         order_by="L7PolicyTarget.position", cascade="all, delete-orphan")
+    _mirrors = orm.relationship(
+        "L7PolicyMirror", back_populates="l7policy",
+        order_by="L7PolicyMirror.target_position, L7PolicyMirror.position",
+        cascade="all, delete-orphan")
     l7rules = orm.relationship("L7Rule", uselist=True, cascade="delete",
                                back_populates="l7policy")
     provisioning_status = sa.Column(
@@ -897,17 +905,55 @@ class L7Policy(base_models.BASE, base_models.IdMixin, base_models.ProjectMixin,
     @property
     def targets(self):
         if self.action == constants.L7POLICY_ACTION_WEIGHTED_TARGETS:
-            return [target.as_target() for target in self._targets]
+            mirrors_by_target = {}
+            for row in self._mirrors:
+                if row.target_position >= 0:
+                    mirrors_by_target.setdefault(
+                        row.target_position, []).append(row.as_mirror())
+            targets = []
+            for row in self._targets:
+                target = row.as_target()
+                if row.position in mirrors_by_target:
+                    target['request_mirrors'] = mirrors_by_target[row.position]
+                targets.append(target)
+            return targets
         return []
 
     @property
+    def request_mirrors(self):
+        return [row.as_mirror() for row in self._mirrors
+                if row.target_position == -1]
+
+    @property
     def _pools(self):
+        pools = [row.pool for row in self._mirrors
+                 if row.numerator and row.pool is not None]
         if self.redirect_pool is not None:
-            return [self.redirect_pool]
+            pools.append(self.redirect_pool)
         if self.action == constants.L7POLICY_ACTION_WEIGHTED_TARGETS:
-            return [target.pool for target in self._targets
-                    if target.pool is not None]
-        return []
+            pools.extend(target.pool for target in self._targets
+                         if target.pool is not None)
+        return pools
+
+    def _replace_mirrors(self, mirrors, targets, pools):
+        existing = {(row.target_position, row.position): row
+                    for row in self._mirrors}
+        by_target = [(-1, mirrors), *(
+            (position, target.get('request_mirrors', []))
+            for position, target in enumerate(targets))]
+        for target_position, copies in by_target:
+            for position, mirror in enumerate(copies):
+                row = existing.pop((target_position, position), None)
+                if row is None:
+                    row = L7PolicyMirror(target_position=target_position,
+                                         position=position)
+                    self._mirrors.append(row)
+                row.pool = pools[mirror['pool_id']]
+                row.numerator = mirror['numerator']
+                row.denominator = mirror['denominator']
+                row.phase = mirror.get('phase')
+        for row in existing.values():
+            self._mirrors.remove(row)
 
     def _replace_targets(self, targets, pools):
         for position, target in enumerate(targets):
@@ -963,6 +1009,42 @@ class L7PolicyTarget(base_models.BASE):
                         pool_id=self.pool_id)
         return {'weight': self.weight,
                 'fixed_response': {'status_code': self.status_code}}
+
+
+class L7PolicyMirror(base_models.BASE):
+
+    __tablename__ = "l7policy_mirror"
+    __table_args__ = (
+        sa.CheckConstraint(
+            'numerator >= 0 AND numerator <= denominator AND '
+            'denominator BETWEEN 1 AND 2147483647',
+            name='ck_l7policy_mirror_ratio'),
+    )
+
+    l7policy_id = sa.Column(
+        sa.String(36),
+        sa.ForeignKey("l7policy.id", name="fk_l7policy_mirror_l7policy_id",
+                      ondelete="CASCADE"),
+        primary_key=True)
+    # -1 represents a rule mirror. Other positions identify weighted targets.
+    target_position = sa.Column(sa.Integer, primary_key=True)
+    position = sa.Column(sa.Integer, primary_key=True)
+    pool_id = sa.Column(
+        sa.String(36),
+        sa.ForeignKey("pool.id", name="fk_l7policy_mirror_pool_id"),
+        index=True, nullable=False)
+    numerator = sa.Column(sa.Integer, nullable=False)
+    denominator = sa.Column(sa.Integer, nullable=False)
+    phase = sa.Column(sa.String(32), nullable=True)
+    l7policy = orm.relationship("L7Policy", back_populates="_mirrors")
+    pool = orm.relationship("Pool", back_populates="_l7policy_mirrors")
+
+    def as_mirror(self):
+        mirror = dict(pool_id=self.pool_id, numerator=self.numerator,
+                      denominator=self.denominator)
+        if self.phase is not None:
+            mirror['phase'] = self.phase
+        return mirror
 
 
 class Quotas(base_models.BASE):

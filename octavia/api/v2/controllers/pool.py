@@ -846,6 +846,8 @@ class PoolsController(base.BaseController):
             policy_repo = self.repositories.l7policy
             policy_id = (policy_repo.get_weighted_policy_using_pool(
                 context.session, db_pool.id) or
+                policy_repo.get_mirroring_policy_using_pool(
+                    context.session, db_pool.id) or
                 policy_repo.get_policy_using_pool(
                     context.session, db_pool.id) or
                 policy_repo.get_policy_using_pool(
