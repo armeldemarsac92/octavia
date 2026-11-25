@@ -30,6 +30,10 @@ from octavia.common import data_models as dm
 from octavia.common.jinja.haproxy.combined_listeners import jinja_cfg
 
 
+LISTENER_BODY_LIMIT = 65536
+ROUTE_BODY_LIMIT = 32768
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = 'HTTP/1.1'
 
@@ -85,6 +89,7 @@ class TestListenerAuth(unittest.TestCase):
             vip=dm.Vip(ip_address='127.0.0.1'),
             topology=c.TOPOLOGY_SINGLE)
         cls.amp = dm.Amphora(id='test', status=c.AMPHORA_ALLOCATED)
+        cls.origin_requests = []
         cls.auth = cls.pool(stack, 'auth', auth=True)
         cls.fallback = cls.pool(stack, 'fallback')
         cls.selected = cls.pool(stack, 'selected')
@@ -111,15 +116,56 @@ class TestListenerAuth(unittest.TestCase):
              'requests': [step(cls.empty.id, '/empty')]},
         ]
         http = cls.listener('web', c.PROTOCOL_HTTP)
-        http.request_filter_sections = sections
+        upload = step(cls.auth.id, '/second')
+        upload['http']['forward_body_max_size'] = LISTENER_BODY_LIMIT
+        http.request_filter_sections = [
+            *sections, {'hostname': 'upload.example', 'requests': [upload]}]
+        upload_route = dm.L7Policy(
+            id='upload-route', project_id=cls.project, enabled=True,
+            action=c.L7POLICY_ACTION_REDIRECT_TO_POOL,
+            redirect_pool=cls.selected, redirect_pool_id=cls.selected.id,
+            l7rules=[
+                dm.L7Rule(id='upload-host', enabled=True, invert=False,
+                          type=c.L7RULE_TYPE_HOST_NAME,
+                          compare_type=c.L7RULE_COMPARE_TYPE_EQUAL_TO,
+                          value='upload.example'),
+                dm.L7Rule(id='upload-identity', enabled=True, invert=False,
+                          type=c.L7RULE_TYPE_HTTP_HEADER_EXACT,
+                          compare_type=c.L7RULE_COMPARE_TYPE_EQUAL_TO,
+                          key='x-identity', value='verified')],
+            external_auth={'pool_id': cls.auth.id, 'path_prefix': '/route',
+                           'forward_body_max_size': ROUTE_BODY_LIMIT})
         tls = cls.listener('tls', c.PROTOCOL_TERMINATED_HTTPS)
         tls.tls_certificate_id = 'test-cert'
         tls.request_filter_sections = [
             section for section in sections if section['hostname'] != '*']
+        tls.request_filter_sections.append(http.request_filter_sections[-1])
+        shared = cls.listener('tls-shared', c.PROTOCOL_TERMINATED_HTTPS)
+        shared.tls_certificate_id = 'test-cert'
+        shared.default_pool = shared.default_pool_id = None
+        shared.https_virtual_hosts = ['upload.example', 'public.example']
+        # Check size before contacting either authorizer in this chain.
+        upload_first = step(cls.auth.id, '/body')
+        upload_first['http']['forward_body_max_size'] = LISTENER_BODY_LIMIT
+        shared.request_filter_sections = [
+            {'hostname': 'upload.example',
+             'requests': [upload_first, chain[1]]},
+            {'hostname': 'public.example'},
+        ]
+        shared.l7policies[0].https_listener_hostname = 'upload.example'
+        shared.l7policies.append(dm.L7Policy(
+            id='public-route', enabled=True,
+            action=c.L7POLICY_ACTION_REDIRECT_TO_POOL,
+            redirect_pool=cls.fallback, redirect_pool_id=cls.fallback.id,
+            https_listener_hostname='public.example',
+            l7rules=[dm.L7Rule(
+                id='public-path', enabled=True, invert=False,
+                type=c.L7RULE_TYPE_PATH,
+                compare_type=c.L7RULE_COMPARE_TYPE_STARTS_WITH, value='/')]))
         ordinary = cls.listener('ordinary', c.PROTOCOL_HTTP)
-        cls.lb.listeners = [http, tls, ordinary]
+        cls.lb.listeners = [http, tls, shared, ordinary]
         cls.lb.pools = [cls.auth, cls.selected, cls.fallback, cls.empty]
-        cls.web, cls.tls, cls.ordinary = (
+        cls.web, cls.tls, cls.shared_tls, cls.ordinary = (
             listener.protocol_port for listener in cls.lb.listeners)
         config = cfg.CONF
         config.set_override('base_cert_dir', str(cls.path),
@@ -138,6 +184,7 @@ class TestListenerAuth(unittest.TestCase):
                        group='haproxy_amphora')
         details = haproxy_compatibility.get_haproxy_capabilities()
         assert details.get(c.GATEWAY_CAPABILITY_LISTENER_REQUEST_FILTERS)
+        cls.body_supported = details.get(c.AMPHORA_CAPABILITY_HTTP_AUTH_BODY)
         try:
             templater.build_config(cls.amp, cls.lb.listeners,
                                    amp_details={}, **render)
@@ -148,8 +195,23 @@ class TestListenerAuth(unittest.TestCase):
             raise AssertionError(message)
         templater.build_config(cls.amp, [ordinary], amp_details={}, **render)
 
+        if cls.body_supported:
+            listener_only = templater.build_config(
+                cls.amp, [http], amp_details=details, **render)
+            assert 'tune.octavia-auth-body-max-memory' in listener_only
+
+        http.l7policies.insert(0, upload_route)
+        without_body = {**details, c.AMPHORA_CAPABILITY_HTTP_AUTH_BODY: False}
+        old_config = templater.build_config(
+            cls.amp, cls.lb.listeners, amp_details=without_body, **render)
+        assert 'http-request deny deny_status 503 if ' in old_config
+        assert 'tune.octavia-auth-body-max-memory' not in old_config
+        assert f' - {LISTENER_BODY_LIMIT} if ' not in old_config
+        assert f' - {ROUTE_BODY_LIMIT} if ' not in old_config
         exact = templater.build_config(
             cls.amp, cls.lb.listeners, amp_details=details, **render)
+        if cls.body_supported:
+            assert exact.count('tune.octavia-auth-body-max-memory') == 1
         cfg_path.write_text(exact)
         subprocess.run([HAPROXY, '-c', '-f', str(cfg_path)], check=True)
         cfg_path.write_text(exact.replace(
@@ -172,7 +234,7 @@ class TestListenerAuth(unittest.TestCase):
         if running:
             server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
             server.label = label
-            server.requests = []
+            server.requests = [] if auth else cls.origin_requests
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             stack.callback(server.server_close)
@@ -209,17 +271,22 @@ class TestListenerAuth(unittest.TestCase):
     def cert(cls):
         cert_dir = cls.path / cls.lb.id
         cert_dir.mkdir()
-        key, cert = cert_dir / 'key', cert_dir / 'cert'
+        key, cls.tls_cert = cert_dir / 'key', cert_dir / 'cert'
         subprocess.run([
             'openssl', 'req', '-x509', '-newkey', 'ec',
             '-pkeyopt', 'ec_paramgen_curve:prime256v1', '-noenc',
-            '-subj', '/CN=auth.example', '-keyout', str(key), '-out', str(cert)
+            '-subj', '/CN=auth.example', '-addext',
+            'subjectAltName=DNS:auth.example,DNS:upload.example,'
+            'DNS:public.example', '-keyout', str(key),
+            '-out', str(cls.tls_cert),
         ], capture_output=True, check=True)
         combined = cert_dir / 'server.pem'
-        combined.write_bytes(key.read_bytes() + cert.read_bytes())
-        (cert_dir / 'tls.pem').write_text(str(combined) + '\n')
+        combined.write_bytes(key.read_bytes() + cls.tls_cert.read_bytes())
+        for listener in ('tls', 'tls-shared'):
+            (cert_dir / f'{listener}.pem').write_text(str(combined) + '\n')
 
-    def request(self, host, path='/catalog?kind=1', port=None, tls=False):
+    def request(self, host, path='/catalog?kind=1', port=None, tls=False,
+                body=b'body'):
         port = port or self.web
         if tls:
             connection = http.client.HTTPSConnection(
@@ -232,7 +299,7 @@ class TestListenerAuth(unittest.TestCase):
             connection = http.client.HTTPConnection(
                 '127.0.0.1', port, timeout=6)
         with closing(connection):
-            connection.request('PATCH', path, body=b'body', headers={
+            connection.request('PATCH', path, body=body, headers={
                 'Host': host, 'Authorization': 'Bearer sample',
                 'X-Client': 'forward-me', 'X-Not-Allowed': 'not-forwarded'})
             response = connection.getresponse()
@@ -263,6 +330,40 @@ class TestListenerAuth(unittest.TestCase):
         self.assertEqual('forward-me', first['headers']['x-client'])
         self.assertEqual('first', second['headers']['x-identity'])
         self.assertNotIn('x-client', second['headers'])
+
+    def test_listener_and_route_authorize_the_complete_body_in_order(self):
+        if not self.body_supported:
+            self.skipTest('HAProxy lacks HTTP ExternalAuth body forwarding')
+        self.auth_requests.clear()
+        self.origin_requests.clear()
+        payload = b'abcdef0123456789' * (ROUTE_BODY_LIMIT // 16)
+        status, app = self.request('upload.example', '/upload', body=payload)
+        self.assertEqual(200, status)
+        self.assertEqual('selected', app['route'])
+        self.assertEqual(payload, app['body'].encode())
+        self.assertEqual(
+            [('/second/upload', payload), ('/route/upload', payload)],
+            [(req['path'], req['body'].encode())
+             for req in self.auth_requests])
+        self.assertEqual([app], self.origin_requests)
+
+        self.auth_requests.clear()
+        self.origin_requests.clear()
+        oversized = b'x' * (LISTENER_BODY_LIMIT + 1)
+        self.assertEqual(413, self.request('upload.example', '/upload',
+                                           body=oversized)[0])
+        self.assertEqual([], self.auth_requests)
+        route_overflow = b'x' * (ROUTE_BODY_LIMIT + 1)
+        self.assertEqual(413, self.request('upload.example', '/upload',
+                                           body=route_overflow)[0])
+        self.assertEqual([('/second/upload', route_overflow)], [
+            (req['path'], req['body'].encode()) for req in self.auth_requests])
+        self.assertEqual([], self.origin_requests)
+        self.assertEqual(200, self.request('public.example', '/upload',
+                                           body=oversized)[0])
+        self.assertEqual(1, len(self.auth_requests))
+        received = [req['body'].encode() for req in self.origin_requests]
+        self.assertEqual([oversized], received)
 
     def test_priority_and_unfiltered_sections(self):
         self.auth_requests.clear()
@@ -307,6 +408,71 @@ class TestListenerAuth(unittest.TestCase):
         self.assertEqual('public.example', app['headers']['host'])
         self.assertEqual(['public.example', 'public.example'], [
             item['headers']['host'] for item in self.auth_requests])
+
+    def tls_upload(self, port, sni, authority, body, version):
+        result = subprocess.run([
+            'curl', '--silent', '--show-error', '--noproxy', '*',
+            '--http' + version, '--cacert', str(self.tls_cert),
+            '--request', 'PATCH', '--header', f'Host: {authority}',
+            '--resolve', f'{sni}:{port}:127.0.0.1',
+            '--data-binary', '@-',
+            '--write-out', '\n%{http_code} %{http_version}',
+            f'https://{sni}:{port}/upload',
+        ], input=body, capture_output=True, check=True)
+        payload, metadata = result.stdout.rsplit(b'\n', 1)
+        status, negotiated = metadata.decode().split()
+        self.assertEqual(version, negotiated)
+        return int(status), json.loads(payload) if status == '200' else None
+
+    def test_https_listener_body_limit_and_authority_isolation(self):
+        if not self.body_supported:
+            self.skipTest('HAProxy lacks HTTP ExternalAuth body forwarding')
+        exact = b'abcdef0123456789' * (LISTENER_BODY_LIMIT // 16)
+        oversized = exact + b'x'
+        upload = 'upload.example'
+        public = 'public.example'
+        for version in ('1.1', '2'):
+            with self.subTest(version=version):
+                self.auth_requests.clear()
+                self.origin_requests.clear()
+                status, app = self.tls_upload(
+                    self.shared_tls, upload, upload, exact, version)
+                self.assertEqual(200, status)
+                self.assertEqual('selected', app['route'])
+                self.assertEqual(exact, app['body'].encode())
+                self.assertEqual(
+                    [('/body/upload', exact), ('/second/upload', b'')],
+                    [(req['path'], req['body'].encode())
+                     for req in self.auth_requests])
+                self.assertEqual([app], self.origin_requests)
+
+                self.auth_requests.clear()
+                self.origin_requests.clear()
+                status, _ = self.tls_upload(
+                    self.shared_tls, upload, upload, oversized, version)
+                self.assertEqual(413, status)
+                status, _ = self.tls_upload(
+                    self.shared_tls, upload, public, exact, version)
+                self.assertEqual(421, status)
+                self.assertEqual([], self.auth_requests)
+                self.assertEqual([], self.origin_requests)
+
+                status, app = self.tls_upload(
+                    self.shared_tls, public, public, oversized, version)
+                self.assertEqual(200, status)
+                self.assertEqual('fallback', app['route'])
+                self.assertEqual(oversized, app['body'].encode())
+                self.assertEqual([], self.auth_requests)
+                self.assertEqual([app], self.origin_requests)
+
+        self.auth_requests.clear()
+        status, app = self.tls_upload(self.tls, upload, public, exact, '2')
+        self.assertEqual(200, status)
+        self.assertEqual(exact, app['body'].encode())
+        self.assertEqual('public.example', app['headers']['host'])
+        self.assertEqual([('/second/upload', public, exact)], [
+            (req['path'], req['headers']['host'], req['body'].encode())
+            for req in self.auth_requests])
 
     def test_failures_stop_before_routing(self):
         self.auth_requests.clear()
