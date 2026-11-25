@@ -130,11 +130,17 @@ def validate_policy_options_on_create(
                 tcp_tls_termination=tcp_tls_termination)
             long_http_hostname = validate.is_long_http_hostname_regex(
                 rule['type'], rule['compare_type'], rule['value'])
+            literal_http_path = (
+                rule['type'] == constants.L7RULE_TYPE_HTTP_PATH_LITERAL)
             if long_http_hostname and not creating_load_balancer:
                 raise exceptions.ValidationException(detail=_(
                     'Create policies with long HTTP hostname regexes from '
                     'the L7 policy endpoint after creating the listener.'))
-            if tcp_policy or long_http_hostname:
+            if literal_http_path and not creating_load_balancer:
+                raise exceptions.ValidationException(detail=_(
+                    'Create policies with literal HTTP paths from the L7 '
+                    'policy endpoint after creating the listener.'))
+            if tcp_policy or long_http_hostname or literal_http_path:
                 try:
                     validate.l7rule_data(data_models.L7Rule.from_dict(rule))
                 except (exceptions.InvalidL7Rule,

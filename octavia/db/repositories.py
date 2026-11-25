@@ -2450,7 +2450,8 @@ class L7RuleRepository(BaseRepository):
                           consts.L7RULE_TYPE_PATH,
                           consts.L7RULE_TYPE_FILE_TYPE) or
                 (rule_type in (consts.L7RULE_TYPE_HTTP_METHOD,
-                               consts.L7RULE_TYPE_GRPC_CONTENT_TYPE) and
+                               consts.L7RULE_TYPE_GRPC_CONTENT_TYPE,
+                               consts.L7RULE_TYPE_HTTP_PATH_LITERAL) and
                  model_kwargs.get('key') is None)):
             l7rule_dict['key'] = None
             model_kwargs['key'] = None

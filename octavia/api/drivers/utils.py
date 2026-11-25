@@ -67,6 +67,8 @@ TCP_TLS_MIXED_MODE_PAYLOAD_AVAILABLE = (
     hasattr(driver_dm.L7Policy(), 'tcp_tls_passthrough'))
 
 HTTP_L7RULE_CAPABILITIES = {
+    constants.L7RULE_TYPE_HTTP_PATH_LITERAL:
+        constants.GATEWAY_CAPABILITY_HTTP_LITERAL_PATH,
     constants.L7RULE_TYPE_HTTP_HEADER_EXACT:
         constants.GATEWAY_CAPABILITY_HTTP_HEADER_EXACT,
     constants.L7RULE_TYPE_HTTP_METHOD:
@@ -89,6 +91,13 @@ def http_long_hostname_available(driver):
     providers = CONF.api_settings.enabled_http_long_hostname_providers
     return (driver.name in providers and
             getattr(type(driver), 'supports_http_long_hostname', False)
+            is True)
+
+
+def http_literal_path_available(driver):
+    providers = CONF.api_settings.enabled_http_literal_path_providers
+    return (driver.name in providers and
+            getattr(type(driver), 'supports_http_literal_path', False)
             is True)
 
 
@@ -301,6 +310,8 @@ def gateway_capabilities(driver):
         capabilities.append(constants.GATEWAY_CAPABILITY_UDP_PACKET_DROP)
     if http_long_hostname_available(driver):
         capabilities.append(constants.GATEWAY_CAPABILITY_HTTP_LONG_HOSTNAME)
+    if http_literal_path_available(driver):
+        capabilities.append(constants.GATEWAY_CAPABILITY_HTTP_LITERAL_PATH)
     if (driver.name in api_settings.enabled_http_header_exact_providers and
             getattr(driver, 'supports_http_header_exact', False) is True):
         capabilities.append(constants.GATEWAY_CAPABILITY_HTTP_HEADER_EXACT)
@@ -1100,7 +1111,10 @@ def require_tls_sni_rule_comparison(driver, compare_type,
 
 
 def _unsupported_http_l7rule(driver, rule_type):
-    if rule_type == constants.L7RULE_TYPE_HTTP_HEADER_EXACT:
+    if rule_type == constants.L7RULE_TYPE_HTTP_PATH_LITERAL:
+        message = _('Literal HTTP path matching is unavailable for this '
+                    'provider.')
+    elif rule_type == constants.L7RULE_TYPE_HTTP_HEADER_EXACT:
         message = _('Full-value exact HTTP header matching is unavailable '
                     'for this provider.')
     elif rule_type == constants.L7RULE_TYPE_HTTP_QUERY_PARAM_EXACT:

@@ -523,12 +523,38 @@ def is_long_http_hostname_regex(rule_type, compare_type, value):
             len(value) > constants.MAX_LEGACY_L7RULE_VALUE_LENGTH)
 
 
+# Gateway API v1.7.0 HTTPPathMatch validation for Exact and PathPrefix.
+_HTTP_LITERAL_PATH_RE = re.compile(
+    r"/(?:[-A-Za-z0-9/._~!$&'()*+,;=:@]|%[0-9A-Fa-f]{2})*")
+
+
+def _validate_literal_http_path(l7rule):
+    if (l7rule.compare_type not in (
+            constants.L7RULE_COMPARE_TYPE_EQUAL_TO,
+            constants.L7RULE_COMPARE_TYPE_STARTS_WITH) or
+            l7rule.key not in (None, wtypes.Unset)):
+        raise exceptions.InvalidL7Rule(msg=_(
+            'HTTP_PATH_LITERAL requires EQUAL_TO or STARTS_WITH without '
+            'a key.'))
+    path = l7rule.value
+    if (len(path) > constants.MAX_L7RULE_HTTP_LITERAL_PATH_LENGTH or
+            not _HTTP_LITERAL_PATH_RE.fullmatch(path) or
+            any(part in path for part in ('//', '/./', '/../')) or
+            path.endswith(('/.', '/..')) or '%2f' in path.lower()):
+        raise exceptions.InvalidL7Rule(msg=_(
+            'HTTP_PATH_LITERAL requires a valid absolute Gateway API path '
+            'of at most 1024 ASCII bytes.'))
+
+
 # Note that we can evaluate this outside the context of any L7 Policy because
 # L7 rules must be internally consistent.
 def l7rule_data(l7rule, *, validate_request_value=False):
     """Raises an error if the l7rule given is invalid in some way."""
     if not l7rule.value:
         raise exceptions.InvalidL7Rule(msg=_('L7 rule type requires a value'))
+    if l7rule.type == constants.L7RULE_TYPE_HTTP_PATH_LITERAL:
+        _validate_literal_http_path(l7rule)
+        return True
     if l7rule.type == constants.L7RULE_TYPE_HTTP_QUERY_PARAM_EXACT:
         if l7rule.compare_type != constants.L7RULE_COMPARE_TYPE_EQUAL_TO:
             raise exceptions.InvalidL7Rule(msg=_(

@@ -275,6 +275,11 @@ api_opts = [
                        'support HTTP hostname regex values up to 512 '
                        'characters. Enable after upgrading the API and '
                        'workers and qualifying the fleet.')),
+    cfg.ListOpt('enabled_http_literal_path_providers', default=[],
+                help=_('Provider driver names whose regional fleets support '
+                       'literal HTTP path L7 rules. Enable after upgrading '
+                       'the database, API and workers and qualifying the '
+                       'fleet.')),
     cfg.ListOpt('enabled_http_header_exact_providers', default=[],
                 help=_('Provider driver names whose regional fleets '
                        'support full-value exact HTTP header L7 rules. '

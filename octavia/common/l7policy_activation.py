@@ -215,7 +215,8 @@ def validate_transition(session, repositories, policy, listener, driver,
             policy.response_header_operations or
             set(change['rules']) != {rule.id for rule in policy.l7rules} or
             any(not rule.enabled or rule.type not in (
-                constants.L7RULE_TYPE_HOST_NAME, constants.L7RULE_TYPE_PATH)
+                constants.L7RULE_TYPE_HOST_NAME, constants.L7RULE_TYPE_PATH,
+                constants.L7RULE_TYPE_HTTP_PATH_LITERAL)
                 for rule in policy.l7rules)):
         raise exceptions.L7PolicyActivationConflict()
     driver_utils.require_fixed_http_responses(driver)
@@ -231,6 +232,11 @@ def validate_transition(session, repositories, policy, listener, driver,
             not validate.is_grpc_external_auth(change['external_auth']) or
             origin == change['external_auth']['pool_id']):
         raise exceptions.L7PolicyActivationConflict()
+    for rule in policy.l7rules:
+        driver_utils.validate_l7rule_context(
+            driver, rule.type, listener.protocol,
+            compare_type=rule.compare_type, value=rule.value,
+            reactivating=True)
     driver_utils.require_l7policy_external_auth(
         driver, listener.protocol, change['external_auth'])
     pool = repositories.l7policy.get_redirect_pool_for_update(

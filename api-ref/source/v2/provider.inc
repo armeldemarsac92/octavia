@@ -564,6 +564,11 @@ limit from 255 to 512 characters on HTTP and terminated HTTPS listeners.
 It requires an Amphora driver with long hostname support and the provider
 name in ``[api_settings] enabled_http_long_hostname_providers``.
 
+``http_literal_path_v1`` enables ``HTTP_PATH_LITERAL`` rules on HTTP
+and terminated HTTPS listeners. Apply the database migration and upgrade
+the regional API and workers before qualifying the Amphora fleet and adding
+the provider name to ``[api_settings] enabled_http_literal_path_providers``.
+
 ``http_header_exact_v1`` enables ``HTTP_HEADER_EXACT`` rules for HTTP and
 terminated HTTPS listeners. This capability requires the provider name in
 ``[api_settings] enabled_http_header_exact_providers`` after the regional
