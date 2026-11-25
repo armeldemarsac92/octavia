@@ -152,7 +152,7 @@ class NoopAmphoraLoadBalancerDriver(
                                              timeout_dict)
 
     def update(self, loadbalancer, *, l7policy_activation=False,
-               l7policy_restoration=False):
+               l7policy_restoration=False, tcp_member_batch=False):
         self.driver.update(loadbalancer)
 
     def start(self, loadbalancer, amphora=None, timeout_dict=None):

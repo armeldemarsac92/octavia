@@ -393,10 +393,14 @@ clears it even if the operator has disabled advertisement of the capability.
 
 For example, submit ``{"members": [], "tcp_connection_rejection":
 {"reject_weight": 4, "total_weight": 4}}`` to reject every new connection
-without a backend member. A successful 202 schedules the change. Check the
-pool's ``provisioning_status`` and rejection fraction to confirm provisioning.
-A failed activation leaves the desired graph visible with pool status
-``ERROR`` and permits a subsequent full replacement with the field present.
+without a backend member. A successful 202 schedules the change. The pool
+shows the desired fraction while provisioning is pending. An identical full
+request can be sent again while the batch is pending, including after regional
+de-advertisement. A different request returns 409 until the batch finishes.
+Check the pool's ``provisioning_status`` as well as its fraction and members
+to confirm provisioning. A failed activation leaves the desired graph visible
+with pool status ``ERROR`` and permits another full replacement with the
+field present.
 
 If the request is valid, the service returns the ``Accepted (202)``
 response code. To confirm the updates, check that the member provisioning
@@ -416,6 +420,7 @@ members were correctly deleted. If the statuses are ``PENDING_UPDATE`` or
    - 404
    - 409
    - 500
+   - 501
    - 503
 
 Request

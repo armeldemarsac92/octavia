@@ -2740,7 +2740,7 @@ class DecrementMemberQuota(BaseDatabaseTask):
     Since sqlalchemy will likely retry by itself always revert if it fails
     """
 
-    def execute(self, project_id):
+    def execute(self, project_id, loadbalancer_id=None):
         """Decrements the member quota.
 
         :param member: The member to decrement the quota on.
@@ -2752,6 +2752,10 @@ class DecrementMemberQuota(BaseDatabaseTask):
 
         lock_session = db_apis.get_session()
         try:
+            if loadbalancer_id and self.loadbalancer_repo.batch_owns_graph(
+                    lock_session, loadbalancer_id, tcp_only=True):
+                lock_session.rollback()
+                return False
             self.repos.decrement_quota(lock_session,
                                        data_models.Member,
                                        project_id)
@@ -2763,7 +2767,8 @@ class DecrementMemberQuota(BaseDatabaseTask):
                           {'proj': project_id})
                 lock_session.rollback()
 
-    def revert(self, project_id, result, *args, **kwargs):
+    def revert(self, project_id, result, loadbalancer_id=None, *args,
+               **kwargs):
         """Re-apply the quota
 
         :param member: The member to decrement the quota on.
@@ -2775,11 +2780,16 @@ class DecrementMemberQuota(BaseDatabaseTask):
                     {'proj': project_id})
 
         # Increment the quota back if this task wasn't the failure
-        if not isinstance(result, failure.Failure):
+        if result is not False and not isinstance(result, failure.Failure):
 
             try:
                 session = db_apis.get_session()
                 try:
+                    if (loadbalancer_id and
+                            self.loadbalancer_repo.batch_owns_graph(
+                                session, loadbalancer_id, tcp_only=True)):
+                        session.rollback()
+                        return
                     self.repos.check_quota_met(session,
                                                data_models.Member,
                                                project_id)

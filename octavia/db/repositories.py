@@ -77,10 +77,8 @@ class BaseRepository:
     # Relationships from a mutable resource to its load balancer.
     activation_parent = None
 
-    def batch_owns_graph(self, session, id):
-        api = CONF.api_settings
-        providers = api.enabled_l7policy_batch_activation_providers
-        if self.activation_parent is None or not providers:
+    def batch_owns_graph(self, session, id, *, tcp_only=False):
+        if self.activation_parent is None:
             return False
         model = self.model_class
         query = session.query(models.LoadBalancer.id).select_from(model)
@@ -93,7 +91,15 @@ class BaseRepository:
         if lb_id is None:
             return False
         lb = LoadBalancerRepository().get_for_update(session, lb_id)
-        operation = lb.l7policy_activation if lb else None
+        if lb is None:
+            return False
+        if lb.tcp_member_batch is not None:
+            return True
+        l7_providers = (
+            CONF.api_settings.enabled_l7policy_batch_activation_providers)
+        if tcp_only or not l7_providers:
+            return False
+        operation = lb.l7policy_activation
         if (operation and
                 operation['phase'] == consts.L7POLICY_ACTIVATION_FENCED and
                 session.info.get(consts.FAILOVER_LOADBALANCER_ID) == lb.id):
@@ -165,12 +171,17 @@ class BaseRepository:
         if (set(model_kwargs) != {'operating_status'} and
                 self.batch_owns_graph(session, id)):
             return
+        if not self._allow_update(session, id, model_kwargs):
+            return
         tags = model_kwargs.pop('tags', None)
         if tags is not None:
             resource = session.get(self.model_class, id)
             resource.tags = tags
         session.query(self.model_class).filter_by(
             id=id).update(model_kwargs)
+
+    def _allow_update(self, session, id, model_kwargs):
+        return True
 
     def get(self, session, **filters):
         """Retrieves an entity from the database.
@@ -625,6 +636,7 @@ class Repositories:
                     # This is to handle the upgrade case
                     member_count = session.query(models.Member).filter(
                         models.Member.project_id == project_id,
+                        models.Member.tcp_batch_quota_released.is_(False),
                         models.Member.provisioning_status !=
                         consts.DELETED).count() + count
                 else:
@@ -887,7 +899,7 @@ class LoadBalancerRepository(BaseRepository):
             if is_delete else consts.MUTABLE_STATUSES
         )
         if (lb.provisioning_status not in acceptable_statuses or
-                self._batch_pending(lb)):
+                self._batch_pending(lb) or self.tcp_batch_pending(lb)):
             if raise_exception:
                 raise exceptions.ImmutableObject(
                     resource='Load Balancer', id=id)
@@ -917,6 +929,7 @@ class LoadBalancerRepository(BaseRepository):
               .with_for_update()
               .filter_by(id=id).one())
         if (lb.provisioning_status not in consts.FAILOVERABLE_STATUSES or
+                self.tcp_batch_pending(lb) or
                 (self._batch_pending(lb) and
                  not self._fence_failed_activation(session, lb, status))):
             if raise_exception:
@@ -973,7 +986,13 @@ class LoadBalancerRepository(BaseRepository):
             'pending', 'rendering', 'reverting')
 
     @staticmethod
+    def tcp_batch_pending(lb):
+        return (lb.tcp_member_batch or {}).get('phase') == (
+            consts.TCP_MEMBER_BATCH_PENDING)
+
+    @staticmethod
     def _invalidate_batch(lb):
+        lb.tcp_member_batch = None
         if (lb.l7policy_graph_generation or lb.l7policy_activation or
                 CONF.api_settings.enabled_l7policy_batch_activation_providers):
             lb.l7policy_graph_generation = uuidutils.generate_uuid()
@@ -1090,6 +1109,10 @@ class PoolRepository(BaseRepository):
     activation_parent = ('load_balancer',)
 
     def set_backend_tls_pool_statuses(self, session, *, closed, recovered):
+        guarded = {id for id in sorted(set(closed) | set(recovered))
+                   if self.batch_owns_graph(session, id, tcp_only=True)}
+        closed = set(closed) - guarded
+        recovered = set(recovered) - guarded
         pool = self.model_class
         protected = session.query(pool).filter(
             or_(pool.backend_tls_hostname.is_not(None),
@@ -1103,17 +1126,28 @@ class PoolRepository(BaseRepository):
         if recovered:
             protected.filter(
                 pool.id.in_(recovered),
-                pool.provisioning_status == consts.ERROR).update(
+                pool.provisioning_status == consts.ERROR,
+                or_(pool.tcp_member_batch_id.is_(None),
+                    pool.tcp_member_batch_id !=
+                    consts.TCP_MEMBER_BATCH_FAILED)).update(
                     {'provisioning_status': consts.ACTIVE})
 
     def mark_active(self, session, id):
         if self.batch_owns_graph(session, id):
             return
         pool = self.model_class
+        # A later ordinary status completion cannot report a failed batch as
+        # applied. The authorized batch path owns that recovery.
+        failed = pool.tcp_member_batch_id == consts.TCP_MEMBER_BATCH_FAILED
+        session.query(pool).filter(
+            pool.id == id, failed, pool.provisioning_status.notin_(
+                (consts.PENDING_DELETE, consts.DELETED))).update(
+                    {'provisioning_status': consts.ERROR})
         # The Amphora driver records closed protected pools after applying
         # the safe configuration. A flow must not turn those errors ACTIVE.
         session.query(pool).filter(
             pool.id == id,
+            or_(pool.tcp_member_batch_id.is_(None), ~failed),
             or_(and_(pool.backend_tls_hostname.is_(None),
                      pool.backend_tls_require_h2.is_(False)),
                 pool.enabled.is_(False),
@@ -1201,6 +1235,7 @@ class PoolRepository(BaseRepository):
             models.HealthMonitor.provisioning_status != consts.DELETED).count()
         member_count = session.query(models.Member).filter(
             models.Member.pool_id == pool_id,
+            models.Member.tcp_batch_quota_released.is_(False),
             models.Member.provisioning_status != consts.DELETED).count()
 
         return (hm_count, member_count)
@@ -1209,6 +1244,13 @@ class PoolRepository(BaseRepository):
 class MemberRepository(BaseRepository):
     model_class = models.Member
     activation_parent = ('pool', 'load_balancer')
+
+    def _allow_update(self, session, id, model_kwargs):
+        if ('tcp_batch_quota_released' in model_kwargs or
+                set(model_kwargs) == {'operating_status'}):
+            return True
+        return not (session.query(self.model_class.tcp_batch_quota_released)
+                    .filter_by(id=id).with_for_update().scalar())
 
     def get_batch_for_update(self, session, pool_id):
         return (session.query(self.model_class).filter_by(pool_id=pool_id)
@@ -1261,8 +1303,12 @@ class MemberRepository(BaseRepository):
         :param model_kwargs: Entity attributes that should be updates.
         :returns: octavia.common.data_model
         """
-        session.query(self.model_class).filter_by(
-            pool_id=pool_id).update(model_kwargs)
+        query = session.query(self.model_class).filter_by(pool_id=pool_id)
+        if set(model_kwargs) != {'operating_status'}:
+            if PoolRepository().batch_owns_graph(session, pool_id):
+                return
+            query = query.filter_by(tcp_batch_quota_released=False)
+        query.update(model_kwargs)
 
 
 class ListenerRepository(BaseRepository):
@@ -1489,6 +1535,10 @@ class ListenerRepository(BaseRepository):
         return bool(listener.default_pool)
 
     def set_frontend_fallback_statuses(self, session, *, closed, restored):
+        guarded = {id for id in sorted(set(closed) | set(restored))
+                   if self.batch_owns_graph(session, id, tcp_only=True)}
+        closed = set(closed) - guarded
+        restored = set(restored) - guarded
         model = self.model_class
         rows = (session.query(model).filter(
             model.id.in_(closed | restored),

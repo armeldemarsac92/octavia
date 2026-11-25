@@ -218,6 +218,8 @@ class Member(base_models.BASE, base_models.IdMixin, base_models.ProjectMixin,
     ip_address = sa.Column('ip_address', sa.String(64), nullable=False)
     protocol_port = sa.Column(sa.Integer, nullable=False)
     weight = sa.Column(sa.Integer, nullable=True)
+    tcp_batch_quota_released = sa.Column(
+        sa.Boolean, nullable=False, default=False, server_default=sa.false())
     backup = sa.Column(sa.Boolean(), nullable=False)
     monitor_address = sa.Column(sa.String(64), nullable=True)
     monitor_port = sa.Column(sa.Integer, nullable=True)
@@ -466,6 +468,9 @@ class LoadBalancer(base_models.BASE, base_models.IdMixin,
                                      sa.JSON(none_as_null=True), nullable=True)
     l7policy_graph_generation = orm.synonym('_l7policy_graph_generation')
     l7policy_activation = orm.synonym('_l7policy_activation')
+    _tcp_member_batch = sa.Column('tcp_member_batch',
+                                  sa.JSON(none_as_null=True))
+    tcp_member_batch = orm.synonym('_tcp_member_batch')
     vip = orm.relationship('Vip', cascade='delete', uselist=False,
                            backref=orm.backref('load_balancer', uselist=False))
     additional_vips = orm.relationship(

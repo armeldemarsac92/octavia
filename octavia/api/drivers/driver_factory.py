@@ -52,6 +52,23 @@ def get_driver(provider):
     return driver
 
 
+def supports_tcp_connection_rejection(driver):
+    driver_class = driver if isinstance(driver, type) else type(driver)
+    return getattr(
+        driver_class, 'supports_tcp_connection_rejection', False) is True
+
+
+def provider_supports_tcp_connection_rejection(provider):
+    """Inspect the registered driver without creating an RPC client."""
+    try:
+        driver = stevedore_driver.DriverManager(
+            namespace='octavia.api.drivers',
+            name=provider or 'amphora', invoke_on_load=False).driver
+    except RuntimeError:
+        return False
+    return supports_tcp_connection_rejection(driver)
+
+
 def remove_providers(providers):
     # Presumably these provider drivers failed to load, remove so they do not
     # show up in the available list

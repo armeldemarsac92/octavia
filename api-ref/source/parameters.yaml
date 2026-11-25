@@ -265,7 +265,8 @@ backend-tls-require-h2:
 tcp-connection-rejection:
   description: |
     The Amphora TCP pool's requested fraction of new connections to reject.
-    A patched Amphora TCP pool returns null when no fraction is configured.
+    The pool shows the desired fraction during provisioning and returns null
+    when no fraction is configured.
   in: body
   required: false
   type: object

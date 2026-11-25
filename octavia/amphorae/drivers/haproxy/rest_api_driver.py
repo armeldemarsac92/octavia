@@ -201,7 +201,8 @@ class HaproxyAmphoraLoadBalancerDriver(
             self, loadbalancer, amphora, timeout_dict=None, *,
             amp_details=None, backend_tls_certs=None,
             frontend_tls_certs=None, closed_frontend=(),
-            l7policy_activation=False, otlp_observed=None):
+            l7policy_activation=False, otlp_observed=None,
+            tcp_batch_configs=None):
         if not loadbalancer.listeners:
             LOG.debug('No listeners found to update.')
             return set()
@@ -221,7 +222,7 @@ class HaproxyAmphoraLoadBalancerDriver(
             LOG.debug("%s updating listener %s on amphora %s",
                       self.__class__.__name__, listener.id, amphora.id)
             if listener.protocol in consts.LVS_PROTOCOLS:
-                if l7policy_activation:
+                if l7policy_activation or tcp_batch_configs is not None:
                     continue
                 # Generate Keepalived LVS configuration from listener object
                 config = self.lvs_jinja.build_config(listener=listener)
@@ -258,6 +259,9 @@ class HaproxyAmphoraLoadBalancerDriver(
                         otlp_tls_certs[pool_id] = (
                             self._process_otlp_collector_certs(
                                 listener, loadbalancer, amphora, pool_id))
+                    if (tcp_batch_configs is not None and
+                            otlp_tls_certs[pool_id].get('closed')):
+                        raise driver_except.ListenerProvisioningError()
                 try:
                     if client_auth_fallback:
                         certs.update(frontend_tls_certs[listener.id])
@@ -270,7 +274,7 @@ class HaproxyAmphoraLoadBalancerDriver(
 
                     listeners_to_update.append(listener)
                 except Exception as e:
-                    if l7policy_activation:
+                    if l7policy_activation or tcp_batch_configs is not None:
                         raise
                     LOG.exception('Unable to update listener %s due to '
                                   '"%s". Skipping this listener.',
@@ -295,6 +299,9 @@ class HaproxyAmphoraLoadBalancerDriver(
                     tls_certs=certs,
                     haproxy_versions=haproxy_versions,
                     amp_details=amp_details, **tracing_options)
+                if tcp_batch_configs is not None:
+                    tcp_batch_configs.append((amphora, config))
+                    return {listener.id for listener in listeners_to_update}
                 self.clients[amphora.api_version].upload_config(
                     amphora, loadbalancer.id, config,
                     timeout_dict=timeout_dict)
@@ -313,7 +320,7 @@ class HaproxyAmphoraLoadBalancerDriver(
                         results[listener.id] = (
                             consts.ERROR if material.get('closed') else
                             consts.ACTIVE)
-            else:
+            elif tcp_batch_configs is None:
                 # If we aren't updating any listeners, make sure there are
                 # no listeners hanging around. For example if this update
                 # was called from a listener delete.
@@ -339,24 +346,45 @@ class HaproxyAmphoraLoadBalancerDriver(
                     amp, listener.id)
 
     def update(self, loadbalancer, *, l7policy_activation=False,
-               l7policy_restoration=False):
+               l7policy_restoration=False, tcp_member_batch=False):
         amphorae = [amphora for amphora in loadbalancer.amphorae
                     if amphora.status != consts.DELETED]
-        if l7policy_activation and not amphorae:
+        if tcp_member_batch and not any(
+                listener.protocol not in consts.LVS_PROTOCOLS
+                for listener in loadbalancer.listeners):
+            return
+        if (l7policy_activation or tcp_member_batch) and not amphorae:
             raise driver_except.ListenerProvisioningError()
+        tcp_batch_configs = [] if tcp_member_batch else None
+        batch_options = (
+            {'tcp_batch_configs': tcp_batch_configs}
+            if tcp_member_batch else {})
         opted_in, protected = self._backend_tls_pools(loadbalancer)
         fallback, withdrawn = self._frontend_fallback_listeners(loadbalancer)
         with self._otlp_render_results(loadbalancer) as tracing_options:
             if (opted_in or fallback or withdrawn) and amphorae:
-                return self._update_protected_tls_listeners(
+                recovered = self._update_protected_tls_listeners(
                     loadbalancer, amphorae, amphorae, protected, fallback,
                     withdrawn, l7policy_activation=l7policy_activation,
                     l7policy_restoration=l7policy_restoration,
-                    **tracing_options)
-            for amphora in amphorae:
-                self._update_amphora_listeners(
-                    loadbalancer, amphora,
-                    l7policy_activation=l7policy_activation, **tracing_options)
+                    **tracing_options, **batch_options)
+                if not tcp_member_batch:
+                    return recovered
+            else:
+                for amphora in amphorae:
+                    self._update_amphora_listeners(
+                        loadbalancer, amphora,
+                        l7policy_activation=l7policy_activation,
+                        **tracing_options, **batch_options)
+            if tcp_member_batch:
+                # Build every peer's combined config before uploading any
+                # candidate. Validate all uploads before requesting a reload.
+                for amphora, config in tcp_batch_configs:
+                    self.clients[amphora.api_version].upload_config(
+                        amphora, loadbalancer.id, config)
+                for amphora, _config in tcp_batch_configs:
+                    self.clients[amphora.api_version].reload_listener(
+                        amphora, loadbalancer.id)
 
     def update_failover_listeners(self, loadbalancer, amphora_index,
                                   amphorae_status, timeout_dict=None):
@@ -425,7 +453,7 @@ class HaproxyAmphoraLoadBalancerDriver(
             withdrawn, timeout_dict=None, unreachable=(),
             l7policy_activation=False,
             coordinating_failover=False, l7policy_restoration=False,
-            otlp_observed=None):
+            otlp_observed=None, tcp_batch_configs=None):
         # Preflight the pair and stage the TLS material before any reload.
         details = {}
         for amphora in peers if protected or fallback else amphorae:
@@ -444,8 +472,9 @@ class HaproxyAmphoraLoadBalancerDriver(
 
         frontend_certs, closed_frontend = self._stage_frontend_client_auth(
             loadbalancer.id, amphorae, peers, details, fallback)
-        if (l7policy_activation and not l7policy_restoration and
-                closed_frontend):
+        if (closed_frontend and
+                (tcp_batch_configs is not None or
+                 (l7policy_activation and not l7policy_restoration))):
             raise driver_except.ListenerProvisioningError()
 
         certs = {amphora.id: {} for amphora in amphorae}
@@ -486,11 +515,16 @@ class HaproxyAmphoraLoadBalancerDriver(
             for amphora in amphorae:
                 certs[amphora.id][pool_id] = {'closed': True}
 
+        if tcp_batch_configs is not None and closed:
+            raise driver_except.ListenerProvisioningError()
+
         reload_errors = {}
         reloaded_listeners = []
         tracing_options = {}
         if otlp_observed is not None:
             tracing_options['otlp_observed'] = otlp_observed
+        if tcp_batch_configs is not None:
+            tracing_options['tcp_batch_configs'] = tcp_batch_configs
         for amphora in amphorae:
             try:
                 configured = self._update_amphora_listeners(
@@ -503,9 +537,14 @@ class HaproxyAmphoraLoadBalancerDriver(
                     **tracing_options)
                 reloaded_listeners.append(configured)
             except Exception as error:
+                if tcp_batch_configs is not None:
+                    raise
                 LOG.warning('Could not reload listeners on amphora %s (%s).',
                             amphora.id, type(error).__name__)
                 reload_errors[amphora.id] = error
+
+        if tcp_batch_configs is not None:
+            return
 
         recovered = set()
         restored_frontend = set()

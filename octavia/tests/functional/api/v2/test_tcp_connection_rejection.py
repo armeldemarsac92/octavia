@@ -17,12 +17,17 @@ from unittest import mock
 from oslo_utils import uuidutils
 
 from octavia.amphorae.drivers.noop_driver import driver as amphora_noop
+from octavia.api.drivers import driver_factory
 from octavia.api.v2.controllers import member
 from octavia.common import constants
 from octavia.common import exceptions
 from octavia.common.jinja.haproxy.combined_listeners import jinja_cfg
+from octavia.common import policy
 from octavia.controller.queue.v2 import endpoints
+from octavia.controller.worker.v2.tasks import amphora_driver_tasks
+from octavia.controller.worker.v2.tasks import database_tasks
 from octavia.db import api as db_api
+from octavia.db import repositories
 from octavia.network import data_models as network_models
 from octavia.network.drivers.noop_driver import driver as network_noop
 from octavia.tests.functional.api.v2 import base
@@ -111,7 +116,8 @@ class TestTCPConnectionRejection(base.BaseAPITest):
 
         rendered = []
 
-        def render(graph):
+        def render(graph, *, tcp_member_batch):
+            self.assertTrue(tcp_member_batch)
             config = self._render(graph)
             self.assertIn('192.0.2.99:9000', config)
             rendered.append(config)
@@ -123,7 +129,9 @@ class TestTCPConnectionRejection(base.BaseAPITest):
                              self._pool()['provisioning_status'])
             self.assertEqual(one_invalid,
                              self._pool()['tcp_connection_rejection'])
-            self._batch(one_invalid, [member_address], status=409)
+            self.assertEqual(first, self._batch(one_invalid, [member_address]))
+            self._batch(one_invalid, [dict(member_address, weight=2)],
+                        status=409)
             worker.apply_tcp_member_batch({}, **first)
             worker.apply_tcp_member_batch({}, **first)
             self.assertEqual(1, len(rendered))
@@ -225,11 +233,13 @@ class TestTCPConnectionRejection(base.BaseAPITest):
 
         with mock.patch.object(amphora_noop.NoopAmphoraLoadBalancerDriver,
                                'update') as update:
-            # An unrelated admission can put the LB back into PENDING_UPDATE.
-            self.set_object_status(self.lb_repo, self.lb_id,
-                                   constants.PENDING_UPDATE)
+            # An authorized sibling mutation puts the LB into PENDING_UPDATE
+            # under a new owner. An old delivery cannot complete it.
+            sibling = self.create_pool(
+                self.lb_id, 'TCP', 'ROUND_ROBIN')['pool']['id']
             worker.apply_tcp_member_batch({}, **failed)
             update.assert_not_called()
+            self.set_object_status(self.pool_repo, sibling)
             self.set_object_status(self.lb_repo, self.lb_id)
 
             retry = self._batch(one_invalid, [member_address])
@@ -244,3 +254,119 @@ class TestTCPConnectionRejection(base.BaseAPITest):
         self.assertEqual(({}, 'batch_update_members'),
                          self.rpc.cast.call_args.args)
         self.assertEqual(one_invalid, self._pool()['tcp_connection_rejection'])
+
+    def test_pending_batch_fences_ordinary_completion_and_redispatches(self):
+        self._enroll()
+        victim_id = self.create_member(
+            self.pool_id, '192.0.2.3', 9000)['member']['id']
+        self.set_lb_status(self.lb_id)
+        sibling = self._create_pool('TCP')
+        full = {'reject_weight': 1, 'total_weight': 1}
+        delivery = self._batch(full)
+        worker = endpoints.Endpoints()
+
+        with mock.patch.object(amphora_driver_tasks.ApplyTCPMemberBatch,
+                               '_owned', side_effect=RuntimeError('db read')):
+            self.assertRaises(RuntimeError, worker.apply_tcp_member_batch,
+                              {}, **delivery)
+
+        database_tasks.MarkMemberActiveInDB().execute(
+            {constants.MEMBER_ID: victim_id})
+        database_tasks.MarkPoolActiveInDB().execute(self.pool_id)
+        database_tasks.MarkLBAndListenersActiveInDB().execute(self.lb_id, [{
+            constants.LISTENER_ID: self.listener_id,
+        }])
+        self.put(self.MEMBERS_PATH.format(pool_id=sibling), {'members': []},
+                 status=409)
+        victim = self.get(f'{self.batch_path}/{victim_id}').json['member']
+        self.assertEqual(constants.PENDING_DELETE,
+                         victim['provisioning_status'])
+        self.assertEqual(constants.PENDING_UPDATE,
+                         self._pool()['provisioning_status'])
+
+        self._enroll(False)
+        self.assertEqual(delivery, self._batch(full))
+        with mock.patch.object(amphora_noop.NoopAmphoraLoadBalancerDriver,
+                               'update') as update:
+            amphora_driver_tasks.ListenersUpdate().execute(self.lb_id)
+            update.assert_not_called()
+            worker.apply_tcp_member_batch({}, **delivery)
+            amphora_driver_tasks.ListenersUpdate().execute(self.lb_id)
+            update.assert_called_once()
+        self.assertEqual([], self._pool()['members'])
+
+    def test_failed_withdrawal_retains_unbilled_member_for_restoration(self):
+        repo = repositories.Repositories()
+        self.conf.config(group='api_settings', auth_strategy=constants.TESTING)
+        self.conf.config(group='quotas', default_member_quota=1)
+        repo.quotas.ensure_project_exists(self.project_id)
+        auth = mock.patch.object(policy, 'get_enforcer')
+        auth.start().return_value.authorize.return_value = True
+        self.addCleanup(auth.stop)
+        self._enroll()
+        worker = endpoints.Endpoints()
+        member_address = {'address': '192.0.2.3', 'protocol_port': 9000}
+        one_invalid = {'reject_weight': 1, 'total_weight': 4}
+        worker.apply_tcp_member_batch({}, **self._batch(
+            one_invalid, [member_address]))
+        with db_api.session().begin() as session:
+            self.assertEqual(1, repo.quotas.get(
+                session, project_id=self.project_id).in_use_member)
+
+        withdrawal = self._batch({'reject_weight': 1, 'total_weight': 1})
+        with mock.patch.object(amphora_noop.NoopAmphoraLoadBalancerDriver,
+                               'update', side_effect=RuntimeError('reload')):
+            self.assertRaises(RuntimeError, worker.apply_tcp_member_batch,
+                              {}, **withdrawal)
+        with db_api.session().begin() as session:
+            self.assertEqual(0, repo.quotas.get(
+                session, project_id=self.project_id).in_use_member)
+            self.assertEqual((0, 0), self.pool_repo.get_children_count(
+                session, self.pool_id))
+            self.assertEqual(1, self.member_repo.count(
+                session, pool_id=self.pool_id))
+
+        worker.apply_tcp_member_batch({}, **self._batch(
+            one_invalid, [member_address]))
+        with db_api.session().begin() as session:
+            self.assertEqual(1, repo.quotas.get(
+                session, project_id=self.project_id).in_use_member)
+            self.assertEqual((0, 1), self.pool_repo.get_children_count(
+                session, self.pool_id))
+
+    def test_fresh_null_is_legacy_and_registered_alias_has_null_readback(self):
+        self.rpc.cast.reset_mock()
+        self.put(self.batch_path, {'members': [],
+                                   'tcp_connection_rejection': None},
+                 status=202)
+        self.rpc.cast.assert_not_called()
+        item = {'address': '192.0.2.3', 'protocol_port': 9000}
+        self.put(self.batch_path, {'members': [item],
+                                   'tcp_connection_rejection': None},
+                 status=202)
+        self.assertEqual(({}, 'batch_update_members'),
+                         self.rpc.cast.call_args.args)
+        self.set_lb_status(self.lb_id)
+
+        provider = 'site-amphora'
+        managed = self.conf.conf.api_settings.enabled_provider_drivers
+        self.conf.config(group='api_settings',
+                         enabled_provider_drivers={**managed, provider: ''},
+                         enabled_tcp_connection_rejection_providers=[provider])
+        factory = driver_factory.stevedore_driver.DriverManager
+
+        def alias(*args, **kwargs):
+            if kwargs.get('name') == provider:
+                kwargs['name'] = 'amphora'
+            return factory(*args, **kwargs)
+
+        with db_api.session().begin() as session:
+            self.lb_repo.update(session, self.lb_id, provider=provider)
+        with mock.patch.object(driver_factory.stevedore_driver,
+                               'DriverManager', side_effect=alias):
+            caps = self.get(self.PROVIDERS_PATH +
+                            f'/{provider}/gateway_capabilities').json
+            capability = constants.GATEWAY_CAPABILITY_TCP_CONNECTION_REJECTION
+            self.assertIn(capability, caps['gateway_capabilities'])
+            self.assertIsNone(self._pool()['tcp_connection_rejection'])
+            self._batch({'reject_weight': 1, 'total_weight': 1})

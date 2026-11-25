@@ -23,6 +23,7 @@ from oslo_log import log as logging
 from oslo_utils import excutils
 from stevedore import driver as stevedore_driver
 
+from octavia.api.drivers import driver_factory
 from octavia.common import constants
 from octavia.common import data_models
 from octavia.common import exceptions
@@ -161,8 +162,7 @@ def gateway_capabilities(driver):
     tcp_rejection_providers = (
         api_settings.enabled_tcp_connection_rejection_providers)
     if (driver.name in tcp_rejection_providers and
-            getattr(driver, 'supports_tcp_connection_rejection', False)
-            is True):
+            driver_factory.supports_tcp_connection_rejection(driver)):
         capabilities.append(
             constants.GATEWAY_CAPABILITY_TCP_CONNECTION_REJECTION)
     if (driver.name in api_settings.enabled_http_header_exact_providers and
@@ -1159,6 +1159,7 @@ def member_dict_to_provider_dict(member_dict):
     new_member_dict = _base_to_provider_dict(member_dict,
                                              include_project_id=True)
     new_member_dict['member_id'] = new_member_dict.pop('id')
+    new_member_dict.pop('tcp_batch_quota_released', None)
     if 'ip_address' in new_member_dict:
         new_member_dict['address'] = new_member_dict.pop('ip_address')
     # Remove the DB back references

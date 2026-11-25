@@ -16,6 +16,7 @@ from octavia_lib.common import constants as lib_constants
 from wsme import types as wtypes
 
 from octavia.api.common import types
+from octavia.api.drivers import driver_factory
 from octavia.api.v2.types import health_monitor as health_monitor_types
 from octavia.api.v2.types import member as member_types
 from octavia.common import constants
@@ -139,8 +140,8 @@ class PoolResponse(BasePoolType):
         provider = getattr(db_obj.load_balancer, 'provider', None)
         if (result.tcp_connection_rejection is None and
                 (db_obj.protocol != constants.PROTOCOL_TCP or
-                 provider not in (None, constants.AMPHORA, constants.AMPHORAV2,
-                                  constants.OCTAVIA))):
+                 not driver_factory.provider_supports_tcp_connection_rejection(
+                     provider))):
             result.tcp_connection_rejection = wtypes.Unset
 
         result.listeners = [

@@ -25,3 +25,8 @@ def upgrade():
     op.add_column('pool', sa.Column(
         'tcp_connection_rejection', sa.JSON(none_as_null=True)))
     op.add_column('pool', sa.Column('tcp_member_batch_id', sa.String(36)))
+    op.add_column('load_balancer', sa.Column(
+        'tcp_member_batch', sa.JSON(none_as_null=True)))
+    op.add_column('member', sa.Column(
+        'tcp_batch_quota_released', sa.Boolean(), nullable=False,
+        server_default=sa.false()))

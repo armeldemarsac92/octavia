@@ -117,6 +117,9 @@ class AmpListenersUpdate(BaseAmphoraTask):
         try:
             session = db_apis.get_session()
             with session.begin():
+                if self.loadbalancer_repo.batch_owns_graph(
+                        session, loadbalancer_id, tcp_only=True):
+                    return
                 db_amp = self.amphora_repo.get(session,
                                                id=amphora[constants.ID])
                 db_lb = self.loadbalancer_repo.get(
@@ -148,6 +151,9 @@ class AmphoraIndexListenerUpdate(BaseAmphoraTask):
                 amphorae_status, new_amphora_id, timeout_dict):
         session = db_apis.get_session()
         with session.begin():
+            if self.loadbalancer_repo.batch_owns_graph(
+                    session, loadbalancer_id, tcp_only=True):
+                return
             db_lb = self.loadbalancer_repo.get(
                 session, id=loadbalancer_id)
         try:
@@ -205,9 +211,7 @@ class ListenersUpdate(BaseAmphoraTask):
     def _update(self, loadbalancer_id):
         session = db_apis.get_session()
         with session.begin():
-            guard_batch = (
-                CONF.api_settings.enabled_l7policy_batch_activation_providers)
-            if guard_batch and self.loadbalancer_repo.batch_owns_graph(
+            if self.loadbalancer_repo.batch_owns_graph(
                     session, loadbalancer_id):
                 return
             loadbalancer = self.loadbalancer_repo.get(session,
@@ -248,7 +252,10 @@ class ApplyTCPMemberBatch(BaseAmphoraTask):
         # The API casts while holding this row. A worker arriving early
         # waits for commit and an API rollback leaves no matching batch.
         lb = self.loadbalancer_repo.get_for_update(session, lb_id)
-        if lb is None or lb.provisioning_status != constants.PENDING_UPDATE:
+        if (lb is None or lb.provisioning_status != constants.PENDING_UPDATE or
+                not self.loadbalancer_repo.tcp_batch_pending(lb) or
+                lb.tcp_member_batch['id'] != batch_id or
+                lb.tcp_member_batch['pool_id'] != pool_id):
             return None, None
         pool = self.pool_repo.get_orm(session, id=pool_id,
                                       load_balancer_id=lb_id,
@@ -262,6 +269,8 @@ class ApplyTCPMemberBatch(BaseAmphoraTask):
             lb, pool = self._owned(session, lb_id, pool_id, batch_id)
             if pool is None:
                 return
+            if pool.provisioning_status != constants.PENDING_UPDATE:
+                raise driver_except.ListenerProvisioningError()
             az = (self.az_repo.get_availability_zone_metadata_dict(
                 session, lb.availability_zone)
                 if lb.availability_zone else {})
@@ -277,11 +286,7 @@ class ApplyTCPMemberBatch(BaseAmphoraTask):
                 },
                 constants.AVAILABILITY_ZONE: az,
             })
-            if graph.listeners and not any(
-                    amphora.status != constants.DELETED
-                    for amphora in graph.amphorae):
-                raise driver_except.ListenerProvisioningError()
-            self.amphora_driver.update(graph)
+            self.amphora_driver.update(graph, tcp_member_batch=True)
             self._finish(lb_id, pool_id, batch_id, applied=True)
         except Exception:
             self._finish(lb_id, pool_id, batch_id, applied=False)
@@ -309,9 +314,18 @@ class ApplyTCPMemberBatch(BaseAmphoraTask):
                 # or partial reload. Never acknowledge the pool as ACTIVE.
                 pool.provisioning_status = constants.ERROR
                 pool.tcp_member_batch_id = constants.TCP_MEMBER_BATCH_FAILED
-            for listener in pool.listeners:
-                if listener.provisioning_status == constants.PENDING_UPDATE:
+            listener_ids = set(lb.tcp_member_batch['listener_ids'])
+            for listener in lb.listeners:
+                if (listener.id in listener_ids and
+                        listener.provisioning_status ==
+                        constants.PENDING_UPDATE):
                     listener.provisioning_status = pool.provisioning_status
+            lb.tcp_member_batch = {
+                **lb.tcp_member_batch,
+                'phase': (constants.TCP_MEMBER_BATCH_APPLIED
+                          if pool.provisioning_status == constants.ACTIVE
+                          else constants.TCP_MEMBER_BATCH_FAILED),
+            }
             lb.provisioning_status = constants.ACTIVE
 
 
@@ -336,7 +350,9 @@ class ApplyL7PolicyWithInitialRules(BaseAmphoraTask):
         # when it dispatches the RPC. Release it before the Amphora call so
         # API mutations can observe the existing PENDING_UPDATE state.
         with db_apis.session().begin() as session:
-            if not self.loadbalancer_repo.lock(session, lb_id):
+            if (not self.loadbalancer_repo.lock(session, lb_id) or
+                    self.loadbalancer_repo.batch_owns_graph(
+                        session, lb_id, tcp_only=True)):
                 return
 
         # Serialize duplicate deliveries through status publication. A
@@ -626,6 +642,9 @@ class ListenerDelete(BaseAmphoraTask):
     def _delete(self, loadbalancer_id, listener_id):
         session = db_apis.get_session()
         with session.begin():
+            if self.loadbalancer_repo.batch_owns_graph(
+                    session, loadbalancer_id, tcp_only=True):
+                return
             db_listener = self.listener_repo.get(
                 session, id=listener_id)
         if db_listener is None:

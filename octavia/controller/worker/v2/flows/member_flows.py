@@ -117,7 +117,7 @@ class MemberFlows:
         delete_member_flow.add(database_tasks.DeleteMemberInDB(
             requires=constants.MEMBER))
         delete_member_flow.add(database_tasks.DecrementMemberQuota(
-            requires=constants.PROJECT_ID))
+            requires=(constants.PROJECT_ID, constants.LOADBALANCER_ID)))
         delete_member_flow.add(database_tasks.MarkPoolActiveInDB(
             requires=constants.POOL_ID))
         delete_member_flow.add(database_tasks.
@@ -179,7 +179,7 @@ class MemberFlows:
                 name=f'{constants.DELETE_MEMBER_INDB}-'
                      f'{m[constants.MEMBER_ID]}'))
             unordered_members_flow.add(database_tasks.DecrementMemberQuota(
-                requires=constants.PROJECT_ID,
+                requires=(constants.PROJECT_ID, constants.LOADBALANCER_ID),
                 name=f'{constants.DECREMENT_MEMBER_QUOTA_FLOW}-'
                      f'{m[constants.MEMBER_ID]}'))
 

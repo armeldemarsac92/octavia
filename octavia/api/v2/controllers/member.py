@@ -13,6 +13,9 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import hashlib
+import json
+
 from octavia_lib.api.drivers import data_models as driver_dm
 from oslo_db import exception as odb_exceptions
 from oslo_log import log as logging
@@ -122,7 +125,8 @@ class MemberController(base.BaseController):
         failed_batch = (
             retry_tcp_batch and pool.provisioning_status == constants.ERROR and
             pool.tcp_member_batch_id == constants.TCP_MEMBER_BATCH_FAILED)
-        if (pool.provisioning_status not in constants.MUTABLE_STATUSES and
+        if ((pool.provisioning_status not in constants.MUTABLE_STATUSES or
+             pool.tcp_member_batch_id == constants.TCP_MEMBER_BATCH_FAILED) and
                 not failed_batch):
             raise exceptions.ImmutableObject(resource='Pool', id=self.pool_id)
         load_balancer_id = pool.load_balancer_id
@@ -457,21 +461,37 @@ class MembersController(MemberController):
         super().__init__(pool_id)
 
     def _validate_rejection_batch(self, driver, pool, rejection,
-                                  additive_only):
+                                  additive_only, *, replay):
         if additive_only:
             raise exceptions.ValidationException(detail=_(
                 'tcp_connection_rejection requires a full member batch.'))
         if pool.protocol != constants.PROTOCOL_TCP:
             raise exceptions.ValidationException(detail=_(
                 'tcp_connection_rejection requires a TCP pool.'))
-        supported = getattr(driver, 'supports_tcp_connection_rejection',
-                            False) is True
+        supported = driver_factory.supports_tcp_connection_rejection(driver)
         advertised = (constants.GATEWAY_CAPABILITY_TCP_CONNECTION_REJECTION
                       in driver_utils.gateway_capabilities(driver))
-        if not supported or (rejection is not None and not advertised):
+        if not supported or (rejection is not None and
+                             not (advertised or replay)):
             raise exceptions.ProviderUnsupportedOptionError(
                 prov=driver.name, user_msg=_(
                     'TCP connection rejection is unavailable.'))
+
+    @staticmethod
+    def _rejection_batch_digest(rejection, members):
+        body = {
+            'tcp_connection_rejection': rejection,
+            'members': [m.to_dict(render_unsets=False) for m in sorted(
+                members, key=lambda m: (m.address, m.protocol_port))],
+        }
+        encoded = json.dumps(body, sort_keys=True).encode()
+        return hashlib.sha256(encoded).hexdigest()
+
+    @staticmethod
+    def _dispatch_rejection_batch(driver, lb_id, pool_id, batch_id):
+        driver_utils.call_provider(
+            driver.name, driver.apply_tcp_member_batch, lb_id, pool_id,
+            batch_id)
 
     @wsme_pecan.wsexpose(None, wtypes.text,
                          body=member_types.MembersRootPUT, status_code=202)
@@ -479,18 +499,34 @@ class MembersController(MemberController):
         """Updates all members."""
         members = members_.members
         rejection = members_.tcp_connection_rejection
-        update_rejection = rejection is not wtypes.Unset
-        if update_rejection and (members is wtypes.Unset or members is None):
+        explicit_rejection = rejection is not wtypes.Unset
+        if explicit_rejection and (members is wtypes.Unset or members is None):
             raise exceptions.ValidationException(detail=_(
                 'tcp_connection_rejection requires a complete members list.'))
         additive_only = strutils.bool_from_string(additive_only)
         context = pecan_request.context.get('octavia_context')
 
-        with context.session.begin():
-            db_pool = self._get_db_pool(context.session, self.pool_id)
+        session = context.session
+        if explicit_rejection:
+            # Avoid a consistent read before taking the write lock.
+            with session.begin():
+                lb_id = self._get_db_pool(
+                    session, self.pool_id, show_deleted=False).load_balancer_id
 
-            project_id, provider = self._get_lb_project_id_provider(
-                context.session, db_pool.load_balancer_id)
+        with session.begin():
+            if explicit_rejection:
+                lb = self.repositories.load_balancer.get_for_update(
+                    session, lb_id)
+                if lb is None or lb.provisioning_status == constants.DELETED:
+                    raise exceptions.NotFound(resource='Pool', id=self.pool_id)
+                project_id, provider = lb.project_id, lb.provider
+                db_pool = (
+                    self.repositories.pool.get_on_load_balancer_for_update(
+                        session, lb_id, project_id, self.pool_id))
+            else:
+                db_pool = self._get_db_pool(session, self.pool_id)
+                project_id, provider = self._get_lb_project_id_provider(
+                    session, db_pool.load_balancer_id)
 
             # Check POST+PUT+DELETE since this operation is all of 'CUD'
             self._auth_validate_action(
@@ -506,28 +542,40 @@ class MembersController(MemberController):
             # Load the driver early as it also provides validation
             driver = driver_factory.get_driver(provider)
 
-            if update_rejection:
+            update_rejection = False
+            if explicit_rejection:
                 self._auth_validate_action(
                     context, project_id, constants.RBAC_PUT,
                     rbac_type=constants.RBAC_POOL)
+                operation = lb.tcp_member_batch or {}
+                pending = self.repositories.load_balancer.tcp_batch_pending(lb)
+                digest = self._rejection_batch_digest(rejection, members)
+                replay = (pending and
+                          operation.get('pool_id') == self.pool_id and
+                          operation.get('digest') == digest)
+                if pending and not replay:
+                    raise exceptions.ImmutableObject(
+                        resource='Load Balancer', id=lb_id)
                 self._validate_rejection_batch(
-                    driver, db_pool, rejection, additive_only)
-                # Use current rows after locking the LB. The initial reads
-                # may use an older REPEATABLE READ snapshot.
-                lb_id = db_pool.load_balancer_id
-                self.repositories.load_balancer.lock(context.session, lb_id)
-                db_pool = (
-                    self.repositories.pool.get_on_load_balancer_for_update(
-                        context.session, lb_id, db_pool.project_id,
-                        self.pool_id))
-                self._test_lb_and_listener_and_pool_statuses(
-                    context.session, pool=db_pool, retry_tcp_batch=True)
+                    driver, db_pool, rejection, additive_only, replay=replay)
+                if replay:
+                    self._dispatch_rejection_batch(
+                        driver, lb_id, db_pool.id, operation['id'])
+                    return
+                update_rejection = (
+                    rejection is not None or
+                    db_pool.tcp_connection_rejection is not None or
+                    db_pool.tcp_member_batch_id ==
+                    constants.TCP_MEMBER_BATCH_FAILED)
+            self._test_lb_and_listener_and_pool_statuses(
+                session, pool=db_pool if explicit_rejection else None,
+                retry_tcp_batch=update_rejection)
+            if update_rejection:
                 old_members = self.repositories.member.get_batch_for_update(
-                    context.session, db_pool.id)
+                    session, db_pool.id)
             else:
-                self._test_lb_and_listener_and_pool_statuses(context.session)
                 # Reload after locking the load balancer.
-                db_pool = self._get_db_pool(context.session, self.pool_id)
+                db_pool = self._get_db_pool(session, self.pool_id)
                 old_members = db_pool.members
 
             old_member_uniques = {
@@ -578,7 +626,8 @@ class MembersController(MemberController):
 
             if update_rejection:
                 previous_count = sum(
-                    m.provisioning_status != constants.PENDING_DELETE
+                    not m.tcp_batch_quota_released and
+                    m.provisioning_status != constants.DELETED
                     for m in old_members)
                 member_count_diff = len(members) - previous_count
             elif additive_only:
@@ -635,6 +684,8 @@ class MembersController(MemberController):
                 #               wsme type for batch member update to not use
                 #               the MemberPOST type
                 db_member_dict.pop(constants.REQUEST_SRIOV)
+                if update_rejection:
+                    db_member_dict['tcp_batch_quota_released'] = False
                 self.repositories.member.update(
                     context.session, m.id, **db_member_dict)
 
@@ -654,9 +705,12 @@ class MembersController(MemberController):
                         driver_utils.db_member_to_provider_member(m))
                 else:
                     # Members are changed to PENDING_DELETE and not passed.
+                    delete_values = {
+                        'provisioning_status': constants.PENDING_DELETE}
+                    if update_rejection:
+                        delete_values['tcp_batch_quota_released'] = True
                     self.repositories.member.update(
-                        context.session, m.id,
-                        provisioning_status=constants.PENDING_DELETE)
+                        session, m.id, **delete_values)
 
             # Dispatch to the driver
             LOG.info("Sending Pool %s batch member update to provider %s",
@@ -664,10 +718,15 @@ class MembersController(MemberController):
             if update_rejection:
                 db_pool.tcp_connection_rejection = rejection
                 db_pool.tcp_member_batch_id = uuidutils.generate_uuid()
-                driver_utils.call_provider(
-                    driver.name, driver.apply_tcp_member_batch,
-                    db_pool.load_balancer_id, db_pool.id,
-                    db_pool.tcp_member_batch_id)
+                lb.tcp_member_batch = {
+                    'id': db_pool.tcp_member_batch_id,
+                    'pool_id': db_pool.id,
+                    'listener_ids': [li.id for li in db_pool.listeners],
+                    'digest': digest,
+                    'phase': constants.TCP_MEMBER_BATCH_PENDING,
+                }
+                self._dispatch_rejection_batch(
+                    driver, lb_id, db_pool.id, db_pool.tcp_member_batch_id)
             else:
                 driver_utils.call_provider(
                     driver.name, driver.member_batch_update, db_pool.id,

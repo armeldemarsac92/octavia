@@ -403,8 +403,9 @@ class Member(BaseDataModel):
                  subnet_id=None, operating_status=None, pool=None,
                  created_at=None, updated_at=None, provisioning_status=None,
                  name=None, monitor_address=None, monitor_port=None,
-                 tags=None, vnic_type=None):
+                 tags=None, vnic_type=None, tcp_batch_quota_released=False):
         self.id = id
+        self._tcp_batch_quota_released = tcp_batch_quota_released
         self.project_id = project_id
         self.pool_id = pool_id
         self.ip_address = ip_address
@@ -546,7 +547,7 @@ class LoadBalancer(BaseDataModel):
                  created_at=None, updated_at=None, provider=None, tags=None,
                  flavor_id=None, availability_zone=None,
                  additional_vips=None, l7policy_graph_generation=None,
-                 l7policy_activation=None):
+                 l7policy_activation=None, tcp_member_batch=None):
 
         self.id = id
         self.project_id = project_id
@@ -571,6 +572,7 @@ class LoadBalancer(BaseDataModel):
         self.additional_vips = additional_vips or []
         self._l7policy_graph_generation = l7policy_graph_generation
         self._l7policy_activation = l7policy_activation
+        self._tcp_member_batch = tcp_member_batch
 
     def update(self, update_dict):
         for key, value in update_dict.items():
