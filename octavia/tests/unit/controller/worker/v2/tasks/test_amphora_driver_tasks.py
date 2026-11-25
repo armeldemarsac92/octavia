@@ -148,6 +148,11 @@ class TestAmphoraDriverTasks(base.TestCase):
             Exception, 'boom', amp_list_update_obj.execute,
             _LB_mock, _amphora_mock, self.timeout_dict)
 
+        mock_lb_get.return_value = self._load_balancer_with_header_policy()
+        self.assertRaisesRegex(
+            Exception, 'boom', amp_list_update_obj.execute,
+            _LB_mock, _amphora_mock, self.timeout_dict)
+
         mock_lb_get.return_value = self._load_balancer_with_retry_backoff(
             constants.TOPOLOGY_ACTIVE_STANDBY)
         amp_list_update_obj.execute(_LB_mock, _amphora_mock, self.timeout_dict)
@@ -310,6 +315,25 @@ class TestAmphoraDriverTasks(base.TestCase):
             amp_list_update_obj.execute, _LB_mock, 0, [_amphora_mock], {},
             AMP_ID)
         mock_amphora_repo_update.assert_not_called()
+
+        mock_lb_get.return_value = self._load_balancer_with_header_policy()
+        self.assertRaises(
+            driver_except.CoordinatedListenerUpdateError,
+            amp_list_update_obj.execute, _LB_mock, 0, [_amphora_mock], {},
+            AMP_ID)
+        mock_amphora_repo_update.assert_not_called()
+
+    @staticmethod
+    def _load_balancer_with_header_policy():
+        pool = data_models.Pool(
+            enabled=True, protocol=constants.PROTOCOL_HTTP,
+            session_persistence=data_models.SessionPersistence(
+                type=constants.SESSION_PERSISTENCE_HTTP_HEADER,
+                header_name='x-session'))
+        return data_models.LoadBalancer(
+            enabled=True, topology=constants.TOPOLOGY_ACTIVE_STANDBY,
+            listeners=[data_models.Listener(
+                enabled=True, protocol=constants.PROTOCOL_HTTP, pools=[pool])])
 
     @mock.patch('octavia.db.repositories.LoadBalancerRepository.get')
     @mock.patch('octavia.db.api.session')

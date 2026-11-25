@@ -145,7 +145,8 @@ class AmpListenersUpdate(BaseAmphoraTask):
             db_lb.topology == constants.TOPOLOGY_SINGLE and
             (utils.active_http_retry_backoff_policies(db_lb) or weighted or
              utils.backend_tls_system_ca_pool_ids(db_lb)))
-        strict = finalizing or weighted or _has_managed_udp_listener(db_lb)
+        strict = (finalizing or weighted or _has_managed_udp_listener(db_lb) or
+                  utils.has_active_http_header_persistence(db_lb))
         if db_amp is None and strict:
             raise driver_except.ListenerProvisioningError()
         try:
@@ -187,6 +188,7 @@ class AmphoraIndexListenerUpdate(BaseAmphoraTask):
         strict = (
             managed_udp or utils.active_http_retry_backoff_policies(db_lb) or
             utils.backend_tls_system_ca_pool_ids(db_lb) or
+            utils.has_active_http_header_persistence(db_lb) or
             utils.has_tls_sni_passthrough_weighted_policies(
                 db_lb, active=False))
         if managed_udp and any(

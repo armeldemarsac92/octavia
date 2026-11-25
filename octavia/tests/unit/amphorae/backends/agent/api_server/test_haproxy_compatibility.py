@@ -234,6 +234,23 @@ class HAProxyCompatTestCase(base.TestCase):
                          haproxy_compatibility.get_haproxy_capabilities())
 
     @mock.patch.object(haproxy_compatibility.subprocess, 'check_output')
+    def test_header_persistence_requires_the_probe(self, check_output):
+        capability = constants.GATEWAY_CAPABILITY_HTTP_HEADER_PERSISTENCE
+        check_output.return_value = 'HAProxy version 3.0.19 custom'
+        self.mock_probe.side_effect = None
+        self.assertTrue(haproxy_compatibility.get_haproxy_capabilities()[
+            capability])
+
+        def fail_header_probe(*args, **kwargs):
+            if 'secure_memcmp' in kwargs['input']:
+                raise haproxy_compatibility.subprocess.CalledProcessError(
+                    1, args[0])
+
+        self.mock_probe.side_effect = fail_header_probe
+        self.assertNotIn(capability,
+                         haproxy_compatibility.get_haproxy_capabilities())
+
+    @mock.patch.object(haproxy_compatibility.subprocess, 'check_output')
     def test_tls_sni_passthrough_weighted_pool_capability(self, check_output):
         capability = (
             constants.GATEWAY_CAPABILITY_TLS_SNI_PASSTHROUGH_WEIGHTED_POOLS)
@@ -245,9 +262,12 @@ class HAProxyCompatTestCase(base.TestCase):
         self.assertIn('rand(16000000)',
                       self.mock_probe.call_args.kwargs['input'])
 
-        self.mock_probe.side_effect = [
-            None, haproxy_compatibility.subprocess.CalledProcessError(
-                1, self.mock_probe.call_args.args[0])]
+        def fail_weighted_probe(*args, **kwargs):
+            if 'req.ssl_sni' in kwargs['input']:
+                raise haproxy_compatibility.subprocess.CalledProcessError(
+                    1, args[0])
+
+        self.mock_probe.side_effect = fail_weighted_probe
         self.assertNotIn(capability,
                          haproxy_compatibility.get_haproxy_capabilities())
 

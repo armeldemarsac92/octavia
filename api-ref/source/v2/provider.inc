@@ -323,6 +323,10 @@ A policy can combine both deadlines with status-based retries.
 Omission in an update preserves the object. Send
 ``http_request_policy: null`` to clear it.
 
+``http_header_persistence_v1`` enables gateway-issued header persistence on
+HTTP pools whose regional provider has opted in. See :ref:`session_persistence`
+for the header name and optional timeout.
+
 ``http_cookie_name_v1`` enables the optional ``session_persistence.cookie_name``
 on HTTP pools with ``HTTP_COOKIE`` persistence. The load balancer generates
 the cookie and uses it to select a member after selecting the pool. See
