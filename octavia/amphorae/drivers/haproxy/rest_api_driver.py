@@ -35,6 +35,7 @@ from octavia.amphorae.drivers.haproxy import exceptions as exc
 from octavia.amphorae.drivers.keepalived import vrrp_rest_driver
 from octavia.common.config import cfg
 from octavia.common import constants as consts
+from octavia.common import listener_request_filters
 from octavia.common import exceptions
 import octavia.common.jinja.haproxy.combined_listeners.jinja_cfg as jinja_combo
 from octavia.common.jinja.lvs import jinja_cfg as jinja_udp_cfg
@@ -552,6 +553,10 @@ class HaproxyAmphoraLoadBalancerDriver(
                         loadbalancer, listeners_to_update, tracing_targets,
                         backend_tls_certs or {}, amp_details,
                         system_ca_results)
+                    self._record_staged_grpc_system_ca(
+                        loadbalancer, listeners_to_update,
+                        backend_tls_certs or {}, amp_details,
+                        system_ca_results)
                 if any(backoff_results.get(policy_id) == consts.ERROR
                        for policy_id in required_backoff_policies):
                     http_retry_backoff_observed[amphora.id] = backoff_results
@@ -922,12 +927,15 @@ class HaproxyAmphoraLoadBalancerDriver(
         return capabilities
 
     @staticmethod
-    def _is_otlp_collector_listener(listener):
-        return (listener.enabled and
-                listener.protocol in (consts.PROTOCOL_HTTP,
+    def _is_live_http_listener(listener):
+        return (listener.protocol in (consts.PROTOCOL_HTTP,
                                       consts.PROTOCOL_TERMINATED_HTTPS) and
                 listener.provisioning_status not in
                 (consts.PENDING_DELETE, consts.DELETED))
+
+    @classmethod
+    def _is_active_http_listener(cls, listener):
+        return listener.enabled and cls._is_live_http_listener(listener)
 
     @staticmethod
     def _is_managed_otlp_collector_pool(pool):
@@ -935,12 +943,36 @@ class HaproxyAmphoraLoadBalancerDriver(
                 consts.GATEWAY_OTLP_COLLECTOR_POOL_TAG in (pool.tags or ()))
 
     @classmethod
+    def _grpc_auth_listeners(cls, loadbalancer, listeners):
+        result = {}
+        if not loadbalancer.enabled:
+            return result
+        for listener in listeners:
+            if not cls._is_active_http_listener(listener):
+                continue
+            for policy in getattr(listener, 'l7policies', ()) or ():
+                auth = getattr(policy, 'external_auth', None)
+                if (policy.enabled and
+                        policy.provisioning_status not in (
+                            consts.PENDING_DELETE, consts.DELETED) and
+                        isinstance(auth, dict) and
+                        auth.get('protocol') == 'GRPC' and
+                        isinstance(auth.get('pool_id'), str) and
+                        policy.project_id == listener.project_id ==
+                        loadbalancer.project_id):
+                    result[auth['pool_id']] = listener
+        return result
+
+    @classmethod
     def _backend_tls_pools(cls, loadbalancer):
         system_ca = bool(utils.backend_tls_system_ca_pool_ids(loadbalancer))
         opted_in = system_ca
         pools = {}
         collector_frontend = None
+        grpc_frontend = None
         collector_listeners = {}
+        grpc_auth_listeners = cls._grpc_auth_listeners(
+            loadbalancer, loadbalancer.listeners)
         for listener in loadbalancer.listeners:
             if listener.protocol in consts.LVS_PROTOCOLS:
                 continue
@@ -953,23 +985,68 @@ class HaproxyAmphoraLoadBalancerDriver(
                         pool.enabled and pool.provisioning_status not in
                         (consts.PENDING_DELETE, consts.DELETED)):
                     pools[pool.id] = (listener, pool)
-            if system_ca and cls._is_otlp_collector_listener(listener):
-                collector_frontend = collector_frontend or listener
-                tracing = getattr(listener, 'otlp_tracing', None)
-                if isinstance(tracing, dict):
-                    collector_listeners[tracing.get(
-                        'collector_pool_id')] = listener
-        if collector_frontend is not None and loadbalancer.enabled:
+            if system_ca and cls._is_live_http_listener(listener):
+                # The Gateway can hold the first listener disabled until
+                # its authorizer has a verified trust bundle.
+                grpc_frontend = grpc_frontend or listener
+                if listener.enabled:
+                    collector_frontend = collector_frontend or listener
+                    tracing = getattr(listener, 'otlp_tracing', None)
+                    if isinstance(tracing, dict):
+                        collector_listeners[tracing.get(
+                            'collector_pool_id')] = listener
+        if grpc_auth_listeners:
             for pool in loadbalancer.pools:
-                if (getattr(pool, 'backend_tls_system_ca', False) is True and
-                        pool.enabled and pool.provisioning_status not in
-                        (consts.PENDING_DELETE, consts.DELETED) and
-                        (pool.id in collector_listeners or
-                         cls._is_managed_otlp_collector_pool(pool))):
+                listener = grpc_auth_listeners.get(pool.id)
+                if (listener and pool.tls_enabled and pool.enabled and
+                        pool.project_id == loadbalancer.project_id and
+                        pool.load_balancer_id == loadbalancer.id and
+                        consts.GATEWAY_GRPC_AUTH_POOL_TAG in
+                        (pool.tags or ()) and
+                        pool.provisioning_status not in (
+                            consts.PENDING_DELETE, consts.DELETED)):
+                    opted_in = True
+                    pools.setdefault(pool.id, (listener, pool))
+        if grpc_frontend is not None and loadbalancer.enabled:
+            for pool in loadbalancer.pools:
+                system_trust = getattr(pool, 'backend_tls_system_ca', False)
+                if (system_trust is not True or not pool.enabled or
+                        pool.provisioning_status in
+                        (consts.PENDING_DELETE, consts.DELETED)):
+                    continue
+                if collector_frontend and (
+                        pool.id in collector_listeners or
+                        cls._is_managed_otlp_collector_pool(pool)):
                     pools.setdefault(pool.id, (
                         collector_listeners.get(pool.id, collector_frontend),
                         pool))
+                elif (pool.project_id == loadbalancer.project_id and
+                      pool.load_balancer_id == loadbalancer.id and
+                      listener_request_filters.valid_pool(pool, 'GRPC')):
+                    pools.setdefault(pool.id, (grpc_frontend, pool))
         return opted_in, pools
+
+    @classmethod
+    def _record_staged_grpc_system_ca(cls, lb, listeners, certs, details,
+                                      results):
+        cap = consts.GATEWAY_CAPABILITY_L7POLICY_GRPC_EXTERNAL_AUTH
+        if (not lb.enabled or (details or {}).get(cap) is not True or
+                not any(cls._is_live_http_listener(listener)
+                        for listener in listeners)):
+            return
+        attached = cls._grpc_auth_listeners(lb, listeners)
+        for pool in lb.pools:
+            digest = certs.get(pool.id, {}).get('system_ca_sha256')
+            if (digest and pool.id not in attached and pool.enabled and
+                    pool.provisioning_status not in (
+                        consts.PENDING_DELETE, consts.DELETED) and
+                    pool.project_id == lb.project_id and
+                    pool.load_balancer_id == lb.id and
+                    getattr(pool, 'backend_tls_system_ca', False) is True and
+                    listener_request_filters.valid_pool(pool, 'GRPC')):
+                # An empty detached authorizer waits for this acknowledgement
+                # before the controller attaches its first policy and members.
+                results[pool.id] = digest
 
     @classmethod
     def _record_staged_otlp_system_ca(
@@ -979,7 +1056,7 @@ class HaproxyAmphoraLoadBalancerDriver(
                 (amp_details or {}).get(
                     consts.GATEWAY_CAPABILITY_LISTENER_OTLP_TRACING)
                 is not True or
-                not any(cls._is_otlp_collector_listener(listener)
+                not any(cls._is_active_http_listener(listener)
                         for listener in listeners)):
             return
         attached = {profile.get('collector_pool_id')

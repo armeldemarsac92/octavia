@@ -497,7 +497,11 @@ backend {{ pool.id }}:{{ listener.id }}
 
 
 {% macro authorization_request_macro(auth, condition) %}
-    {% if auth.available %}
+    {% if auth.available and auth.get('protocol') == 'GRPC' %}
+    http-request lua.octavia-grpc-auth {{ auth.pool_id }} {{ auth.request_headers }} if {{ condition }}
+    http-request use-service lua.octavia-grpc-auth-denial if {{ condition }} { var(txn.octavia_grpc_auth_denied) -m bool }
+    http-request return status 503 if {{ condition }} !{ var(txn.octavia_grpc_auth_allowed) -m bool }
+    {% elif auth.available %}
     http-request octavia-auth /run/octavia/listener-auth/{{ auth.pool_id }}.sock {{ auth.prefix }} {{ auth.request_headers }} {{ auth.response_headers }} if {{ condition }}
     {% else %}
     http-request deny deny_status 503 if {{ condition }}
@@ -609,8 +613,15 @@ frontend {{ listener.id }}
     http-request set-var(txn.octavia_grpc_mirror) bool(true) if METH_POST { fc_http_major eq 2 } { req.fhdr_cnt(content-type) eq 1 } octavia_grpc_mirror_media
     {% endif %}
     {% set listener_auth = listener.get('request_filter_sections', [])|map(attribute='requests')|sum(start=[]) %}
-    {% if listener_auth|selectattr('available')|list or route_auth|map(attribute='external_auth')|selectattr('available')|list %}
+    {% set ready_auth = route_auth|map(attribute='external_auth')|selectattr('available')|list %}
+    {% if listener_auth|selectattr('available')|list or ready_auth|rejectattr('protocol', 'defined')|list %}
     filter octavia-auth
+    {% endif %}
+    {% if ready_auth|selectattr('protocol', 'defined')|selectattr('protocol', 'equalto', 'GRPC')|list %}
+    http-response lua.octavia-grpc-auth-response if { var(txn.octavia_grpc_auth_allowed) -m bool }
+    http-response return status 503 if { var(txn.octavia_grpc_auth_allowed) -m bool } !{ var(txn.octavia_grpc_auth_response_applied) -m bool }
+    http-after-response lua.octavia-grpc-auth-response if { var(txn.octavia_grpc_auth_allowed) -m bool } !{ var(txn.octavia_grpc_auth_response_applied) -m bool }
+    http-after-response set-status 503 if { var(txn.octavia_grpc_auth_allowed) -m bool } !{ var(txn.octavia_grpc_auth_response_applied) -m bool }
     {% endif %}
     {% set tcp_weighted = policies|selectattr('tcp_weighted_targets', 'defined')|list %}
     {% if listener.inspect_tls_sni is defined %}
@@ -1007,9 +1018,13 @@ listen {{ constants.HAPROXY_OTLP_TRACING_PROXY_PREFIX }}{{ listener.otlp_tracing
 {% endmacro %}
 
 
-{% macro listener_auth_delivery_macro(constants, lib_consts, pool, state_file) %}
+{% macro listener_auth_delivery_macro(constants, lib_consts, pool, state_file, grpc=False) %}
 listen octavia-auth-{{ pool.id }}
+    {% if grpc %}
+    bind /run/octavia/grpc-auth/{{ pool.id }}.sock user nobody mode 600 proto h2
+    {% else %}
     bind /run/octavia/listener-auth/{{ pool.id }}.sock user nobody mode 600 octavia-auth-socket
+    {% endif %}
     mode http
     no log
     retries 0
@@ -1021,6 +1036,9 @@ listen octavia-auth-{{ pool.id }}
     timeout server 3s
     balance {{ pool.lb_algorithm }}
     option allbackups
+    {% if grpc %}
+{{ system_ca_file(pool) -}}
+    {% endif %}
 {{ pool_health_monitor(constants, pool, state_file) -}}
     {% for member in pool.members %}
         {{- member_macro(constants, lib_consts, pool, member, persistence=False) -}}

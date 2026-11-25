@@ -1351,14 +1351,7 @@ def http_external_auth(auth):
             'allowed_response_headers'}:
         raise exceptions.ValidationException(detail=_(
             'Invalid HTTP ExternalAuth options.'))
-    pool_id = auth.get('pool_id')
-    try:
-        if not isinstance(pool_id, str) or str(uuid.UUID(pool_id)) != pool_id:
-            raise ValueError()
-    except ValueError as exc:
-        raise exceptions.ValidationException(detail=_(
-            'HTTP ExternalAuth requires a pool UUID.')) from exc
-    result = {'pool_id': pool_id}
+    result = _external_auth_pool(auth, _('HTTP ExternalAuth'))
     path = auth.get('path_prefix', '')
     if (not isinstance(path, str) or
             path and (len(path) > 1024 or
@@ -1367,16 +1360,51 @@ def http_external_auth(auth):
             'Invalid HTTP ExternalAuth path prefix.'))
     if path:
         result['path_prefix'] = path
-    for field in ('allowed_request_headers', 'allowed_response_headers'):
+    _external_auth_headers(auth, result, _('HTTP ExternalAuth'),
+                           ('allowed_request_headers',
+                            'allowed_response_headers'))
+    return result
+
+
+def _external_auth_pool(auth, label):
+    pool_id = auth.get('pool_id')
+    try:
+        if not isinstance(pool_id, str) or str(uuid.UUID(pool_id)) != pool_id:
+            raise ValueError()
+    except ValueError as exc:
+        raise exceptions.ValidationException(detail=_(
+            '%(auth)s requires a pool UUID.') % {'auth': label}) from exc
+    return {'pool_id': pool_id}
+
+
+def _external_auth_headers(auth, result, label, fields, *, grpc=False):
+    for field in fields:
         headers = auth.get(field, [])
         if (not isinstance(headers, list) or len(headers) > 64 or
                 any(not isinstance(name, str) or
-                    not _HEADER_NAME_RE.fullmatch(name)
+                    not (_HEADER_NAME_RE.fullmatch(name) or
+                         (grpc and name.lower() == ':authority'))
                     for name in headers)):
             raise exceptions.ValidationException(detail=_(
-                'Invalid HTTP ExternalAuth header list.'))
+                'Invalid %(auth)s header list.') % {'auth': label})
         if headers:
             result[field] = sorted({name.lower() for name in headers})
+
+
+def is_grpc_external_auth(auth):
+    return isinstance(auth, dict) and auth.get('protocol') == 'GRPC'
+
+
+def l7policy_external_auth(auth):
+    if not is_grpc_external_auth(auth):
+        return http_external_auth(auth)
+    if auth.keys() - {'protocol', 'pool_id', 'allowed_request_headers'}:
+        raise exceptions.ValidationException(detail=_(
+            'Invalid gRPC ExternalAuth options.'))
+    result = _external_auth_pool(auth, _('gRPC ExternalAuth'))
+    result['protocol'] = 'GRPC'
+    _external_auth_headers(auth, result, _('gRPC ExternalAuth'),
+                           ('allowed_request_headers',), grpc=True)
     return result
 
 
@@ -1613,7 +1641,7 @@ def sanitize_l7policy_api_args(l7policy, create=False, old_policy=None):
             rewrite)
 
     if 'external_auth' in l7policy and l7policy['external_auth'] is not None:
-        l7policy['external_auth'] = http_external_auth(
+        l7policy['external_auth'] = l7policy_external_auth(
             l7policy['external_auth'])
     auth = l7policy.get('external_auth',
                         getattr(old_policy, 'external_auth', None))

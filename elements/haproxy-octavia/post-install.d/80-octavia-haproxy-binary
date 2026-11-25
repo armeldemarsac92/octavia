@@ -61,3 +61,26 @@ if [[ -f "$binary" ]]; then
             /usr/lib/tmpfiles.d/octavia-haproxy-telemetry.conf
     fi
 fi
+
+adapter=/tmp/in_target.d/octavia-grpc-authz
+if [[ -f "$adapter" ]]; then
+    if [[ "${DIB_INIT_SYSTEM:-}" != systemd || ! -x "$binary" ]]; then
+        echo "gRPC authorization requires systemd and the Octavia HAProxy binary" >&2
+        exit 1
+    fi
+    features=$("$binary" -vv)
+    if [[ ! " $features " =~ [[:space:]]\+LUA[[:space:]] ||
+          "$("$adapter" --version)" != "octavia-grpc-authz 1" ]]; then
+        echo "gRPC authorization requires Lua and the v1 authorization adapter" >&2
+        exit 1
+    fi
+    install -D -m 0755 "$adapter" /usr/libexec/octavia-grpc-authz
+    install -D -m 0644 /tmp/in_target.d/octavia-grpc-auth.lua \
+        /var/lib/octavia/octavia-grpc-auth.lua
+    for unit in octavia-grpc-authz.socket octavia-grpc-authz.service; do
+        install -D -m 0644 "/tmp/in_target.d/$unit" "/usr/lib/systemd/system/$unit"
+    done
+    printf 'd /run/octavia/grpc-auth 0755 root root -\n' > \
+        /usr/lib/tmpfiles.d/octavia-grpc-authz.conf
+    systemctl enable octavia-grpc-authz.socket
+fi

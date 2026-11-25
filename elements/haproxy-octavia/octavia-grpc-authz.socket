@@ -1,0 +1,11 @@
+[Unit]
+Description=Private Amphora gRPC authorization socket
+
+[Socket]
+ListenStream=/run/octavia/grpc-authz.sock
+SocketUser=nobody
+SocketMode=0600
+FileDescriptorName=grpc-authz
+
+[Install]
+WantedBy=sockets.target

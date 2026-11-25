@@ -369,6 +369,49 @@ class TestHaproxyAmphoraLoadBalancerDriverTest(base.TestCase):
         self.assertEqual(constants.ERROR,
                          tracing_status.call_args.args[1][listener.id][-1])
 
+    def test_detached_grpc_authorizer_attests_system_ca(self):
+        digest = 'a' * 64
+        pool = data_models.Pool(
+            id=FAKE_UUID_1, project_id='project', load_balancer_id='lb',
+            protocol=constants.PROTOCOL_HTTP, enabled=True, tls_enabled=True,
+            backend_tls_require_h2=True, backend_tls_system_ca=True,
+            backend_tls_hostname='authz.example.test',
+            tags=[constants.GATEWAY_GRPC_AUTH_POOL_TAG])
+        listener = data_models.Listener(
+            id='listener', enabled=False, project_id='project',
+            protocol=constants.PROTOCOL_HTTP, pools=[], l7policies=[])
+        lb = data_models.LoadBalancer(
+            id='lb', project_id='project', enabled=True, pools=[pool],
+            listeners=[listener])
+        opted_in, staged = self.driver._backend_tls_pools(lb)
+        self.assertTrue(opted_in)
+        self.assertEqual({pool.id: (listener, pool)}, staged)
+        certs = {pool.id: {'system_ca_sha256': digest}}
+        details = {constants.GATEWAY_CAPABILITY_L7POLICY_GRPC_EXTERNAL_AUTH:
+                   True}
+
+        def acknowledgements(capabilities):
+            votes = {}
+            self.driver._record_staged_grpc_system_ca(
+                lb, lb.listeners, certs, capabilities, votes)
+            return votes
+
+        self.assertEqual({}, acknowledgements({}))
+        self.assertEqual({pool.id: digest}, acknowledgements(details))
+        listener.provisioning_status = constants.PENDING_DELETE
+        self.assertEqual({}, acknowledgements(details))
+        self.assertEqual({}, self.driver._backend_tls_pools(lb)[1])
+        listener.provisioning_status = constants.ACTIVE
+        listener.enabled = True
+        pool.enabled = False
+        self.assertEqual({}, acknowledgements(details))
+        pool.enabled = True
+        listener.l7policies = [data_models.L7Policy(
+            id='policy', enabled=True, project_id='project',
+            external_auth={'protocol': 'GRPC', 'pool_id': pool.id})]
+        # Once attached, only the rendered private transport can attest trust.
+        self.assertEqual({}, acknowledgements(details))
+
     def test_protected_pool_preflights_every_amphora(self):
         capability = constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME
         amphorae = [

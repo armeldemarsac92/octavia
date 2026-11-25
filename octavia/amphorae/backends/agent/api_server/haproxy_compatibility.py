@@ -14,6 +14,7 @@
 
 import os
 import re
+import stat
 import subprocess
 
 from oslo_config import cfg
@@ -131,6 +132,50 @@ def _valid_haproxy_config(haproxy_cmd, config):
 
 def _supports_http_cookie_path(haproxy_cmd):
     return _valid_haproxy_config(haproxy_cmd, _HTTP_COOKIE_PATH_PROBE)
+
+
+def _supports_grpc_external_auth(haproxy_cmd):
+    if not os.path.isfile(constants.HAPROXY_GRPC_AUTH_SCRIPT):
+        return False
+    try:
+        socket_mode = os.stat(constants.GRPC_AUTH_SOCKET).st_mode
+        if (not stat.S_ISSOCK(socket_mode) or
+                stat.S_IMODE(socket_mode) != 0o600):
+            return False
+        version = subprocess.run(
+            [constants.GRPC_AUTH_ADAPTER, '--version'], check=True,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, timeout=3)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if version.stdout.strip() != 'octavia-grpc-authz 1':
+        return False
+    denied = '{ var(txn.octavia_grpc_auth_denied) -m bool }'
+    allowed = '{ var(txn.octavia_grpc_auth_allowed) -m bool }'
+    applied = '{ var(txn.octavia_grpc_auth_response_applied) -m bool }'
+    config = f"""global
+    lua-load-per-thread {constants.HAPROXY_GRPC_AUTH_SCRIPT}
+    httpclient.retries 0
+    httpclient.timeout.connect 3s
+defaults
+    mode http
+    timeout client 3s
+    timeout connect 1s
+    timeout server 3s
+frontend probe
+    bind 127.0.0.1:1
+    http-request lua.octavia-grpc-auth 00000000-0000-4000-8000-000000000001 -
+    http-request use-service lua.octavia-grpc-auth-denial if {denied}
+    http-request return status 503 unless {allowed}
+    http-response lua.octavia-grpc-auth-response
+    http-response return status 503 unless {applied}
+    http-after-response lua.octavia-grpc-auth-response if {allowed} !{applied}
+    http-after-response set-status 503 if {allowed} !{applied}
+    default_backend probe_pool
+backend probe_pool
+    server origin 127.0.0.1:2 proto h2
+"""
+    return _valid_haproxy_config(haproxy_cmd, config)
 
 
 _TLS_SNI_PASSTHROUGH_WEIGHTED_POOLS_PROBE = (
@@ -271,6 +316,9 @@ def get_haproxy_capabilities():
             capabilities[
                 constants.GATEWAY_CAPABILITY_LISTENER_OTLP_EXPORT_HEADERS
             ] = True
+    if '+LUA' in output.split() and _supports_grpc_external_auth(haproxy_cmd):
+        capabilities[
+            constants.GATEWAY_CAPABILITY_L7POLICY_GRPC_EXTERNAL_AUTH] = True
     return capabilities
 
 
