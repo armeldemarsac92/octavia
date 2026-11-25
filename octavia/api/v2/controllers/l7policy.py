@@ -895,8 +895,8 @@ class L7PolicyController(base.BaseController):
                         hostname != db_l7policy.https_listener_hostname or
                         set(l7policy_dict).intersection(
                             routing_changed | {'redirect_pool_id'})))):
-                driver_utils.require_l7policy_http_external_auth(
-                    driver, listener.protocol)
+                driver_utils.require_l7policy_external_auth(
+                    driver, listener.protocol, auth)
             old_targets = db_l7policy.targets
             targets = l7policy_dict.get('targets', old_targets)
             routing_changed_or_disabled = (

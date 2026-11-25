@@ -28,18 +28,18 @@ from octavia.i18n import _
 CONF = cfg.CONF
 
 
-class StoredHTTPExternalAuth(wtypes.UserType):
+class StoredExternalAuth(wtypes.UserType):
     basetype = object
     name = 'stored_external_auth'
 
 
-class HTTPExternalAuth(StoredHTTPExternalAuth):
+class ExternalAuth(StoredExternalAuth):
     name = 'external_auth'
 
     @staticmethod
     def validate(value):
         try:
-            return validate.http_external_auth(value)
+            return validate.l7policy_external_auth(value)
         except exceptions.ValidationException as exc:
             raise ValueError(str(exc)) from exc
 
@@ -79,7 +79,7 @@ class L7PolicyResponse(BaseL7PolicyType):
     request_cors = wtypes.wsattr(types.HTTPRequestCORS())
     http_request_policy = wtypes.wsattr(types.HTTPRequestPolicy())
     request_mirrors = wtypes.wsattr(types.HTTPRequestMirrors())
-    external_auth = wtypes.wsattr(StoredHTTPExternalAuth())
+    external_auth = wtypes.wsattr(StoredExternalAuth())
     targets = wtypes.wsattr(types.WeightedL7PolicyTargets())
     request_header_operations = wtypes.wsattr(types.RequestHeaderOperations())
     response_header_operations = wtypes.wsattr(
@@ -108,8 +108,10 @@ class L7PolicyResponse(BaseL7PolicyType):
         lb = getattr(listener, 'load_balancer', None)
         # A configured value remains visible if enrollment is withdrawn.
         # Preserve unknown JSON for a controller that needs to withdraw it.
+        settings = CONF.api_settings
         auth_providers = (
-            CONF.api_settings.enabled_l7policy_http_external_auth_providers)
+            settings.enabled_l7policy_http_external_auth_providers +
+            settings.enabled_l7policy_grpc_external_auth_providers)
         if (getattr(db_obj, 'external_auth', None) is None and
                 getattr(lb, 'provider', None) not in auth_providers):
             result.external_auth = wtypes.Unset
@@ -176,7 +178,7 @@ class L7PolicyPOST(BaseL7PolicyType):
     request_cors = wtypes.wsattr(types.HTTPRequestCORS())
     http_request_policy = wtypes.wsattr(types.HTTPRequestPolicy())
     request_mirrors = wtypes.wsattr(types.HTTPRequestMirrors())
-    external_auth = wtypes.wsattr(HTTPExternalAuth())
+    external_auth = wtypes.wsattr(ExternalAuth())
     targets = wtypes.wsattr(types.WeightedL7PolicyTargets())
     request_header_operations = wtypes.wsattr(types.RequestHeaderOperations())
     response_header_operations = wtypes.wsattr(
@@ -238,7 +240,7 @@ class L7PolicyPUT(BaseL7PolicyType):
     request_cors = wtypes.wsattr(types.HTTPRequestCORS())
     http_request_policy = wtypes.wsattr(types.HTTPRequestPolicy())
     request_mirrors = wtypes.wsattr(types.HTTPRequestMirrors())
-    external_auth = wtypes.wsattr(HTTPExternalAuth())
+    external_auth = wtypes.wsattr(ExternalAuth())
     targets = wtypes.wsattr(types.WeightedL7PolicyTargets())
     request_header_operations = wtypes.wsattr(types.RequestHeaderOperations())
     response_header_operations = wtypes.wsattr(

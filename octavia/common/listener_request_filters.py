@@ -76,7 +76,34 @@ def validate_listener(protocol, sections):
             'listener.'))
 
 
-def valid_pool(pool):
-    return (pool.protocol == constants.PROTOCOL_HTTP and
-            not pool.tls_enabled and not pool.backend_h2c and
-            constants.GATEWAY_LISTENER_AUTH_POOL_TAG in (pool.tags or []))
+def valid_pool(pool, protocol=constants.PROTOCOL_HTTP, *, tags=None,
+               changes=None):
+    """Check the authorizer role and transport, including a pending edit."""
+    if pool.protocol != constants.PROTOCOL_HTTP:
+        return False
+    tags = set((pool.tags or ()) if tags is None else tags)
+    changes = changes or {}
+
+    def field(name):
+        return changes[name] if name in changes else getattr(pool, name)
+
+    grpc_tag = constants.GATEWAY_GRPC_AUTH_POOL_TAG
+    http_tag = constants.GATEWAY_LISTENER_AUTH_POOL_TAG
+    tls_enabled = field('tls_enabled')
+    backend_h2c = field('backend_h2c')
+    if protocol == constants.PROTOCOL_HTTP:
+        return (not tls_enabled and not backend_h2c and
+                http_tag in tags and grpc_tag not in tags)
+    if (protocol != 'GRPC' or grpc_tag not in tags or
+            tags.intersection({http_tag,
+                               constants.GATEWAY_OTLP_COLLECTOR_POOL_TAG})):
+        return False
+    require_h2 = field('backend_tls_require_h2')
+    if backend_h2c:
+        return not tls_enabled and not require_h2
+    ca_ref = bool(field('ca_tls_certificate_id'))
+    system_ca = bool(field('backend_tls_system_ca'))
+    alpn = field('alpn_protocols')
+    return (tls_enabled and require_h2 and
+            validate.is_exact_sni_name(field('backend_tls_hostname')) and
+            ca_ref != system_ca and (not alpn or 'h2' in alpn))

@@ -1285,6 +1285,12 @@ class PoolRepository(BaseRepository):
                                       id=pool_id)
         return row
 
+    @staticmethod
+    def get_tags_for_update(session, pool_id):
+        tags = base_models.Tags
+        return session.scalars(select(tags.tag).where(
+            tags.resource_id == pool_id).with_for_update()).all()
+
     def get_all_API_list(self, session, pagination_helper=None, **filters):
         """Get a list of pools for the API list call.
 
@@ -1423,23 +1429,19 @@ class ListenerRepository(BaseRepository):
             project_id)
 
     @staticmethod
-    def validate_external_auth_pools(session, pool_ids, lb_id, project_id):
-        pool = models.Pool
+    def validate_external_auth_pools(session, pool_ids, lb_id, project_id,
+                                     *, protocol=consts.PROTOCOL_HTTP):
+        repo = PoolRepository()
         for pool_id in sorted(pool_ids):
-            query = session.query(
-                pool.protocol, pool.tls_enabled, pool.backend_h2c,
-                _pool_has_tag(consts.GATEWAY_LISTENER_AUTH_POOL_TAG).label(
-                    'tagged'))
-            row = (query.filter_by(id=pool_id, load_balancer_id=lb_id,
-                                   project_id=project_id)
-                   .filter(pool.provisioning_status.notin_(
-                       (consts.PENDING_DELETE, consts.DELETED)))
-                   .with_for_update().one_or_none())
-            if row is None:
-                raise exceptions.NotFound(
-                    resource=data_models.Pool._name(), id=pool_id)
-            if (row.protocol != consts.PROTOCOL_HTTP or row.tls_enabled or
-                    row.backend_h2c or not row.tagged):
+            pool = repo.get_on_load_balancer_for_update(
+                session, lb_id, project_id, pool_id)
+            tags = repo.get_tags_for_update(session, pool_id)
+            if not listener_request_filters.valid_pool(
+                    pool, protocol=protocol, tags=tags):
+                if protocol == 'GRPC':
+                    raise exceptions.ValidationException(detail=_(
+                        'gRPC authorization requires a managed HTTP pool '
+                        'with h2c or verified TLS HTTP/2.'))
                 raise exceptions.ValidationException(detail=_(
                     'HTTP authorization requires a managed plain HTTP '
                     'pool.'))
@@ -2881,14 +2883,22 @@ class L7PolicyRepository(BaseRepository):
             condition &= pool.id != removed_pool
         return condition & enabled
 
-    def get_external_auth_policy_using_pool(self, session, pool_id):
+    def _external_auth_policies_using_pool(self, session, pool_id):
         policy = self.model_class
         ref = models.L7PolicyExternalAuthPool
         return (session.query(ref.l7policy_id)
                 .join(ref.l7policy).filter(
                     ref.pool_id == pool_id,
                     policy.provisioning_status != consts.DELETED)
-                .with_for_update().limit(1).scalar())
+                .with_for_update())
+
+    def get_external_auth_policy_using_pool(self, session, pool_id):
+        return self._external_auth_policies_using_pool(
+            session, pool_id).limit(1).scalar()
+
+    def get_external_auth_policies_using_pool(self, session, pool_id):
+        return (self._external_auth_policies_using_pool(session, pool_id)
+                .add_columns(self.model_class.external_auth).all())
 
     def _replace_external_auth_pool_ref(self, session, policy_id, listener,
                                         project_id, auth):
@@ -2901,11 +2911,12 @@ class L7PolicyRepository(BaseRepository):
         if (listener.project_id != project_id or
                 listener.load_balancer.project_id != project_id):
             raise exceptions.ValidationException(detail=_(
-                'HTTP authorization requires a policy in the listener '
+                'Authorization requires a policy in the listener '
                 'and load balancer project.'))
         pool_id = auth['pool_id']
         ListenerRepository.validate_external_auth_pools(
-            session, {pool_id}, listener.load_balancer_id, project_id)
+            session, {pool_id}, listener.load_balancer_id, project_id,
+            protocol=auth.get('protocol', consts.PROTOCOL_HTTP))
         if row is None:
             session.add(ref(l7policy_id=policy_id, pool_id=pool_id))
         else:
@@ -3024,8 +3035,10 @@ class L7PolicyRepository(BaseRepository):
         query = self._active_http_policies(session)
         if retry_backoff:
             query = query.add_columns(policy.http_request_policy)
-        if transform == 'external_auth':
-            query = query.filter(policy.external_auth.isnot(None))
+        external_auth = transform in ('external_auth', 'grpc_external_auth')
+        if external_auth:
+            query = query.add_columns(policy.external_auth).filter(
+                policy.external_auth.isnot(None))
             if reopening is None:
                 query = query.filter(self._reachable_external_auth(
                     restoring_pool=restoring_pool, removed_pool=removed_pool))
@@ -3103,6 +3116,9 @@ class L7PolicyRepository(BaseRepository):
             of=policy if binary_grpc_request else None).all()
         return [row for row in rows
                 if self._in_https_section(row) and
+                (not external_auth or
+                 validate.is_grpc_external_auth(row.external_auth) ==
+                 (transform == 'grpc_external_auth')) and
                 (not retry_backoff or
                  'backoff_ms' in row.http_request_policy.get('retry', {})) and
                 (not binary_grpc_response or

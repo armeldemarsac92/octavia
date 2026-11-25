@@ -368,3 +368,37 @@ paths on the same listener use the same origin.
 Withdrawing regional enrollment blocks new configurations and scope
 expansion. Existing policies remain readable and enforced. To remove
 authorization from an existing policy, send ``"external_auth": null``.
+
+Envoy v3 authorization on an HTTP policy
+----------------------------------------
+
+An HTTP or terminated HTTPS listener can call an Envoy v3 gRPC authorization
+service for a selected L7 policy. Build the adapter for the Amphora's target
+architecture with Go 1.27.4 from the same Octavia revision::
+
+    cd elements/haproxy-octavia/grpc-authz
+    CGO_ENABLED=0 go build -mod=readonly -trimpath -buildvcs=false -o /path/to/octavia-grpc-authz .
+
+Pass the absolute adapter path in ``DIB_OCTAVIA_GRPC_AUTHZ_BINARY`` and the
+Lua-enabled Octavia HAProxy executable in ``DIB_OCTAVIA_HAPROXY_BINARY`` to
+the image build. The systemd socket accepts local checks on
+``/run/octavia/grpc-authz.sock`` with mode 0600. The adapter connects through
+a private HTTP/2 listener for the selected pool. HAProxy supplies the pool's
+member selection, CA trust, TLS identity and ALPN settings.
+
+Once the eligible Amphorae report ``l7policy_grpc_external_auth_v1``, enable
+the provider in ``[api_settings] enabled_l7policy_grpc_external_auth_providers``.
+Use a dedicated HTTP pool tagged ``gw-api-grpc-auth-pool-v1``. Enable
+``backend_h2c`` for a cleartext authorizer. For a TLS authorizer, configure
+CA trust and the expected hostname, then enable ``backend_tls_require_h2``.
+
+Set the policy's ``external_auth.protocol`` to ``GRPC`` and ``pool_id`` to
+the authorizer pool UUID. An empty ``allowed_request_headers`` list sends all
+incoming HTTP request headers in the Envoy check. A populated list sends
+the named headers. Selecting ``:authority`` preserves that HTTP/2 field in
+the Envoy header map. The adapter sends a bodyless check and the origin
+receives the original request body after authorization. Headers supplied
+for an allowed downstream response also apply to local HAProxy responses.
+A denial or an explicit Envoy error response returns the authorizer's
+HTTP status, headers and body. An unavailable RPC or missing runtime
+capability closes the selected match with HTTP 503.

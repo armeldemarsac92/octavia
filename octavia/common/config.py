@@ -172,6 +172,10 @@ api_opts = [
                 help=_('Providers exposing HTTP L7 policy authorization. '
                        'Enable after upgrading the API, worker, octavia-lib, '
                        'database and qualifying eligible Amphora images.')),
+    cfg.ListOpt('enabled_l7policy_grpc_external_auth_providers', default=[],
+                help=_('Providers exposing bodyless gRPC L7 policy '
+                       'authorization. Enable after upgrading the API and '
+                       'workers and qualifying eligible Amphora images.')),
     cfg.ListOpt('enabled_listener_request_filter_providers', default=[],
                 help=_('Providers exposing ordered listener HTTP request '
                        'filters. Enable after updating the database, '

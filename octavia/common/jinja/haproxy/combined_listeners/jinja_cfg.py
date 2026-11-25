@@ -377,6 +377,10 @@ class JinjaTemplater:
             constants.GATEWAY_CAPABILITY_LISTENER_REQUEST_FILTERS)
         feature_compatibility[auth_capability] = (
             (amp_details or {}).get(auth_capability) is True)
+        grpc_auth_cap = (
+            constants.GATEWAY_CAPABILITY_L7POLICY_GRPC_EXTERNAL_AUTH)
+        feature_compatibility[grpc_auth_cap] = (
+            (amp_details or {}).get(grpc_auth_cap) is True)
         fallback_capability = (
             constants.GATEWAY_CAPABILITY_FRONTEND_CLIENT_AUTH_INSECURE_FALLBACK)
         sampling_capability = (
@@ -391,6 +395,11 @@ class JinjaTemplater:
             tls_certs,
             feature_compatibility, otlp_tls_certs=otlp_tls_certs,
             amp_details=amp_details)
+        if system_ca_results is not None:
+            for pool in loadbalancer.get('grpc_auth_pools', ()):
+                digest = pool.get('backend_tls_system_ca_sha256')
+                if digest:
+                    system_ca_results[pool['id']] = digest
         if http_persistence_results is not None and loadbalancer['enabled']:
             for listener in loadbalancer['listeners']:
                 if listener['enabled']:
@@ -719,11 +728,13 @@ class JinjaTemplater:
             for section in listener.get('request_filter_sections', ())
             for auth in section['requests'] if auth['available']
         }
-        auth_pool_ids.update(
-            policy['external_auth']['pool_id']
+        policy_auth = [
+            policy['external_auth']
             for listener in listener_transforms if listener['enabled']
             for policy in listener['l7policies']
-            if policy.get('external_auth', {}).get('available'))
+            if policy.get('external_auth', {}).get('available')]
+        auth_pool_ids.update(auth['pool_id'] for auth in policy_auth
+                             if auth.get('protocol') != 'GRPC')
         if auth_pool_ids:
             auth_pools = {
                 pool.id: pool for pool in loadbalancer.pools
@@ -733,6 +744,32 @@ class JinjaTemplater:
                 self._transform_pool(auth_pools[pool_id],
                                      feature_compatibility, False)
                 for pool_id in sorted(auth_pool_ids)]
+        grpc_policies = [auth for auth in policy_auth
+                         if auth.get('protocol') == 'GRPC']
+        if grpc_policies:
+            grpc_ids = {auth['pool_id'] for auth in grpc_policies}
+            ready = {}
+            for pool in loadbalancer.pools:
+                if pool.id not in grpc_ids:
+                    continue
+                material = (tls_certs or {}).get(pool.id) or {}
+                if pool.tls_enabled and not self._grpc_auth_tls_ready(
+                        pool, material, amp_details or {}):
+                    continue
+                rendered = self._transform_pool(
+                    pool, feature_compatibility, False,
+                    pool_tls_certs=material)
+                if rendered['enabled']:
+                    sans = rendered.get('backend_tls_subject_alt_names')
+                    if sans:
+                        rendered['backend_tls_san_options'] = (
+                            self._backend_tls_san_options(sans))
+                    ready[pool.id] = rendered
+            for auth in grpc_policies:
+                auth['available'] = auth['pool_id'] in ready
+            if ready:
+                ret_value['grpc_auth_pools'] = [
+                    ready[pool_id] for pool_id in sorted(ready)]
         # NOTE(sbalukoff): Global connection limit should be a sum of all
         # listeners' connection limits.
         connection_limit_sum = 0
@@ -1029,6 +1066,12 @@ class JinjaTemplater:
         auth_pool_ids = {pool.id for pool in loadbalancer.pools
                          if policy_auth_supported and
                          self._auth_pool_available(pool, listener)}
+        grpc_auth_supported = feature_compatibility.get(
+            constants.GATEWAY_CAPABILITY_L7POLICY_GRPC_EXTERNAL_AUTH, False)
+        grpc_auth_pool_ids = {pool.id for pool in loadbalancer.pools
+                              if grpc_auth_supported and
+                              self._auth_pool_available(pool, listener,
+                                                        'GRPC')}
         for policy in policy_gen:
             if (listener.protocol == constants.PROTOCOL_TCP and
                     policy.action ==
@@ -1069,7 +1112,7 @@ class JinjaTemplater:
             if (active and policy.enabled and transformed['l7rules'] and
                     external_auth is not None):
                 transformed['external_auth'] = {'available': False}
-                if (policy_auth_supported and
+                if ((policy_auth_supported or grpc_auth_supported) and
                         policy.project_id == listener.project_id ==
                         loadbalancer.project_id and
                         listener.load_balancer_id == loadbalancer.id and
@@ -1080,14 +1123,17 @@ class JinjaTemplater:
                          constants.L7POLICY_ACTION_WEIGHTED_TARGETS or
                          policy.redirect_pool_id in available_pool_ids)):
                     try:
-                        auth = validate.http_external_auth(external_auth)
+                        auth = validate.l7policy_external_auth(external_auth)
                     except exceptions.ValidationException:
                         # A newer or unreadable stored filter keeps this
                         # match closed until it can be updated or withdrawn.
                         pass
                     else:
+                        eligible = (grpc_auth_pool_ids if
+                                    auth.get('protocol') == 'GRPC' else
+                                    auth_pool_ids)
                         transformed['external_auth'] = self._encode_auth(
-                            auth, auth_pool_ids)
+                            auth, eligible)
             if policy.enabled:
                 # Closing an HTTP policy must leave a retained mirror
                 # with the same pool classification as removing it.
@@ -1290,12 +1336,29 @@ class JinjaTemplater:
             for index, section in enumerate(ordered_sections, start=1)]
 
     @staticmethod
-    def _auth_pool_available(pool, listener):
+    def _auth_pool_available(pool, listener, protocol=constants.PROTOCOL_HTTP):
         return (pool.enabled and pool.project_id == listener.project_id and
                 pool.load_balancer_id == listener.load_balancer_id and
                 pool.provisioning_status not in (
                     constants.PENDING_DELETE, constants.DELETED) and
-                listener_request_filters.valid_pool(pool))
+                listener_request_filters.valid_pool(pool, protocol))
+
+    @staticmethod
+    def _grpc_auth_tls_ready(pool, material, details):
+        if not material.get('ca_cert') or material.get('closed'):
+            return False
+        required = [constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME,
+                    constants.GATEWAY_CAPABILITY_BACKEND_TLS_H2_ALPN]
+        if getattr(pool, 'backend_tls_system_ca', False) is True:
+            required.append(constants.GATEWAY_CAPABILITY_BACKEND_TLS_SYSTEM_CA)
+        if getattr(pool, 'backend_tls_subject_alt_names', None):
+            required.append(
+                constants.GATEWAY_CAPABILITY_BACKEND_TLS_SUBJECT_ALT_NAMES)
+        certificates = {'client_cert': pool.tls_certificate_id,
+                        'crl': pool.crl_container_id}
+        return (all(details.get(key) is True for key in required) and
+                all(not ref or material.get(name)
+                    for name, ref in certificates.items()))
 
     @staticmethod
     def _encode_auth(auth, available_pool_ids):
@@ -1303,6 +1366,11 @@ class JinjaTemplater:
             # Config arguments contain only hex digits or the empty marker.
             return value.encode('ascii').hex() or '-'
 
+        if auth.get('protocol') == 'GRPC':
+            return {'pool_id': auth['pool_id'], 'protocol': 'GRPC',
+                    'available': auth['pool_id'] in available_pool_ids,
+                    'request_headers': encode(','.join(
+                        auth.get('allowed_request_headers', ())))}
         return {
             'pool_id': auth['pool_id'],
             'available': auth['pool_id'] in available_pool_ids,

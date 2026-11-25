@@ -88,8 +88,10 @@ def snapshot(session, repositories, lb, listener, *, pending=False):
     repo = repositories.l7policy
     policies = repo.get_listener_policies_for_update(session, listener.id)
     repo.load_activation_references(session, policies)
-    auth_pool_ids = listener_request_filters.pool_ids(
-        listener.request_filter_sections)
+    auth_pool_protocols = {
+        pool_id: {constants.PROTOCOL_HTTP}
+        for pool_id in listener_request_filters.pool_ids(
+            listener.request_filter_sections)}
     pool_ids = {listener.default_pool_id}
     snapshots = []
     for policy in policies:
@@ -99,10 +101,11 @@ def snapshot(session, repositories, lb, listener, *, pending=False):
             raise exceptions.L7PolicyActivationConflict()
         if policy.external_auth is not None:
             try:
-                auth = validate.http_external_auth(policy.external_auth)
+                auth = validate.l7policy_external_auth(policy.external_auth)
             except exceptions.ValidationException as exc:
                 raise exceptions.L7PolicyActivationConflict() from exc
-            auth_pool_ids.add(auth['pool_id'])
+            auth_pool_protocols.setdefault(auth['pool_id'], set()).add(
+                auth.get('protocol', constants.PROTOCOL_HTTP))
         pool_ids.add(policy.redirect_pool_id)
         pool_ids.update(target.get('pool_id') for target in policy.targets)
         pool_ids.update(validate.request_mirror_pool_ids(
@@ -110,7 +113,7 @@ def snapshot(session, repositories, lb, listener, *, pending=False):
         snapshots.append(wire.L7PolicyActivationSnapshot(
             revision=policy_revision(policy),
             policy=l7policy.L7PolicyFullResponse.from_db_obj(policy)))
-    pool_ids.update(auth_pool_ids)
+    pool_ids.update(auth_pool_protocols)
     pool_ids.discard(None)
     pools = {pool.id: pool for pool in lb.pools}
     destinations = []
@@ -118,10 +121,12 @@ def snapshot(session, repositories, lb, listener, *, pending=False):
         pool = pools.get(pool_id)
         if (pool is None or pool.project_id != lb.project_id or
                 pool.provisioning_status == constants.DELETED or
-                (pool_id in auth_pool_ids and
+                (pool_id in auth_pool_protocols and
                  (pool.load_balancer_id != lb.id or
                   pool.provisioning_status == constants.PENDING_DELETE or
-                  not listener_request_filters.valid_pool(pool)))):
+                  any(not listener_request_filters.valid_pool(
+                      pool, protocol=protocol)
+                      for protocol in auth_pool_protocols[pool_id])))):
             raise exceptions.L7PolicyActivationConflict()
         members = sorted(
             (m for m in pool.members if m.provisioning_status !=

@@ -48,7 +48,7 @@ HTTP_REQUEST_MIRROR_PAYLOAD_AVAILABLE = hasattr(
     driver_dm.L7Policy(), 'request_mirrors')
 LISTENER_OTLP_TRACING_PAYLOAD_AVAILABLE = hasattr(
     driver_dm.Listener(), 'otlp_tracing')
-L7POLICY_HTTP_EXTERNAL_AUTH_PAYLOAD_AVAILABLE = hasattr(
+L7POLICY_EXTERNAL_AUTH_PAYLOAD_AVAILABLE = hasattr(
     driver_dm.L7Policy(), 'external_auth')
 LISTENER_REQUEST_FILTERS_PAYLOAD_AVAILABLE = hasattr(
     driver_dm.Listener(), 'request_filter_sections')
@@ -217,13 +217,20 @@ def gateway_capabilities(driver):
                     False) is True):
         capabilities.append(
             constants.GATEWAY_CAPABILITY_LISTENER_REQUEST_FILTERS)
-    if (L7POLICY_HTTP_EXTERNAL_AUTH_PAYLOAD_AVAILABLE and
+    if (L7POLICY_EXTERNAL_AUTH_PAYLOAD_AVAILABLE and
             driver.name in
             api_settings.enabled_l7policy_http_external_auth_providers and
             getattr(driver, 'supports_l7policy_http_external_auth',
                     False) is True):
         capabilities.append(
             constants.GATEWAY_CAPABILITY_L7POLICY_HTTP_EXTERNAL_AUTH)
+    if (L7POLICY_EXTERNAL_AUTH_PAYLOAD_AVAILABLE and
+            driver.name in
+            api_settings.enabled_l7policy_grpc_external_auth_providers and
+            getattr(driver, 'supports_l7policy_grpc_external_auth',
+                    False) is True):
+        capabilities.append(
+            constants.GATEWAY_CAPABILITY_L7POLICY_GRPC_EXTERNAL_AUTH)
     initial_rules_providers = (
         api_settings.enabled_l7policy_initial_rules_providers)
     if (driver.name in initial_rules_providers and
@@ -564,17 +571,36 @@ def require_http_retry_backoff(driver, protocol):
                 'provider.'))
 
 
+def require_l7policy_external_auth(driver, protocol, auth):
+    if validate.is_grpc_external_auth(auth):
+        require_l7policy_grpc_external_auth(driver, protocol)
+    else:
+        require_l7policy_http_external_auth(driver, protocol)
+
+
 def require_l7policy_http_external_auth(driver, protocol):
+    _require_l7policy_external_auth(
+        driver, protocol,
+        constants.GATEWAY_CAPABILITY_L7POLICY_HTTP_EXTERNAL_AUTH, _('HTTP'))
+
+
+def require_l7policy_grpc_external_auth(driver, protocol):
+    _require_l7policy_external_auth(
+        driver, protocol,
+        constants.GATEWAY_CAPABILITY_L7POLICY_GRPC_EXTERNAL_AUTH, _('gRPC'))
+
+
+def _require_l7policy_external_auth(driver, protocol, capability, name):
     if protocol not in (constants.PROTOCOL_HTTP,
                         constants.PROTOCOL_TERMINATED_HTTPS):
         raise exceptions.ValidationException(detail=_(
-            'L7 policy HTTP authorization requires HTTP or TERMINATED_HTTPS.'))
-    if (constants.GATEWAY_CAPABILITY_L7POLICY_HTTP_EXTERNAL_AUTH not in
-            gateway_capabilities(driver)):
+            'L7 policy %(name)s authorization requires HTTP or '
+            'TERMINATED_HTTPS.') % {'name': name})
+    if capability not in gateway_capabilities(driver):
         raise exceptions.ProviderUnsupportedOptionError(
             prov=driver.name, user_msg=_(
-                'L7 policy HTTP authorization is unavailable for this '
-                'provider.'))
+                'L7 policy %(name)s authorization is unavailable for this '
+                'provider.') % {'name': name})
 
 
 def require_listener_request_filters(driver):
@@ -695,6 +721,9 @@ def _withdrawn_request_transforms(driver):
     if (constants.GATEWAY_CAPABILITY_L7POLICY_HTTP_EXTERNAL_AUTH not in
             capabilities):
         yield 'external_auth', require_l7policy_http_external_auth
+    if (constants.GATEWAY_CAPABILITY_L7POLICY_GRPC_EXTERNAL_AUTH not in
+            capabilities):
+        yield 'grpc_external_auth', require_l7policy_grpc_external_auth
     yield from _withdrawn_grpc_metadata(capabilities)
 
 
@@ -976,7 +1005,7 @@ def require_gateway_policy_action(driver, action, protocol, *,
                                   request_mirrors=None,
                                   external_auth=None):
     if external_auth is not None:
-        require_l7policy_http_external_auth(driver, protocol)
+        require_l7policy_external_auth(driver, protocol, external_auth)
     if validate.request_mirror_pool_ids(request_mirrors, targets):
         require_http_request_mirror(driver, protocol)
     if http_request_policy is not None:
@@ -1656,7 +1685,7 @@ def l7policy_dict_to_provider_dict(l7policy_dict):
         new_l7policy_dict.pop('http_request_policy', None)
     if not HTTP_REQUEST_MIRROR_PAYLOAD_AVAILABLE:
         new_l7policy_dict.pop('request_mirrors', None)
-    if not L7POLICY_HTTP_EXTERNAL_AUTH_PAYLOAD_AVAILABLE:
+    if not L7POLICY_EXTERNAL_AUTH_PAYLOAD_AVAILABLE:
         new_l7policy_dict.pop('external_auth', None)
     if (not TCP_TLS_MIXED_MODE_PAYLOAD_AVAILABLE or
             not new_l7policy_dict.get('tcp_tls_passthrough')):
