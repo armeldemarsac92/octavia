@@ -84,9 +84,9 @@ backend {{ constants.HAPROXY_TLS_SNI_WEIGHTED_CLOSED_PREFIX }}{{ listener.id }}
     timeout server {{ listener.timeout_member_data }}
              {% endif %}
              {% for pool in listener.pools if pool.id not in listener.get('mirror_only_pool_ids', []) %}
-               {% if pool.enabled %}
+               {% if pool.enabled and not pool.header_persistence_unavailable %}
                  {{- backend_macro(constants, lib_consts, listener, pool, loadbalancer, state_file) }}
-               {% elif pool.closed %}
+               {% elif pool.closed or (pool.enabled and pool.header_persistence_unavailable) %}
                  {{- closed_backend_macro(listener, pool) }}
                {% endif %}
              {% endfor %}

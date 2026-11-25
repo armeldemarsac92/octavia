@@ -1770,6 +1770,21 @@ session_persistence_cookie_permanent:
   in: body
   required: false
   type: boolean
+session_persistence_header_absolute_timeout_ms:
+  description: |
+    Absolute age in milliseconds of a session identifier issued for an
+    ``HTTP_HEADER`` pool. Accepts an integer from 0 to 1439985600000.
+    A value of 0 expires immediately. An omitted timeout has no age limit.
+  in: body
+  required: false
+  type: integer
+session_persistence_header_name:
+  description: |
+    HTTP field containing the identifier for ``HTTP_HEADER`` persistence.
+    Required for this type. The provider returns the name in lowercase.
+  in: body
+  required: false
+  type: string
 session_persistence_granularity:
   description: |
     The netmask used to determine SCTP or UDP session persistence. Currently
@@ -1791,7 +1806,7 @@ session_persistence_timeout:
 session_persistence_type:
   description: |
     Session persistence type for the pool.  One of ``APP_COOKIE``,
-    ``HTTP_COOKIE``, or ``SOURCE_IP``.
+    ``HTTP_COOKIE``, ``HTTP_HEADER``, or ``SOURCE_IP``.
   in: body
   required: true
   type: string

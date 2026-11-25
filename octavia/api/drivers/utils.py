@@ -126,6 +126,14 @@ def gateway_capabilities(driver):
             driver.name in api_settings.enabled_request_cors_providers and
             getattr(driver, 'supports_request_cors', False) is True):
         capabilities.append(constants.GATEWAY_CAPABILITY_REQUEST_CORS)
+    header_providers = api_settings.enabled_http_header_persistence_providers
+    supports_header_persistence = getattr(
+        driver, 'supports_http_header_persistence', False) is True
+    if (driver.name in header_providers and supports_header_persistence and
+            getattr(lib_consts, 'SESSION_PERSISTENCE_HTTP_HEADER', None) ==
+            constants.SESSION_PERSISTENCE_HTTP_HEADER):
+        capabilities.append(
+            constants.GATEWAY_CAPABILITY_HTTP_HEADER_PERSISTENCE)
     if (driver.name in api_settings.enabled_http_cookie_path_providers and
             getattr(driver, 'supports_http_cookie_path', False) is True):
         capabilities.append(constants.GATEWAY_CAPABILITY_HTTP_COOKIE_PATH)
@@ -417,6 +425,15 @@ def require_backend_retry_budget(driver, protocol):
         raise exceptions.ProviderUnsupportedOptionError(
             prov=driver.name, user_msg=_(
                 'Backend retry budgets are unavailable for this provider.'))
+
+
+def require_http_header_persistence(driver):
+    if (constants.GATEWAY_CAPABILITY_HTTP_HEADER_PERSISTENCE not in
+            gateway_capabilities(driver)):
+        raise exceptions.ProviderUnsupportedOptionError(
+            prov=driver.name, user_msg=_(
+                'HTTP_HEADER session persistence is unavailable for this '
+                'provider.'))
 
 
 def require_http_cookie_name(driver, protocol):
@@ -1303,17 +1320,23 @@ def pool_dict_to_provider_dict(pool_dict, for_delete=False, for_update=False):
     # Remove the DB back references
     if ('session_persistence' in new_pool_dict and
             new_pool_dict['session_persistence']):
-        if 'pool_id' in new_pool_dict['session_persistence']:
-            del new_pool_dict['session_persistence']['pool_id']
-        if 'pool' in new_pool_dict['session_persistence']:
-            del new_pool_dict['session_persistence']['pool']
-        new_pool_dict['session_persistence'].pop(
-            'http_cookie_name_enabled', None)
-        new_pool_dict['session_persistence'].pop(
-            'cookie_absolute_timeout_error', None)
+        persistence = new_pool_dict['session_persistence']
+        for field in ('pool_id', 'pool', 'http_cookie_name_enabled',
+                      'cookie_absolute_timeout_error',
+                      'header_persistence_error'):
+            persistence.pop(field, None)
+        if (persistence.get('type') ==
+                constants.SESSION_PERSISTENCE_HTTP_HEADER):
+            new_pool_dict['session_persistence'] = {
+                field: persistence[field]
+                for field in ('type', 'header_name',
+                              'header_absolute_timeout_ms')
+                if field in persistence and
+                (for_update or persistence[field] is not None)}
         # Explicit nulls in an update can clear the path, timeout and scope.
-        if not for_update:
-            persistence = new_pool_dict['session_persistence']
+        elif not for_update:
+            persistence.pop('header_name', None)
+            persistence.pop('header_absolute_timeout_ms', None)
             if persistence.get('cookie_path') in (
                     None, constants.HTTP_COOKIE_DEFAULT_PATH):
                 persistence.pop('cookie_path', None)

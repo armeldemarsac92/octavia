@@ -129,6 +129,11 @@ api_opts = [
                 help=_('Providers whose regional fleets support L7 policy '
                        'CORS. Enable after upgrading the database, API, '
                        'provider library, workers and Amphora images.')),
+    cfg.ListOpt('enabled_http_header_persistence_providers', default=[],
+                help=_('Providers with qualified HTTP header persistence. '
+                       'Enable after upgrading the database, API, workers '
+                       'and Amphora agents, qualifying the Amphora HAProxy '
+                       'binaries and provisioning the regional signing key.')),
     cfg.ListOpt('enabled_http_cookie_name_providers', default=[],
                 help=_('Providers whose regional fleets support custom names '
                        'for load balancer-generated HTTP persistence cookies. '
@@ -545,8 +550,8 @@ haproxy_amphora_opts = [
     cfg.StrOpt('haproxy_template', help=_('Custom haproxy template.')),
     cfg.StrOpt('http_cookie_signing_key_file',
                help=_('Worker-only path to a private 32-byte key file for '
-                      'absolute session cookie timeouts. The same key must '
-                      'be available to every worker serving the region.')),
+                      'signed HTTP cookie and header persistence. The same '
+                      'key must be available to every worker in the region.')),
     cfg.BoolOpt('connection_logging', default=True,
                 help=_('Set this to False to disable connection logging.')),
     cfg.IntOpt('connection_max_retries',

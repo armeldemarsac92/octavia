@@ -27,6 +27,19 @@ from octavia.common import validate
 from octavia.i18n import _
 
 
+class HTTPHeaderAbsoluteTimeout(wtypes.UserType):
+    basetype = object
+    name = 'header_absolute_timeout_ms'
+
+    @staticmethod
+    def validate(value):
+        if not validate.is_valid_http_header_absolute_timeout(value):
+            raise ValueError(_('header_absolute_timeout_ms must be an '
+                               'integer from 0 to %d.') %
+                             constants.HTTP_HEADER_ABSOLUTE_TIMEOUT_MAX_MS)
+        return value
+
+
 class HTTPAbsoluteCookieTimeout(wtypes.UserType):
     basetype = object
     name = 'cookie_absolute_timeout_ms'
@@ -69,6 +82,8 @@ class SessionPersistenceResponse(types.BaseType):
     """Defines which attributes are to be shown on any response."""
     type = wtypes.wsattr(wtypes.text)
     cookie_name = wtypes.wsattr(wtypes.text)
+    header_name = wtypes.wsattr(wtypes.text)
+    header_absolute_timeout_ms = wtypes.wsattr(HTTPHeaderAbsoluteTimeout())
     cookie_path = wtypes.wsattr(HTTPCookiePath())
     persistence_timeout = wtypes.wsattr(wtypes.IntegerType())
     persistence_granularity = wtypes.wsattr(types.IPAddressType())
@@ -79,6 +94,14 @@ class SessionPersistenceResponse(types.BaseType):
     @classmethod
     def from_db_obj(cls, db_obj):
         result = super().from_db_obj(db_obj)
+        if result.type == constants.SESSION_PERSISTENCE_HTTP_HEADER:
+            result.cookie_name = wtypes.Unset
+            result.persistence_timeout = wtypes.Unset
+            result.persistence_granularity = wtypes.Unset
+        if result.header_name is None:
+            result.header_name = wtypes.Unset
+        if result.header_absolute_timeout_ms is None:
+            result.header_absolute_timeout_ms = wtypes.Unset
         if result.cookie_path in (None, constants.HTTP_COOKIE_DEFAULT_PATH):
             result.cookie_path = wtypes.Unset
         if result.cookie_absolute_timeout_ms is None:
@@ -98,6 +121,9 @@ class SessionPersistencePOST(types.BaseType):
     cookie_name = wtypes.wsattr(wtypes.StringType(
         max_length=255, pattern=r'^[^\s,;\\]+$'),
         default=None)
+    header_name = wtypes.wsattr(wtypes.StringType(
+        max_length=constants.HTTP_HEADER_PERSISTENCE_NAME_MAX_LENGTH))
+    header_absolute_timeout_ms = wtypes.wsattr(HTTPHeaderAbsoluteTimeout())
     cookie_path = wtypes.wsattr(HTTPCookiePath())
     persistence_timeout = wtypes.wsattr(wtypes.IntegerType(), default=None)
     persistence_granularity = wtypes.wsattr(types.IPAddressType(),
@@ -114,6 +140,9 @@ class SessionPersistencePUT(types.BaseType):
     # https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Set-Cookie
     cookie_name = wtypes.wsattr(wtypes.StringType(
         max_length=255, pattern=r'^[^\s,;\\]+$'))
+    header_name = wtypes.wsattr(wtypes.StringType(
+        max_length=constants.HTTP_HEADER_PERSISTENCE_NAME_MAX_LENGTH))
+    header_absolute_timeout_ms = wtypes.wsattr(HTTPHeaderAbsoluteTimeout())
     cookie_path = wtypes.wsattr(HTTPCookiePath())
     persistence_timeout = wtypes.wsattr(wtypes.IntegerType(), default=None)
     persistence_granularity = wtypes.wsattr(types.IPAddressType(),

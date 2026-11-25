@@ -144,6 +144,12 @@ class SessionPersistence(base_models.BASE):
     cookie_name = sa.Column(sa.String(255), nullable=True)
     cookie_path = sa.Column(sa.String(constants.HTTP_COOKIE_PATH_MAX_LENGTH),
                             nullable=True)
+    header_name = sa.Column(
+        sa.String(constants.HTTP_HEADER_PERSISTENCE_NAME_MAX_LENGTH),
+        nullable=True)
+    header_absolute_timeout_ms = sa.Column(sa.BigInteger(), nullable=True)
+    header_persistence_error = sa.Column(
+        sa.Boolean(), nullable=False, server_default=sa.false())
     http_cookie_name_enabled = sa.Column(
         sa.Boolean(), nullable=False, server_default=sa.false())
     cookie_absolute_timeout_ms = sa.Column(sa.BigInteger(), nullable=True)
@@ -422,14 +428,20 @@ class Pool(base_models.BASE, base_models.IdMixin, base_models.ProjectMixin,
     def _api_provisioning_status(cls):
         # Match the API response projection for filtering and pagination.
         # Include length so collations that pad spaces distinguish '/ '.
-        impaired = cls.session_persistence.has(sa.and_(
-            sa.or_(SessionPersistence.cookie_absolute_timeout_ms.is_not(None),
-                   sa.and_(SessionPersistence.cookie_path.is_not(None),
-                           sa.or_(sa.func.length(
-                               SessionPersistence.cookie_path) != 1,
-                               SessionPersistence.cookie_path !=
-                               constants.HTTP_COOKIE_DEFAULT_PATH))),
-            SessionPersistence.cookie_absolute_timeout_error.is_(True)))
+        persistence = SessionPersistence
+        header_impaired = sa.and_(
+            persistence.type == constants.SESSION_PERSISTENCE_HTTP_HEADER,
+            persistence.header_persistence_error.is_(True))
+        cookie_impaired = sa.and_(
+            persistence.type != constants.SESSION_PERSISTENCE_HTTP_HEADER,
+            sa.or_(persistence.cookie_absolute_timeout_ms.is_not(None),
+                   sa.and_(persistence.cookie_path.is_not(None),
+                           sa.or_(sa.func.length(persistence.cookie_path) != 1,
+                                  persistence.cookie_path !=
+                                  constants.HTTP_COOKIE_DEFAULT_PATH))),
+            persistence.cookie_absolute_timeout_error.is_(True))
+        impaired = cls.session_persistence.has(
+            sa.or_(header_impaired, cookie_impaired))
         return sa.case(
             (sa.and_(cls.enabled.is_(True),
                      cls.provisioning_status == constants.ACTIVE, impaired),

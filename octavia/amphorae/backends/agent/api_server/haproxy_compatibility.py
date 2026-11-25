@@ -66,16 +66,49 @@ frontend cookie_path_probe
     "\n")
 
 
-def _supports_http_cookie_path(haproxy_cmd):
+_HTTP_HEADER_PERSISTENCE_PROBE = (
+    """defaults
+    mode http
+    timeout client 1s
+    timeout connect 1s
+    timeout server 1s
+frontend in
+    bind 127.0.0.1:12345
+    default_backend out
+backend out
+    acl unique "req.fhdr_cnt(\\\"x-session'\\\")" eq 1
+    acl authenticated """
+    "var(txn.token),hmac(sha256,txn.key),ub64enc,secure_memcmp(txn.tag) "
+    """-m bool
+    http-request set-var(txn.key) str(cHJvYmU=)
+    http-request set-var(txn.token) "req.fhdr(\\\"x-session'\\\")" if unique
+    http-request set-var(txn.issued) var(txn.token),word(3,.)
+    http-request set-var(txn.age) date(0,us),sub(txn.issued)
+    http-request set-var(txn.tag) var(txn.token),word(4,.)
+    acl valid_age var(txn.age) -m int ge 0
+    use-server target if authenticated valid_age { srv_is_up(target) }
+    http-response set-var(txn.member) srv_name
+    http-after-response set-var-fmt(txn.issued) "%[date(0,us)]"
+    http-after-response set-header x-session %[var(txn.issued)] """
+    """if { var(txn.member) -m found }
+    server target 127.0.0.1:2
+""")
+
+
+def _valid_haproxy_config(haproxy_cmd, config):
     try:
         subprocess.run(
             [haproxy_cmd, '-c', '-q', '-f', '/dev/stdin'],
-            input=_HTTP_COOKIE_PATH_PROBE, text=True,
+            input=config, text=True,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             check=True, timeout=5)
     except (OSError, subprocess.SubprocessError):
         return False
     return True
+
+
+def _supports_http_cookie_path(haproxy_cmd):
+    return _valid_haproxy_config(haproxy_cmd, _HTTP_COOKIE_PATH_PROBE)
 
 
 _TLS_SNI_PASSTHROUGH_WEIGHTED_POOLS_PROBE = (
@@ -121,6 +154,9 @@ def get_haproxy_capabilities():
     capabilities = {}
     if _supports_http_cookie_path(haproxy_cmd):
         capabilities[constants.GATEWAY_CAPABILITY_HTTP_COOKIE_PATH] = True
+    if _valid_haproxy_config(haproxy_cmd, _HTTP_HEADER_PERSISTENCE_PROBE):
+        capability = constants.GATEWAY_CAPABILITY_HTTP_HEADER_PERSISTENCE
+        capabilities[capability] = True
     version = re.match(r'HAProxy version (\d+)\.(\d+)\.', output)
     if (version and tuple(map(int, version.groups())) >= (2, 2) and
             _supports_tls_sni_passthrough_weighted_pools(haproxy_cmd)):
