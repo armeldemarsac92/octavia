@@ -35,6 +35,7 @@ from octavia.common import data_models as octavia_data_models
 from octavia.common import exceptions
 from octavia.common import l7policy_activation
 from octavia.common import utils
+from octavia.common import validate
 from octavia.controller.worker import task_utils as task_utilities
 from octavia.db import api as db_apis
 from octavia.db import repositories as repo
@@ -625,6 +626,13 @@ class ApplyL7PolicyActivation(BaseAmphoraTask):
                     exceptions.ValidationException):
                 return False
         selected = [p for p in policies if p.id in expected]
+        if not transition and any(
+                rule.enabled and validate.is_long_http_hostname_regex(
+                    rule.type, rule.compare_type, rule.value)
+                for policy in selected for rule in policy.l7rules):
+            driver = driver_factory.get_driver(lb.provider)
+            if not driver_utils.http_long_hostname_available(driver):
+                return False
         if listener.protocol == constants.PROTOCOL_TCP:
             driver = driver_factory.get_driver(lb.provider)
             if not driver_utils.l7policy_batch_activation_available(

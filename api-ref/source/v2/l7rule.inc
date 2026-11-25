@@ -128,6 +128,18 @@ position breaking ties.
    {"rule": {"type": "TLS_SNI", "compare_type": "ENDS_WITH",
              "value": "*.example.test"}}
 
+With ``http_long_hostname_v1`` enabled, ``HOST_NAME`` rules using
+``REGEX`` accept values up to 512 characters on HTTP and TERMINATED_HTTPS
+listeners. This accommodates escaped DNS hostnames up to 253 characters
+and an optional numeric port in a single regex. The existing match and
+``invert`` semantics apply to the entire regex. Without the capability,
+new or changed hostname regexes have the standard 255-character limit.
+An attempt to enable a stored long regex, or to enable a parent that
+would activate it, returns HTTP 501 after capability withdrawal. Stored
+rules remain readable and can be disabled, shortened or deleted.
+Create these rules at the L7 rule endpoint, as initial rules at the L7
+policy endpoint, or in a load balancer creation graph.
+
 With ``http_header_exact_v1`` enabled, use ``HTTP_HEADER_EXACT`` with
 ``EQUAL_TO`` on HTTP or TERMINATED_HTTPS listeners. The key is an HTTP
 field name of up to 255 ASCII characters, compared case-insensitively. The
