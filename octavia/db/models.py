@@ -457,9 +457,14 @@ class Pool(base_models.BASE, base_models.IdMixin, base_models.ProjectMixin,
     # *actually* using the pool.
     @property
     def listeners(self):
+        return self._linked_listeners()
+
+    def _linked_listeners(self, *, withdrawn_policies=()):
+        """Project listeners without the selected redirects and authorizers."""
         _listeners = self._default_listeners[:]
         _l_ids = [li.id for li in _listeners]
-        l7policies = self.l7policies + [
+        l7policies = [policy for policy in self.l7policies
+                      if policy.id not in withdrawn_policies] + [
             target.l7policy for target in self._l7policy_targets
             if target.l7policy is not None] + [
             mirror.l7policy for mirror in self._l7policy_mirrors
@@ -468,7 +473,8 @@ class Pool(base_models.BASE, base_models.IdMixin, base_models.ProjectMixin,
                         if len(p.l7rules) > 0 and p.enabled is True]
         auth_listeners = [ref.l7policy.listener
                           for ref in self._l7policy_auth_refs
-                          if ref.l7policy.provisioning_status not in (
+                          if ref.l7policy_id not in withdrawn_policies and
+                          ref.l7policy.provisioning_status not in (
                               constants.PENDING_DELETE, constants.DELETED)]
         for li in (l7_listeners + auth_listeners +
                    self._request_filter_listeners +
@@ -789,6 +795,10 @@ class Listener(base_models.BASE, base_models.IdMixin,
     # unique list of pools this listener is *actually* using.
     @property
     def pools(self):
+        return self._linked_pools()
+
+    def _linked_pools(self, *, withdrawn_policies=()):
+        """Project pools without the selected policy redirects."""
         _pools = []
         _p_ids = []
         if self.default_pool:
@@ -796,7 +806,8 @@ class Listener(base_models.BASE, base_models.IdMixin,
             _p_ids.append(self.default_pool.id)
         l7_pools = [pool for policy in self.l7policies
                     if policy.l7rules and policy.enabled is True
-                    for pool in policy._pools]
+                    for pool in policy._linked_pools(
+                        include_redirect=policy.id not in withdrawn_policies)]
         for p in l7_pools:
             if p.id not in _p_ids:
                 _pools.append(p)
@@ -1050,11 +1061,10 @@ class L7Policy(base_models.BASE, base_models.IdMixin, base_models.ProjectMixin,
         return [row.as_mirror() for row in self._mirrors
                 if row.target_position == -1]
 
-    @property
-    def _pools(self):
+    def _linked_pools(self, *, include_redirect):
         pools = [row.pool for row in self._mirrors
                  if row.numerator and row.pool is not None]
-        if self.redirect_pool is not None:
+        if include_redirect and self.redirect_pool is not None:
             pools.append(self.redirect_pool)
         if self.action == constants.L7POLICY_ACTION_WEIGHTED_TARGETS:
             pools.extend(
