@@ -125,6 +125,16 @@ class TestAmphoraDriverTasks(base.TestCase):
         mock_amphora_repo_update.assert_called_once_with(
             _session_mock, AMP_ID, status=constants.ERROR)
 
+        pool = data_models.Pool(
+            udp_packet_drop={'numerator': 1, 'denominator': 4})
+        mock_lb_get.return_value = data_models.LoadBalancer(listeners=[
+            data_models.Listener(protocol=constants.PROTOCOL_UDP,
+                                 default_pool=pool)])
+        # The failover flow must stop before starting VRRP.
+        self.assertRaisesRegex(
+            Exception, 'boom', amp_list_update_obj.execute,
+            _LB_mock, _amphora_mock, self.timeout_dict)
+
     @mock.patch('octavia.db.repositories.LoadBalancerRepository.get')
     def test_amp_index_listener_update(self,
                                        mock_lb_get,
@@ -210,6 +220,16 @@ class TestAmphoraDriverTasks(base.TestCase):
         amp_list_update_obj.execute(_LB_mock, 0, [_amphora_mock], {}, AMP_ID)
         mock_amphora_repo_update.assert_called_once_with(
             _session_mock, AMP_ID, status=constants.ERROR)
+
+        pool = data_models.Pool(
+            udp_packet_drop={'numerator': 1, 'denominator': 4})
+        mock_lb_get.return_value = data_models.LoadBalancer(listeners=[
+            data_models.Listener(protocol=constants.PROTOCOL_UDP,
+                                 default_pool=pool)])
+        self.assertRaises(
+            driver_except.CoordinatedListenerUpdateError,
+            amp_list_update_obj.execute, _LB_mock, 0, [_amphora_mock], {},
+            AMP_ID)
 
     @mock.patch('octavia.db.repositories.LoadBalancerRepository.get')
     @mock.patch('octavia.db.api.session')

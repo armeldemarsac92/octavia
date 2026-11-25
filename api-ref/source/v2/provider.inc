@@ -336,6 +336,16 @@ Amphorae. A partial reload can temporarily leave peers on different
 configurations, and the pool remains in ``ERROR`` until a replacement batch
 completes.
 
+``udp_packet_drop_v1`` enables proportional datagram drop on managed
+Amphora IPv4 UDP listeners. Enable the provider in
+``[api_settings] enabled_udp_packet_drop_providers`` after upgrading the
+database, API, every worker and all participating Amphora images. The
+configured worker driver must support guarded LVS reloads. Amphora closes
+the affected VIP and port during reconfiguration and verifies the new
+IPVS service before forwarding the admitted share. Each Amphora applies
+the update separately, so the port may briefly be unavailable and peers
+may temporarily apply different configurations.
+
 ``backend_retry_budget_v1`` enables ``backend_retry_budget`` on HTTP
 pools forwarding ingress on HTTP and ``TERMINATED_HTTPS`` listeners. It
 shares request and retry history among participating pools with the same
