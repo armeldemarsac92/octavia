@@ -490,9 +490,6 @@ class ListenersController(base.BaseController):
         if listener_dict.get('default_pool_id'):
             pool = self.repositories.pool.get_transport_for_update(
                 lock_session, listener_dict['default_pool_id'])
-            if pool.udp_packet_drop is not None:
-                raise exceptions.ValidationException(detail=_(
-                    'A managed UDP pool belongs to its existing listener.'))
             driver_utils.validate_tcp_pool_attachment(
                 driver, pool.protocol, pool.tls_enabled,
                 tcp_tls_termination=listener_dict.get('tcp_tls_termination'),
@@ -539,6 +536,19 @@ class ListenersController(base.BaseController):
 
             self._auth_validate_action(context, listener.project_id,
                                        constants.RBAC_POST)
+
+            if (listener.protocol == constants.PROTOCOL_UDP and
+                    listener.default_pool_id):
+                self.repositories.load_balancer.lock(
+                    context.session, load_balancer_id)
+                pool = (
+                    self.repositories.pool.get_on_load_balancer_for_update(
+                        context.session, load_balancer_id,
+                        listener.project_id, listener.default_pool_id))
+                if pool.udp_packet_drop is not None:
+                    raise exceptions.ValidationException(detail=_(
+                        'A managed UDP pool belongs to its existing '
+                        'listener.'))
 
             # Load the driver early as it also provides validation
             driver = driver_factory.get_driver(provider)

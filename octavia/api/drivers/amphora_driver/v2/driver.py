@@ -298,6 +298,11 @@ class AmphoraProviderDriver(driver_base.ProviderDriver):
         payload = {consts.POOL: pool.to_dict(recurse=True)}
         self.client.cast({}, 'delete_pool', **payload)
 
+    def delete_managed_udp_pool(self, loadbalancer_id, pool_id, batch_id):
+        self.client.cast({}, 'delete_managed_udp_pool',
+                         loadbalancer_id=loadbalancer_id, pool_id=pool_id,
+                         batch_id=batch_id)
+
     def pool_update(self, old_pool, new_pool):
         self._validate_alpn_protocols(new_pool)
         if new_pool.lb_algorithm:

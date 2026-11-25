@@ -140,6 +140,10 @@ class Endpoints:
                                batch_id):
         self.worker.apply_udp_member_batch(loadbalancer_id, pool_id, batch_id)
 
+    def delete_managed_udp_pool(self, context, loadbalancer_id, pool_id,
+                                batch_id):
+        self.worker.delete_managed_udp_pool(loadbalancer_id, pool_id, batch_id)
+
     def delete_member(self, context, member):
         LOG.info('Deleting member \'%s\'...', member.get(constants.MEMBER_ID))
         self.worker.delete_member(member)

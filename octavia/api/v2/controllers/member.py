@@ -13,6 +13,7 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+from contextlib import ExitStack
 import hashlib
 import ipaddress
 import json
@@ -489,7 +490,7 @@ class MembersController(MemberController):
                     'TCP connection rejection is unavailable.'))
 
     def _validate_drop_batch(self, driver, lb, pool, drop, members,
-                             additive_only, *, replay):
+                             additive_only):
         if additive_only or drop is None:
             raise exceptions.ValidationException(detail=_(
                 'udp_packet_drop requires a full batch with a fraction.'))
@@ -508,12 +509,22 @@ class MembersController(MemberController):
                 'udp_packet_drop requires a single IPv4 VIP, one dedicated '
                 'UDP listener, IPv4 members and a UDP round-robin pool '
                 'without health monitoring or session persistence.'))
-        if replay:
-            supported = driver_factory.supports_udp_packet_drop(driver)
-        else:
-            supported = (constants.GATEWAY_CAPABILITY_UDP_PACKET_DROP in
-                         driver_utils.gateway_capabilities(driver))
-        if not supported:
+        if any(member.backup for member in members):
+            raise exceptions.ValidationException(detail=_(
+                'Managed UDP pools do not support backup members.'))
+        if any(member.admin_state_up is None or member.weight is None or
+               member.backup is None for member in members):
+            raise exceptions.ValidationException(detail=_(
+                'Managed UDP member enabled state and weight cannot be null.'))
+        has_destination = any(member.admin_state_up and member.weight > 0
+                              for member in members)
+        full_drop = drop['numerator'] == drop['denominator']
+        if full_drop == has_destination:
+            raise exceptions.ValidationException(detail=_(
+                'udp_packet_drop requires enabled members of positive '
+                'weight exactly when some datagrams are admitted.'))
+        if (constants.GATEWAY_CAPABILITY_UDP_PACKET_DROP not in
+                driver_utils.gateway_capabilities(driver)):
             raise exceptions.ProviderUnsupportedOptionError(
                 prov=driver.name,
                 user_msg=_('UDP packet drop is unavailable.'))
@@ -564,7 +575,7 @@ class MembersController(MemberController):
                 lb_id = self._get_db_pool(
                     session, self.pool_id, show_deleted=False).load_balancer_id
 
-        with session.begin():
+        with ExitStack() as render_locks, session.begin():
             if explicit_batch:
                 lb = self.repositories.load_balancer.get_for_update(
                     session, lb_id)
@@ -573,7 +584,8 @@ class MembersController(MemberController):
                 project_id, provider = lb.project_id, lb.provider
                 db_pool = (
                     self.repositories.pool.get_on_load_balancer_for_update(
-                        session, lb_id, project_id, self.pool_id))
+                        session, lb_id, project_id, self.pool_id,
+                        include_pending_delete=explicit_drop))
             else:
                 db_pool = self._get_db_pool(session, self.pool_id)
                 project_id, provider = self._get_lb_project_id_provider(
@@ -594,6 +606,7 @@ class MembersController(MemberController):
             driver = driver_factory.get_driver(provider)
 
             managed_batch = False
+            replace_pending_udp = False
             if explicit_batch:
                 self._auth_validate_action(
                     context, project_id, constants.RBAC_PUT,
@@ -605,30 +618,46 @@ class MembersController(MemberController):
                 replay = (pending and
                           operation.get('pool_id') == self.pool_id and
                           operation.get('digest') == digest)
-                if pending and not replay:
+                pending_udp = (
+                    self.repositories.load_balancer.pending_udp_pool_operation(
+                        lb, self.pool_id) if explicit_drop else None)
+                replace_pending_udp = bool(
+                    pending_udp and pending_udp.get('action') is None and
+                    db_pool.provisioning_status == constants.PENDING_UPDATE and
+                    db_pool.tcp_member_batch_id == pending_udp['id'])
+                if explicit_drop:
+                    replay = replay and replace_pending_udp
+                if pending and not (replay or replace_pending_udp):
                     raise exceptions.ImmutableObject(
                         resource='Load Balancer', id=lb_id)
                 if explicit_drop:
                     self._validate_drop_batch(
-                        driver, lb, db_pool, drop, members, additive_only,
-                        replay=replay)
+                        driver, lb, db_pool, drop, members, additive_only)
                 else:
                     self._validate_rejection_batch(
                         driver, db_pool, rejection, additive_only,
                         replay=replay)
+                if replace_pending_udp:
+                    driver_utils.require_listener_render_lock(
+                        render_locks, lb_id)
                 if replay:
                     self._dispatch_managed_batch(
                         driver, lb_id, db_pool.id, operation['id'],
                         udp=explicit_drop)
                     return
+                if replace_pending_udp:
+                    # Member CRUD fences the previous receipt. Clear it while
+                    # holding both locks and commit only the replacement.
+                    lb.tcp_member_batch = None
                 managed_batch = (
                     explicit_drop or rejection is not None or
                     db_pool.tcp_connection_rejection is not None or
                     db_pool.tcp_member_batch_id ==
                     constants.TCP_MEMBER_BATCH_FAILED)
-            self._test_lb_and_listener_and_pool_statuses(
-                session, pool=db_pool if explicit_batch else None,
-                retry_batch=managed_batch, explicit_drop=explicit_drop)
+            if not replace_pending_udp:
+                self._test_lb_and_listener_and_pool_statuses(
+                    session, pool=db_pool if explicit_batch else None,
+                    retry_batch=managed_batch, explicit_drop=explicit_drop)
             if managed_batch:
                 old_members = self.repositories.member.get_batch_for_update(
                     session, db_pool.id)

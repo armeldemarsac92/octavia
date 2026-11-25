@@ -228,6 +228,15 @@ class HealthMonitorController(base.BaseController):
             self._auth_validate_action(context, health_monitor.project_id,
                                        consts.RBAC_POST)
 
+            if pool.protocol == consts.PROTOCOL_UDP:
+                self.repositories.load_balancer.lock(
+                    context.session, pool.load_balancer_id)
+                current = self.repositories.pool.get_transport_for_update(
+                    context.session, pool.id)
+                if current.udp_packet_drop is not None:
+                    raise exceptions.ValidationException(detail=_(
+                        'Managed UDP pools do not support health monitors.'))
+
             if (not CONF.api_settings.allow_ping_health_monitors and
                     health_monitor.type == consts.HEALTH_MONITOR_PING):
                 raise exceptions.DisabledOption(
@@ -264,12 +273,6 @@ class HealthMonitorController(base.BaseController):
 
             self._test_lb_and_listener_and_pool_statuses(
                 context.session, health_monitor)
-            if pool.protocol == consts.PROTOCOL_UDP:
-                current = self.repositories.pool.get_transport_for_update(
-                    context.session, pool.id)
-                if current.udp_packet_drop is not None:
-                    raise exceptions.ValidationException(detail=_(
-                        'Managed UDP pools do not support health monitors.'))
             db_hm = self._validate_create_hm(context.session, hm_dict)
 
             # Prepare the data for the driver data model

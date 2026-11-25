@@ -73,6 +73,13 @@ HTTP_L7RULE_CAPABILITIES = {
 }
 
 
+def require_listener_render_lock(locks, lb_id):
+    # Renderers holding this same lock acquire the LB row next. Take the
+    # render lock without waiting when admission already holds the row.
+    if not locks.enter_context(db_api.listener_render_lock(lb_id)):
+        raise exceptions.ImmutableObject(resource='Load Balancer', id=lb_id)
+
+
 def gateway_capabilities(driver):
     api_settings = CONF.api_settings
     capabilities = []
