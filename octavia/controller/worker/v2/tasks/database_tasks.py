@@ -28,6 +28,7 @@ from octavia.api.drivers import utils as provider_utils
 from octavia.common import constants
 from octavia.common import data_models
 from octavia.common import exceptions
+from octavia.common import l7policy_removal as octavia_l7policy_removal
 from octavia.common.tls_utils import cert_parser
 from octavia.common import utils
 from octavia.controller.worker import task_utils as task_utilities
@@ -340,6 +341,16 @@ class DeletePoolInDB(BaseDatabaseTask):
                       {'pool': pool_id, 'except': str(e)})
 
 
+def _delete_l7policy_with_quota(repos, session, policy_id, project_id):
+    rule_count = repos.l7rule.count(
+        session, l7policy_id=policy_id, show_deleted=False)
+    repos.l7policy.delete(session, id=policy_id)
+    repos.decrement_quota(session, data_models.L7Policy, project_id)
+    if rule_count:
+        repos.decrement_quota(session, data_models.L7Rule, project_id,
+                              quantity=rule_count)
+
+
 class DeleteL7PolicyInDB(BaseDatabaseTask):
     """Delete the L7 policy in the DB.
 
@@ -355,22 +366,26 @@ class DeleteL7PolicyInDB(BaseDatabaseTask):
 
         LOG.debug("Delete in DB for l7policy id: %s ",
                   l7policy[constants.L7POLICY_ID])
+        policy_id = l7policy[constants.L7POLICY_ID]
+        # Keep this lookup outside the write transaction so child queries
+        # cannot reuse a pre-lock REPEATABLE READ snapshot.
         with db_apis.session().begin() as session:
-            policy_id = l7policy[constants.L7POLICY_ID]
+            scope = self.l7policy_repo.get_parent_scope(session, policy_id)
+        if scope is None:
+            return
+        with db_apis.session().begin() as session:
+            # Match policy creation and conditional removal: lock quota,
+            # then the load balancer, before locking any child.
+            self.repos.quotas.get_for_update(session, scope.project_id)
+            self.loadbalancer_repo.lock(session, scope.load_balancer_id)
             try:
-                policy = self.l7policy_repo.get_for_update(session, policy_id)
+                policy = self.l7policy_repo.get_for_update(
+                    session, policy_id, load_targets_and_mirrors=False)
             except exceptions.NotFound:
                 # A replay after commit must not release quota twice.
                 return
-            rule_count = self.l7rule_repo.count(
-                session, l7policy_id=policy_id, show_deleted=False)
-            self.l7policy_repo.delete(session, id=policy_id)
-            self.repos.decrement_quota(session, data_models.L7Policy,
-                                       policy.project_id)
-            if rule_count:
-                self.repos.decrement_quota(
-                    session, data_models.L7Rule, policy.project_id,
-                    quantity=rule_count)
+            _delete_l7policy_with_quota(
+                self.repos, session, policy_id, policy.project_id)
 
     def revert(self, l7policy, *args, **kwargs):
         """Mark the l7policy ERROR since the delete couldn't happen
@@ -391,6 +406,38 @@ class DeleteL7PolicyInDB(BaseDatabaseTask):
                       "provisioning_status to ERROR due to: %(except)s",
                       {'l7policy': l7policy[constants.L7POLICY_ID],
                        'except': str(e)})
+
+
+class DeleteL7PolicyConditionallyInDB(BaseDatabaseTask):
+    """Recheck a queued removal and apply it in one database transaction."""
+
+    def execute(self, l7policy_removal):
+        project_id = l7policy_removal[constants.PROJECT_ID]
+        with db_apis.session().begin() as session:
+            # Creation reserves quota before it takes the load balancer lock.
+            self.repos.quotas.get_for_update(session, project_id)
+            try:
+                # Member batches can hold the load balancer while waiting
+                # on quota. Yield this delivery if the row is locked.
+                lb = self.loadbalancer_repo.get_for_update(
+                    session, l7policy_removal[constants.LOADBALANCER_ID],
+                    skip_locked=True)
+                if not lb or lb.project_id != project_id:
+                    return
+                policy = octavia_l7policy_removal.lock_policy(
+                    session, self.repos, lb,
+                    l7policy_removal[constants.LISTENER_ID],
+                    l7policy_removal[constants.L7POLICY_ID], removing=True)
+                octavia_l7policy_removal.validate_removal(
+                    lb, policy, l7policy_removal['expected_revision'])
+            except (exceptions.NotFound, exceptions.L7PolicyRemovalConflict):
+                # An old delivery must never supersede a newer mutation.
+                return
+            # Invalidate activation receipts as an ordinary CRUD admission
+            # would. Disabled policies have already left the rendered graph.
+            self.loadbalancer_repo._invalidate_batch(lb)
+            _delete_l7policy_with_quota(
+                self.repos, session, policy.id, project_id)
 
 
 class DeleteL7RuleInDB(BaseDatabaseTask):

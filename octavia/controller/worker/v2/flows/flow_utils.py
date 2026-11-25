@@ -132,6 +132,10 @@ def get_activate_l7policies_flow():
     return L7_POLICY_FLOWS.get_activate_l7policies_flow()
 
 
+def get_conditional_l7policy_removal_flow():
+    return L7_POLICY_FLOWS.get_conditional_l7policy_removal_flow()
+
+
 def get_create_l7rule_flow():
     return L7_RULES_FLOWS.get_create_l7rule_flow()
 

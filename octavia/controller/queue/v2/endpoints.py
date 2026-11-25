@@ -161,6 +161,9 @@ class Endpoints:
     def activate_l7policies(self, context, l7policy_activation):
         self.worker.activate_l7policies(l7policy_activation)
 
+    def remove_l7policy_conditionally(self, context, l7policy_removal):
+        self.worker.remove_l7policy_conditionally(l7policy_removal)
+
     def delete_l7policy(self, context, l7policy):
         LOG.info('Deleting l7policy \'%s\'...', l7policy.get(
             constants.L7POLICY_ID))
