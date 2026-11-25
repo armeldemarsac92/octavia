@@ -2316,6 +2316,14 @@ class TestDatabaseTasks(base.TestCase):
             provisioning_status=constants.ACTIVE,
             operating_status=constants.ONLINE)
 
+        mock_l7policy_repo_update.reset_mock()
+        closed = data_models.L7Policy(
+            id=L7POLICY_ID, enabled=True, provisioning_status=constants.ERROR,
+            http_request_policy={'retry': {'backoff_ms': 0}})
+        mock_l7policy_repo_get.return_value = closed
+        mark_l7policy_active.execute(self.l7policy_mock)
+        mock_l7policy_repo_update.assert_not_called()
+
         # Test the revert
         mock_l7policy_repo_update.reset_mock()
         mark_l7policy_active.revert(self.l7policy_mock)

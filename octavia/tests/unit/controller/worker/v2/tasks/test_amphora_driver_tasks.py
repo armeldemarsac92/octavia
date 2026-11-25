@@ -99,6 +99,18 @@ class TestAmphoraDriverTasks(base.TestCase):
         self.batch_guard = guard.start()
         self.addCleanup(guard.stop)
 
+    @staticmethod
+    def _load_balancer_with_retry_backoff(topology):
+        policy = data_models.L7Policy(
+            id='backoff-policy', enabled=True,
+            http_request_policy={'retry': {'backoff_ms': 0}},
+            l7rules=[data_models.L7Rule(enabled=True)])
+        listener = data_models.Listener(
+            protocol=constants.PROTOCOL_HTTP, enabled=True,
+            l7policies=[policy])
+        return data_models.LoadBalancer(
+            topology=topology, enabled=True, listeners=[listener])
+
     @mock.patch('octavia.db.repositories.LoadBalancerRepository.get')
     def test_amp_listeners_update(self,
                                   mock_lb_get,
@@ -135,6 +147,21 @@ class TestAmphoraDriverTasks(base.TestCase):
         self.assertRaisesRegex(
             Exception, 'boom', amp_list_update_obj.execute,
             _LB_mock, _amphora_mock, self.timeout_dict)
+
+        mock_lb_get.return_value = self._load_balancer_with_retry_backoff(
+            constants.TOPOLOGY_ACTIVE_STANDBY)
+        amp_list_update_obj.execute(_LB_mock, _amphora_mock, self.timeout_dict)
+        mock_driver.update_amphora_listeners.assert_called_with(
+            mock_lb_get.return_value, _db_amphora_mock, self.timeout_dict)
+
+        mock_lb_get.return_value = self._load_balancer_with_retry_backoff(
+            constants.TOPOLOGY_SINGLE)
+        self.assertRaisesRegex(
+            Exception, 'boom', amp_list_update_obj.execute,
+            _LB_mock, _amphora_mock, self.timeout_dict)
+        mock_driver.update_amphora_listeners.assert_called_with(
+            mock_lb_get.return_value, _db_amphora_mock, self.timeout_dict,
+            finalizing_failover=True)
 
         mock_driver.update_amphora_listeners.reset_mock()
         mock_lb_get.side_effect = RuntimeError('graph read failed')
@@ -205,6 +232,22 @@ class TestAmphoraDriverTasks(base.TestCase):
 
         mock_amphora_repo_update.assert_not_called()
 
+        mock_lb_get.return_value = self._load_balancer_with_retry_backoff(
+            constants.TOPOLOGY_ACTIVE_STANDBY)
+        self.assertRaises(
+            driver_except.ListenerProvisioningError,
+            amp_list_update_obj.execute, _LB_mock, 0, [_amphora_mock],
+            amphorae_status, AMP_ID, self.timeout_dict)
+        mock_driver.update_amphora_listeners.side_effect = (
+            driver_except.HttpRetryBackoffUnsupported())
+        self.assertRaises(
+            driver_except.HttpRetryBackoffUnsupported,
+            amp_list_update_obj.execute, _LB_mock, 0, [_amphora_mock], {},
+            AMP_ID, self.timeout_dict)
+        mock_amphora_repo_update.assert_called_once_with(
+            _session_mock, AMP_ID, status=constants.ERROR)
+
+        mock_lb_get.return_value = _db_load_balancer_mock
         mock_driver.reset_mock()
         mock_driver.update_failover_listeners.return_value = True
         amp_list_update_obj.execute(_LB_mock, 0, [_amphora_mock],

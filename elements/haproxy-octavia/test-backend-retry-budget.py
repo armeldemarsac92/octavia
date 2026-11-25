@@ -14,6 +14,8 @@
 """Exercise shared retry admission with HTTP traffic on loopback."""
 
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
+import csv
 from http.client import HTTPConnection
 from http.server import BaseHTTPRequestHandler
 from http.server import ThreadingHTTPServer
@@ -31,6 +33,7 @@ import unittest
 class Origin(BaseHTTPRequestHandler):
     calls = Counter()
     mirror_delivered = Event()
+    delayed_response = Event()
 
     def log_message(self, *args):
         pass
@@ -39,9 +42,16 @@ class Origin(BaseHTTPRequestHandler):
         mirrored = self.headers.get('X-Test-Delivery') == 'mirror'
         key = ('mirrored', self.path) if mirrored else self.path
         self.calls[key] += 1
+        origin = self.headers.get('X-Test-Origin')
+        if origin:
+            self.calls[origin, self.path] += 1
         status = 200 if self.path.startswith('/ok-') else 500
+        if self.path == '/wait' and self.calls[key] > 1:
+            status = 200
         self.send_response(status)
         self.end_headers()
+        if self.path == '/wait' and status == 500:
+            self.delayed_response.set()
         if mirrored:
             self.mirror_delivered.set()
 
@@ -61,11 +71,13 @@ class BackendRetryBudgetTest(unittest.TestCase):
 
         directory = TemporaryDirectory()
         self.addCleanup(directory.cleanup)
+        self.stats_socket = Path(directory.name) / 'stats.sock'
         mirror_pool = '8f388635-d55a-4f89-9937-a7550b72e710'
         config = Path(directory.name) / 'haproxy.cfg'
         mirror_budget = self.budget('mirror-service', 20, 1)
         config.write_text(f"""global
     nbthread 2
+    stats socket {self.stats_socket}
 
 defaults
     mode http
@@ -77,6 +89,8 @@ frontend ingress
     bind 127.0.0.1:{self.port}
     filter octavia-mirror {directory.name}
     http-request octavia-mirror {mirror_pool} 1 1 if {{ path_beg /copy- }}
+    use_backend delayed if {{ path /wait /cancel /ok-neighbor }}
+    use_backend redispatch if {{ path /redispatch-wait }}
     use_backend wide if {{ path_beg /ok- /wide- }}
     use_backend copy_target if {{ path_beg /mirror-target }}
     use_backend source if {{ path_beg /copy- }}
@@ -97,6 +111,20 @@ listen octavia-mirror-{mirror_pool}
 backend source
     retries 0
     server origin 127.0.0.1:{origin.server_port}
+
+backend delayed
+    timeout queue 200ms
+    http-request octavia-http-policy 1800 500 1 500 600 if {{ path /wait }}
+    http-request octavia-http-policy 250 150 1 500 600 if {{ path /cancel }}
+    server origin 127.0.0.1:{origin.server_port} maxconn 1
+
+backend redispatch
+    option redispatch 1
+    http-request octavia-http-policy 1800 500 1 500 600
+    http-send-name-header X-Test-Origin
+    use-server origin if {{ path /redispatch-wait }}
+    server origin 127.0.0.1:{origin.server_port}
+    server alternate 127.0.0.1:{origin.server_port}
 """ + ''.join(
             f'\nbackend {pool}\n{budget}'
             '    http-request octavia-http-policy default default 3 500\n'
@@ -143,6 +171,18 @@ backend source
         finally:
             connection.close()
 
+    def retry_counters(self, backend):
+        with socket.socket(socket.AF_UNIX) as stats:
+            stats.settimeout(2)
+            stats.connect(str(self.stats_socket))
+            stats.sendall(b'show stat\n')
+            with stats.makefile(encoding='utf-8') as rows:
+                return {
+                    row['svname']: (int(row['wretr']), int(row['wredis']))
+                    for row in csv.DictReader(rows)
+                    if row['# pxname'] == backend
+                }
+
     def test_pools_share_successive_retries_and_recover_independently(self):
         for path, expected_status, upstream_attempts in (
                 ('/a-fail', 503, 3), ('/b-fail', 503, 1),
@@ -183,6 +223,39 @@ backend source
         self.assertEqual(3, Origin.calls['/mirror-target'])
         for path in paths:
             self.assertEqual(1, Origin.calls['mirrored', path])
+
+    def test_retry_wait_releases_server_for_neighbor(self):
+        Origin.delayed_response.clear()
+        with ThreadPoolExecutor(max_workers=1) as requests:
+            retried = requests.submit(self.get, '/wait')
+            self.assertTrue(Origin.delayed_response.wait(timeout=1))
+            self.assertEqual(200, self.get('/ok-neighbor'))
+            self.assertEqual(200, retried.result(timeout=2))
+        self.assertEqual(1, Origin.calls['/ok-neighbor'])
+        self.assertEqual(2, Origin.calls['/wait'])
+
+    def test_retry_wait_counts_only_admitted_http_retries(self):
+        self.assertEqual({'BACKEND': (0, 0), 'origin': (0, 0)},
+                         self.retry_counters('delayed'))
+        self.assertEqual(504, self.get('/cancel'))
+        self.assertEqual(1, Origin.calls['/cancel'])
+        self.assertEqual({'BACKEND': (0, 0), 'origin': (0, 0)},
+                         self.retry_counters('delayed'))
+
+        self.assertEqual(200, self.get('/wait'))
+        self.assertEqual(2, Origin.calls['/wait'])
+        self.assertEqual(1, Origin.calls['/cancel'])
+        # HAProxy counts the HTTP replay and the retry on the same server.
+        self.assertEqual({'BACKEND': (2, 0), 'origin': (2, 0)},
+                         self.retry_counters('delayed'))
+
+    def test_retry_wait_attributes_http_redispatch_to_original_server(self):
+        self.assertEqual(500, self.get('/redispatch-wait'))
+        self.assertEqual(1, Origin.calls['origin', '/redispatch-wait'])
+        self.assertEqual(1, Origin.calls['alternate', '/redispatch-wait'])
+        self.assertEqual({'BACKEND': (1, 1), 'origin': (1, 1),
+                          'alternate': (0, 0)},
+                         self.retry_counters('redispatch'))
 
 
 if __name__ == '__main__':

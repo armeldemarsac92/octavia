@@ -213,7 +213,7 @@ class JinjaTemplater:
     def build_config(self, host_amphora, listeners, tls_certs,
                      haproxy_versions, amp_details, socket_path=None,
                      otlp_tls_certs=None, http_cookie_results=None,
-                     otlp_publication=None):
+                     otlp_publication=None, http_retry_backoff_results=None):
         """Convert a logical configuration to the HAProxy version
 
         :param host_amphora: The Amphora this configuration is hosted on
@@ -248,6 +248,8 @@ class JinjaTemplater:
             amp_details=amp_details, haproxy_version=version,
             otlp_tls_certs=otlp_tls_certs,
             otlp_publication=otlp_publication,
+            **({'http_retry_backoff_results': http_retry_backoff_results}
+               if http_retry_backoff_results is not None else {}),
             **({'http_cookie_results': http_cookie_results}
                if http_cookie_results is not None else {}))
 
@@ -290,7 +292,8 @@ class JinjaTemplater:
                                 amp_details: tp.Optional[dict] = None,
                                 haproxy_version=None, otlp_tls_certs=None,
                                 http_cookie_results=None,
-                                otlp_publication=None):
+                                otlp_publication=None,
+                                http_retry_backoff_results=None):
         """Renders a templated configuration from a load balancer object
 
         :param host_amphora: The Amphora this configuration is hosted on
@@ -317,6 +320,7 @@ class JinjaTemplater:
         san_capability = (
             constants.GATEWAY_CAPABILITY_BACKEND_TLS_SUBJECT_ALT_NAMES)
         policy_capability = constants.GATEWAY_CAPABILITY_HTTP_REQUEST_POLICY
+        backoff_capability = constants.GATEWAY_CAPABILITY_HTTP_RETRY_BACKOFF
         retry_budget_capability = (
             constants.GATEWAY_CAPABILITY_BACKEND_RETRY_BUDGET)
         mirror_capability = constants.GATEWAY_CAPABILITY_HTTP_REQUEST_MIRROR
@@ -391,7 +395,11 @@ class JinjaTemplater:
             for listener in loadbalancer['listeners']:
                 if not listener['enabled']:
                     continue
-                if ('http_request_policies_by_pool' in listener and
+                self._apply_http_retry_backoff_support(
+                    listener, (amp_details or {}).get(backoff_capability)
+                    is True and (amp_details or {}).get(policy_capability)
+                    is True, http_retry_backoff_results)
+                if (listener.get('http_request_policies_by_pool') and
                         (amp_details or {}).get(policy_capability)
                         is not True):
                     raise driver_except.AmpVersionUnsupported(
@@ -1611,15 +1619,38 @@ class JinjaTemplater:
         return ret_value
 
     @staticmethod
+    def _apply_http_retry_backoff_support(listener, supported, results):
+        policies_by_pool = listener.get('http_request_policies_by_pool', {})
+        closed_by_pool = {}
+        for pool_id, policies in list(policies_by_pool.items()):
+            backoff = [policy_id for policy_id, args in policies
+                       if len(args) == 5]
+            if results is not None:
+                status = constants.ACTIVE if supported else constants.ERROR
+                results.update(dict.fromkeys(backoff, status))
+            if backoff and not supported:
+                closed_by_pool[pool_id] = backoff
+                policies_by_pool[pool_id] = [
+                    (policy_id, args) for policy_id, args in policies
+                    if len(args) == 4]
+                if not policies_by_pool[pool_id]:
+                    del policies_by_pool[pool_id]
+        if closed_by_pool:
+            listener['http_retry_backoff_closed_by_pool'] = closed_by_pool
+
+    @staticmethod
     def _transform_http_request_policy(policy):
         policy = validate.http_request_policy(policy)
         retry = policy.get('retry')
         attempts = 'default' if retry is None else retry.get('attempts', 1)
         codes = ','.join(str(code) for code in (retry or {}).get('codes', []))
-        return (
+        args = (
             policy.get('request_timeout_ms', 'default'),
             policy.get('backend_request_timeout_ms', 'default'),
             attempts, codes or 'none')
+        if retry is not None and 'backoff_ms' in retry:
+            args += (retry['backoff_ms'],)
+        return args
 
     @staticmethod
     def _cors_origin_pattern(origin):

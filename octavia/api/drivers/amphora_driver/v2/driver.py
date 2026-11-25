@@ -76,6 +76,7 @@ class AmphoraProviderDriver(driver_base.ProviderDriver):
     supports_http_cookie_absolute_timeout = True
     supports_http_cookie_permanent = True
     supports_http_request_policy = True
+    supports_http_retry_backoff = True
     supports_backend_retry_budget = True
     supports_http_request_mirror = True
     supports_listener_otlp_tracing = True

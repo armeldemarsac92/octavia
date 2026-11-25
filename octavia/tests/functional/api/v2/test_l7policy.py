@@ -816,6 +816,94 @@ class TestInitialL7Rules(base.BaseAPITest):
         self.assertNotIn(field, self.get(path).json['l7policy'])
 
     @mock.patch.object(amphora_noop.NoopAmphoraLoadBalancerDriver, 'update')
+    def test_http_retry_backoff_admission_and_readback(self, update):
+        field = 'http_request_policy'
+        cap = constants.GATEWAY_CAPABILITY_HTTP_RETRY_BACKOFF
+        caps_path = self.PROVIDERS_PATH + '/amphora/gateway_capabilities'
+        pool = self.create_pool(self.lb_id, 'HTTP', 'ROUND_ROBIN')['pool']
+        self.set_lb_status(self.lb_id)
+        self.rpc.cast.reset_mock()
+        target = {'redirect_pool_id': pool['id'], 'rules': self.rules,
+                  'admin_state_up': False}
+        maximum = constants.HTTP_REQUEST_POLICY_DURATION_MAX
+        data = {'request_timeout_ms': 500, 'retry': {
+            'attempts': 2, 'codes': [503], 'backoff_ms': maximum}}
+        self.conf.config(group='api_settings',
+                         enabled_http_retry_backoff_providers=['amphora'])
+        self.assertNotIn(cap, self.get(caps_path).json['gateway_capabilities'])
+        self.create_l7policy(self.listener_id, 'REDIRECT_TO_POOL',
+                             http_request_policy=data, status=501, **target)
+        self.conf.config(group='api_settings',
+                         enabled_http_request_policy_providers=['amphora'],
+                         enabled_http_retry_backoff_providers=[])
+        self.create_l7policy(self.listener_id, 'REDIRECT_TO_POOL',
+                             http_request_policy=data, status=501, **target)
+        self.conf.config(group='api_settings',
+                         enabled_http_retry_backoff_providers=['amphora'])
+        self.assertIn(cap, self.get(caps_path).json['gateway_capabilities'])
+        with mock.patch.object(
+                driver_utils, 'HTTP_REQUEST_POLICY_PAYLOAD_AVAILABLE', False):
+            self.assertNotIn(cap, self.get(caps_path).json[
+                'gateway_capabilities'])
+        for invalid in (True, -1, 0.5, '20', None, maximum + 1):
+            with self.subTest(backoff_ms=invalid):
+                self.create_l7policy(
+                    self.listener_id, 'REDIRECT_TO_POOL', status=400,
+                    http_request_policy={'retry': {'backoff_ms': invalid}},
+                    **target)
+        created = self.create_l7policy(
+            self.listener_id, 'REDIRECT_TO_POOL', http_request_policy=data,
+            **target)['l7policy']
+        self.assertEqual(data, created[field])
+        self.assertEqual(data, self.rpc.cast.call_args.kwargs[
+            constants.L7POLICY][field])
+        self._dispatch('create_l7policy')
+        snapshot, = update.call_args.args
+        worker_policy, = snapshot.listeners[0].l7policies
+        self.assertEqual(data, worker_policy.http_request_policy)
+        path = self.L7POLICY_PATH.format(l7policy_id=created['id'])
+        self.assertEqual(data, self.get(path).json['l7policy'][field])
+        listed, = self.get(self.L7POLICIES_PATH).json['l7policies']
+        self.assertEqual(data, listed[field])
+        self.put(path, {'l7policy': {'admin_state_up': True}})
+        self._dispatch('update_l7policy')
+
+        self.conf.config(group='api_settings',
+                         enabled_http_retry_backoff_providers=[])
+        reduced = {'request_timeout_ms': 500, 'retry': {
+            'attempts': 2, 'codes': [503], 'backoff_ms': 0}}
+        self.put(path, {'l7policy': {field: reduced}})
+        self.assertEqual(reduced, self.rpc.cast.call_args.kwargs[
+            constants.L7POLICY_UPDATES][field])
+        self._dispatch('update_l7policy')
+        self.assertEqual(reduced, self.get(path).json['l7policy'][field])
+        self.put(path, {'l7policy': {field: data}}, status=501)
+        self.put(path, {'l7policy': {field: {
+            **reduced, 'retry': {**reduced['retry'], 'attempts': 3},
+        }}}, status=501)
+        cleared = {'request_timeout_ms': 500, 'retry': {
+            'attempts': 2, 'codes': [503]}}
+        sibling = self.create_l7policy(
+            self.listener_id, 'REDIRECT_TO_POOL', http_request_policy=cleared,
+            **target)['l7policy']
+        self._dispatch('create_l7policy')
+        sibling_path = self.L7POLICY_PATH.format(l7policy_id=sibling['id'])
+        self.put(sibling_path, {'l7policy': {'admin_state_up': True}})
+        self._dispatch('update_l7policy')
+
+        # The sibling can take over while backoff remains withdrawn.
+        self.put(path, {'l7policy': {'admin_state_up': False}})
+        self._dispatch('update_l7policy')
+        self.put(path, {'l7policy': {'admin_state_up': True}}, status=501)
+        self.put(path, {'l7policy': {
+            field: cleared, 'admin_state_up': True}})
+        self._dispatch('update_l7policy')
+        self.assertEqual(cleared, self.get(path).json['l7policy'][field])
+        self.delete(path)
+        self._dispatch('delete_l7policy')
+        self.get(path, status=404)
+
+    @mock.patch.object(amphora_noop.NoopAmphoraLoadBalancerDriver, 'update')
     def test_backend_retry_budget_pool_worker_lifecycle(self, update):
         self.conf.config(group='api_settings',
                          enabled_backend_retry_budget_providers=['amphora'])
@@ -3275,9 +3363,10 @@ class TestL7Policy(base.BaseAPITest):
     def test_create_amphora_with_nested_http_request_policy(self, _rpc):
         self.conf.config(
             group='api_settings',
-            enabled_http_request_policy_providers=['amphora'])
+            enabled_http_request_policy_providers=['amphora'],
+            enabled_http_retry_backoff_providers=['amphora'])
         field = 'http_request_policy'
-        data = {'backend_request_timeout_ms': 100}
+        data = {'backend_request_timeout_ms': 100, 'retry': {'backoff_ms': 0}}
         policy = {
             'action': 'REDIRECT_TO_POOL',
             'redirect_pool': {'name': 'destination'},

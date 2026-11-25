@@ -264,7 +264,7 @@ class TestHaproxyAmphoraLoadBalancerDriverTest(base.TestCase):
             amphora.api_version = API_VERSION
         pool = data_models.Pool(id='pool-one', enabled=True,
                                 backend_tls_hostname='backend.example.test')
-        listener = mock.Mock(enabled=True, pools=[pool],
+        listener = mock.Mock(enabled=True, pools=[pool], l7policies=[],
                              protocol=constants.PROTOCOL_HTTP)
         loadbalancer = mock.Mock(id='lb', enabled=True, listeners=[listener],
                                  amphorae=amphorae)
@@ -318,7 +318,8 @@ class TestHaproxyAmphoraLoadBalancerDriverTest(base.TestCase):
             id='tcp', protocol=constants.PROTOCOL_TCP, enabled=True,
             backend_tls_hostname='abc.example.com')
         listener = mock.Mock(enabled=True, protocol=constants.PROTOCOL_HTTP,
-                             pools=[tls_pool, grpc_pool, san_pool])
+                             pools=[tls_pool, grpc_pool, san_pool],
+                             l7policies=[])
         tcp_listener = mock.Mock(
             enabled=True, protocol=constants.PROTOCOL_TCP,
             tcp_tls_termination=True, pools=[tcp_pool])

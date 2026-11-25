@@ -26,6 +26,7 @@ if [[ $# == 3 ]]; then
                  LUA_LIB_NAME=lua)
     build_suffix+=-listener-otlp-v1
 fi
+build_suffix+=-route-retry-backoff-v1
 
 printf '%s  %s
 ' \
@@ -41,6 +42,7 @@ sha256sum --check --strict <<'HASHES'
 7d1fba6e89ac26f706b4eedca3e804be8b63c1289402179f3ae366579413f7dc  haproxy-3.0.19-http-mirror.patch
 dfe62edf7729bb332753384c13d6b58488d0c8c19f9a0651c8b18d8dbce89891  haproxy-3.0.19-listener-auth.patch
 692ebf63778ca21ad3442e85e17d66b405513ad63418a806f8695705573e20ad  haproxy-3.0.19-backend-retry-budget.patch
+4344d1583da5e9aab1ec0e9cb53bbbb92034fc85ef56a06e64f3a6a74b32a344  haproxy-3.0.19-route-retry-backoff.patch
 HASHES
 
 tar -xzf "$tarball" -C "$work_dir"
@@ -48,7 +50,8 @@ cd -- "$work_dir/haproxy-3.0.19"
 for patch_name in haproxy-3.0.19-strict-dns.patch \
     haproxy-3.0.19-require-alpn-h2.patch haproxy-3.0.19-backend-sans.patch \
     haproxy-3.0.19-http-policy.patch haproxy-3.0.19-http-mirror.patch \
-    haproxy-3.0.19-listener-auth.patch haproxy-3.0.19-backend-retry-budget.patch; do
+    haproxy-3.0.19-listener-auth.patch haproxy-3.0.19-backend-retry-budget.patch \
+    haproxy-3.0.19-route-retry-backoff.patch; do
     patch --batch --forward --fuzz=0 -p1 -i "$element_dir/$patch_name"
 done
 
