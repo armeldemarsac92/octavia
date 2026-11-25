@@ -24,7 +24,7 @@ from octavia.controller.worker.v2.tasks import network_tasks
 
 
 def _member_network_tasks(*, additions_only=False):
-    return (
+    tasks = [
         network_tasks.CalculateDelta(
             requires=(constants.LOADBALANCER, constants.AVAILABILITY_ZONE),
             provides=constants.DELTAS,
@@ -32,13 +32,23 @@ def _member_network_tasks(*, additions_only=False):
         network_tasks.HandleNetworkDeltas(
             requires=(constants.DELTAS, constants.LOADBALANCER),
             provides=constants.UPDATED_PORTS),
+    ]
+    post_plug_ports = constants.UPDATED_PORTS
+    if additions_only:
+        post_plug_ports = 'tcp_member_ports'
+        tasks.append(network_tasks.ReconcileTCPMemberPorts(
+            requires=(constants.LOADBALANCER, constants.UPDATED_PORTS),
+            provides=post_plug_ports))
+    tasks.extend((
         network_tasks.GetAmphoraeNetworkConfigs(
             requires=constants.LOADBALANCER_ID,
             provides=constants.AMPHORAE_NETWORK_CONFIG),
         amphora_driver_tasks.AmphoraePostNetworkPlug(
             requires=(constants.LOADBALANCER, constants.UPDATED_PORTS,
-                      constants.AMPHORAE_NETWORK_CONFIG)),
-    )
+                      constants.AMPHORAE_NETWORK_CONFIG),
+            rebind={constants.UPDATED_PORTS: post_plug_ports}),
+    ))
+    return tasks
 
 
 class MemberFlows:

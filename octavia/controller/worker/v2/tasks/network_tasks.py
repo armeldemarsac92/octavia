@@ -37,6 +37,12 @@ LOG = logging.getLogger(__name__)
 CONF = cfg.CONF
 
 
+def _members_with_subnet(loadbalancer):
+    return (member for pool in loadbalancer.pools for member in pool.members
+            if member.subnet_id and
+            member.provisioning_status != constants.PENDING_DELETE)
+
+
 class BaseNetworkTask(task.Task):
     """Base task to load drivers common to the tasks."""
 
@@ -53,6 +59,12 @@ class BaseNetworkTask(task.Task):
         if self._network_driver is None:
             self._network_driver = utils.get_network_driver()
         return self._network_driver
+
+    def _fill_port_info(self, port):
+        port.network = self.network_driver.get_network(port.network_id)
+        for fixed_ip in port.fixed_ips:
+            fixed_ip.subnet = self.network_driver.get_subnet(
+                fixed_ip.subnet_id)
 
 
 class CalculateAmphoraDelta(BaseNetworkTask):
@@ -83,17 +95,12 @@ class CalculateAmphoraDelta(BaseNetworkTask):
         }
 
         net_vnic_type_map = {}
-        for pool in db_lb.pools:
-            for member in pool.members:
-                if (member.subnet_id and
-                        member.provisioning_status !=
-                        constants.PENDING_DELETE):
-                    member_network = self.network_driver.get_subnet(
-                        member.subnet_id).network_id
-                    net_vnic_type_map[member_network] = getattr(
-                        member, 'vnic_type', constants.VNIC_TYPE_NORMAL)
-                    desired_subnet_to_net_map[member.subnet_id] = (
-                        member_network)
+        for member in _members_with_subnet(db_lb):
+            member_network = self.network_driver.get_subnet(
+                member.subnet_id).network_id
+            net_vnic_type_map[member_network] = getattr(
+                member, 'vnic_type', constants.VNIC_TYPE_NORMAL)
+            desired_subnet_to_net_map[member.subnet_id] = member_network
 
         desired_network_ids = set(desired_subnet_to_net_map.values())
         desired_subnet_ids = set(desired_subnet_to_net_map)
@@ -282,12 +289,6 @@ class HandleNetworkDelta(BaseNetworkTask):
 
     Plug or unplug networks based on delta
     """
-
-    def _fill_port_info(self, port):
-        port.network = self.network_driver.get_network(port.network_id)
-        for fixed_ip in port.fixed_ips:
-            fixed_ip.subnet = self.network_driver.get_subnet(
-                fixed_ip.subnet_id)
 
     def _cleanup_port(self, port_id, compute_id):
         try:
@@ -491,6 +492,58 @@ class HandleNetworkDeltas(BaseNetworkTask):
                     self.network_driver.delete_port(port_id)
                 except Exception:
                     LOG.exception("Unable to delete port %s", port_id)
+
+
+class ReconcileTCPMemberPorts(BaseNetworkTask):
+    """Prepare post-plug for member ports even after the delta was applied."""
+
+    def execute(self, loadbalancer, updated_ports):
+        lb_id = loadbalancer[constants.LOADBALANCER_ID]
+        with db_apis.session().begin() as session:
+            db_lb = self.loadbalancer_repo.get(session, id=lb_id)
+        required_subnets = {member.subnet_id
+                            for member in _members_with_subnet(db_lb)}
+        # The original VIP subnet is configured by the VIP plug flow.
+        required_subnets.discard(db_lb.vip.subnet_id)
+        if not required_subnets:
+            return updated_ports
+
+        member_ports = {}
+        for amphora in db_lb.amphorae:
+            if amphora.status == constants.DELETED:
+                continue
+            member_ports[amphora.id] = self._ports_for_amphora(
+                amphora, required_subnets, updated_ports.get(amphora.id, []))
+        return member_ports
+
+    def _ports_for_amphora(self, amphora, required_subnets, updated_ports):
+        ports = {port[constants.ID]: port for port in updated_ports}
+        confirmed_subnets = {
+            fixed_ip[constants.SUBNET_ID]
+            for port in updated_ports for fixed_ip in port[constants.FIXED_IPS]
+        }
+        # A worker may have stopped after Nova attached a port but before
+        # the Amphora configured it. Reconcile attached ports, not just the
+        # current delta. Keep the full port configuration on shared subnets.
+        if required_subnets - confirmed_subnets:
+            for nic in self.network_driver.get_plugged_networks(
+                    amphora.compute_id):
+                fixed_ips = nic.fixed_ips or []
+                if (nic.port_id in ports or
+                        any(ip.ip_address == amphora.lb_network_ip
+                            for ip in fixed_ips) or
+                        not required_subnets.intersection(
+                            ip.subnet_id for ip in fixed_ips)):
+                    continue
+                port = self.network_driver.get_port(nic.port_id)
+                self._fill_port_info(port)
+                ports[port.id] = port.to_dict(recurse=True)
+                confirmed_subnets.update(ip.subnet_id for ip in port.fixed_ips)
+        if required_subnets - confirmed_subnets:
+            raise base.PlugNetworkException(_(
+                'Required member subnet ports were not found on amphora '
+                '%(amphora_id)s.') % {'amphora_id': amphora.id})
+        return list(ports.values())
 
 
 class UpdateVIPSecurityGroup(BaseNetworkTask):
