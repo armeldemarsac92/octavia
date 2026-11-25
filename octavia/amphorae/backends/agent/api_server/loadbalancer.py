@@ -219,6 +219,15 @@ class Loadbalancer:
                 'message': 'Invalid Request',
                 'details': f"Unknown action: {action}"}, status=400)
 
+        publication = None
+        if action == consts.AMP_ACTION_RELOAD and flask.has_request_context():
+            publication = flask.request.headers.get(
+                consts.HAPROXY_OTLP_PUBLICATION_HEADER)
+            if (publication is not None and
+                    not re.fullmatch('[a-f0-9]{32}', publication)):
+                return webob.Response(
+                    json={'message': 'Invalid publication ID'}, status=400)
+
         self._check_lb_exists(lb_id)
         is_vrrp = (CONF.controller_worker.loadbalancer_topology ==
                    consts.TOPOLOGY_ACTIVE_STANDBY)
@@ -289,6 +298,29 @@ class Loadbalancer:
         if not is_vrrp and action in [consts.AMP_ACTION_START,
                                       consts.AMP_ACTION_RELOAD]:
             util.send_vip_advertisements(lb_id)
+
+        if publication is not None:
+            query = haproxy_query.HAProxyQuery(
+                util.haproxy_sock_path(lb_id), timeout=0.3)
+            description = f'octavia-otlp-{publication}'
+            # systemctl only signals HAProxy. Wait for the active data-plane
+            # worker to report the exact description from the uploaded config.
+            for _ in range(HAPROXY_QUERY_RETRIES):
+                try:
+                    info = query.show_info()
+                except Exception:
+                    info = {}
+                if (info.get('description') == description and
+                        info.get('Stopping') == '0'):
+                    response = webob.Response(
+                        json={'message': 'OK'}, status=202)
+                    header = consts.HAPROXY_OTLP_PUBLICATION_HEADER
+                    response.headers[header] = publication
+                    return response
+                time.sleep(0.1)
+            return webob.Response(
+                json={'message': 'HAProxy publication unconfirmed'},
+                status=503)
 
         if action in [consts.AMP_ACTION_STOP,
                       consts.AMP_ACTION_RELOAD]:

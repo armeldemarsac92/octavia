@@ -54,6 +54,12 @@ requires this file as well as the tracing capability before reporting
 ``listener_otlp_sampling_v1``. It uses the same Lua-enabled HAProxy build.
 Opt in through ``[api_settings] enabled_listener_otlp_sampling_providers``
 only after qualifying the script and agents across the eligible fleet.
+Apply database revision ``f831dfeaac94`` and update all regional API processes
+and workers before accepting tracing updates. The worker pairs each tracing
+publication with an ID that the agent checks against the running HAProxy
+configuration. Older agents can reload the application configuration and
+omit the acknowledgement. Upgrade them and retry the affected tracing
+requests or withdrawals to confirm publication.
 
 Run the local wire check using the built binary and an OpenTelemetry Collector
 binary with the OTLP receiver and file exporter. From the Octavia checkout,

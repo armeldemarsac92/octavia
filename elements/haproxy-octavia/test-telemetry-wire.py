@@ -21,6 +21,7 @@ import uuid
 
 from oslo_config import cfg
 
+from octavia.amphorae.backends.utils import haproxy_query
 from octavia.common import config as octavia_config
 from octavia.common import constants
 from octavia.common import data_models
@@ -122,20 +123,21 @@ def wait_spans(path, count):
     raise TimeoutError(f'Expected {count} collected spans, got {len(spans)}')
 
 
-def check_span(observed, app, trace_id=None, parent_id=None):
+def check_span(observed, app, trace_id=None, parent_id=None, parent_flags=1):
     attributes, span = observed
     code, traceparent, start, end = app
     assert attributes == [{'key': 'service.name',
                            'value': {'stringValue': 'hibiscus-local-gateway'}}]
     assert span['name'] == 'Gateway HTTP' and span['kind'] == 2
     assert span.get('parentSpanId') == parent_id
-    assert span['flags'] == (0x301 if parent_id else 1)
+    flags = (parent_flags & 2) | 1 if parent_id else 3
+    assert span['flags'] == (flags | 0x300 if parent_id else flags)
     trace_id_bytes = bytes.fromhex(span['traceId'])
     assert len(trace_id_bytes) == 16 and any(trace_id_bytes)
     assert len(bytes.fromhex(span['spanId'])) == 8 and int(span['spanId'], 16)
     if trace_id is not None:
         assert span['traceId'] == trace_id and span['spanId'] != parent_id
-    assert traceparent == f"00-{span['traceId']}-{span['spanId']}-01"
+    assert traceparent == f"00-{span['traceId']}-{span['spanId']}-{flags:02x}"
     span_start = int(span['startTimeUnixNano'])
     span_end = int(span['endTimeUnixNano'])
     assert start <= span_start <= span_end <= end
@@ -248,17 +250,19 @@ def render_config(directory, socket_dir, app_port, listener_ports,
         base_amp_path=str(directory), base_crt_dir=str(directory))
     lua = Path(__file__).with_name('octavia-telemetry.lua').resolve()
 
-    def render(name, sampling_capable):
+    def render(name, sampling_capable, tracing_capable=True):
+        publication = uuid.uuid4().hex if sampling_listeners else None
         config = templater.build_config(
             amphora, lb.listeners, tls_certs={}, haproxy_versions=('3', '0'),
             amp_details={constants.GATEWAY_CAPABILITY_LISTENER_OTLP_TRACING:
-                         True,
+                         tracing_capable,
                          constants.GATEWAY_CAPABILITY_LISTENER_OTLP_SAMPLING:
                          sampling_capable,
                          'active_tuned_profiles': 'amphora',
                          'cpu_count': 5},
             socket_path=str(socket_dir / 'stats.sock'),
-            otlp_tls_certs={tls_collector.id: {'ca_cert': str(cert)}})
+            otlp_tls_certs={tls_collector.id: {'ca_cert': str(cert)}},
+            otlp_publication=publication)
         # Use the harness account and temporary paths in the local process.
         config = (config
                   .replace(constants.HAPROXY_OTLP_TRACING_SCRIPT, str(lua))
@@ -275,7 +279,7 @@ def render_config(directory, socket_dir, app_port, listener_ports,
     traced = render('haproxy.cfg', bool(sampling_listeners))
     if not sampling_listeners:
         lb.listeners[0].otlp_tracing = None
-    cleared = render('haproxy-cleared.cfg', False)
+    cleared = render('haproxy-cleared.cfg', False, not sampling_listeners)
     tls_collector.backend_tls_hostname = 'wrong.test'
     return traced, cleared, render('haproxy-wrong-identity.cfg', False)
 
@@ -404,21 +408,33 @@ def prove_sampling(args, directory, socket_dir, app_port):
     collector_path, spans = collector_config(directory, receiver, 'sampling')
     expected = {}
 
+    def assert_publication(path):
+        description = next(
+            line.strip().split()[1] for line in path.read_text().splitlines()
+            if line.startswith('    description octavia-otlp-'))
+        query = haproxy_query.HAProxyQuery(
+            str(socket_dir / 'stats.sock'), timeout=0.3)
+        info = query.show_info()
+        assert info['description'] == description and info['Stopping'] == '0'
+
     def request(port, sampled, incoming=None, valid_parent=False):
         headers = {'traceparent': incoming} if incoming else None
         response = app_request(port, '/sampling', headers)
         assert response[0] == 200
         version, trace, span, flags = response[1].split('-')
-        assert version == '00' and flags in ('00', '01')
+        assert version == '00' and flags in ('00', '01', '02', '03')
         assert int(trace, 16) and int(span, 16) and span != PARENT_ID
         assert (trace == TRACE_ID) == valid_parent
-        decision = flags == '01'
+        parent_flags = int(incoming[-2:], 16) if valid_parent else 2
+        assert int(flags, 16) & 2 == parent_flags & 2
+        decision = bool(int(flags, 16) & 1)
         if sampled is not None:
             assert decision == sampled
         if decision:
             assert span not in expected
             expected[span] = (response, TRACE_ID if valid_parent else None,
-                              PARENT_ID if valid_parent else None)
+                              PARENT_ID if valid_parent else None,
+                              parent_flags)
         return decision
 
     with (running([args.haproxy, '-db', '-f', config],
@@ -427,20 +443,22 @@ def prove_sampling(args, directory, socket_dir, app_port):
                   directory / 'collector.log') as collector):
         wait_port(legacy, proxy)
         wait_port(receiver, collector)
+        assert_publication(config)
         not_sampled = f'00-{TRACE_ID}-{PARENT_ID}-02'
+        sampled_parent = f'00-{TRACE_ID}-{PARENT_ID}-03'
         invalid = f'00-{TRACE_ID}-{"0" * 16}-01'
         request(legacy, True, not_sampled, valid_parent=True)
         request(zero, False)
         request(zero, False, TRACEPARENT, valid_parent=True)
         request(full, True)
-        request(full, True, TRACEPARENT, valid_parent=True)
+        request(full, True, sampled_parent, valid_parent=True)
         request(full, False, not_sampled, valid_parent=True)
         request(full, True, invalid)
         request(parent, False)
         request(parent, False, not_sampled, valid_parent=True)
         base_count = sum(request(partial, None) for _ in range(64))
         parent_count = sum(
-            request(parent, None, TRACEPARENT, valid_parent=True)
+            request(parent, None, sampled_parent, valid_parent=True)
             for _ in range(64))
         assert 12 <= base_count <= 52 and 12 <= parent_count <= 52
         wait_spans(spans, len(expected))
@@ -460,13 +478,16 @@ def prove_sampling(args, directory, socket_dir, app_port):
         ) as replacement:
             proxy.wait(timeout=5)
             wait_port(full, replacement)
-            response = app_request(full, '/withdrawn',
-                                   {'traceparent': TRACEPARENT})
-            assert response[:2] == (200, TRACEPARENT)
+            assert_publication(withdrawn)
+            for port in (full, legacy):
+                response = app_request(
+                    port, '/withdrawn', {'traceparent': sampled_parent})
+                assert response[:2] == (200, sampled_parent)
             time.sleep(0.3)
             assert len(record_spans(spans)) == len(observed)
-        print('Capability-loss reload: HTTP 200, original context, zero '
-              'additional exports')
+        print('Loss of both capabilities: active HAProxy confirmed the '
+              'withdrawal config, HTTP 200 and original context with zero '
+              'additional exports on legacy and sampled listeners')
 
 
 def main():

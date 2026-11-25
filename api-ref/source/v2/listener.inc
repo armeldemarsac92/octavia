@@ -62,23 +62,30 @@ exports nothing for a valid unsampled parent, and applies the ``parent``
 rate for a valid sampled parent. Without ``parent``, Amphora uses ``base``
 for every request. A valid parent's trace ID is retained in either mode.
 Amphora makes one decision per request, sets the propagated sampled flag
-accordingly, and exports only sampled spans.
+accordingly, and exports only sampled spans. It preserves the W3C
+random-trace-id flag with a valid parent and sets it for trace IDs it
+generates.
 
 Omitting the field on update preserves its value. Sending ``null`` clears
-the setting and releases the collector pool reference. Once cleared, a
-response may omit the field if regional opt-in is off. Deleting a referenced
-pool returns HTTP 409. An otherwise valid enrollment returns HTTP 501 when
-the provider lacks the requested capability.
+the requested configuration. The API returns ``otlp_tracing: null``
+with status ``PENDING_UPDATE`` until the change applies. Octavia retains
+the previous collector references until the running configuration is
+acknowledged on every current Amphora. Deleting a retained pool returns
+HTTP 409. An otherwise valid enrollment returns HTTP 501 when the provider
+lacks the requested capability.
 
-Read the collector publication state in ``otlp_tracing_status``. It is
-PENDING_UPDATE while applying a tracing request, ACTIVE once Amphora has
-published the configuration, and ERROR when collector TLS setup failed or
-a requested sampling configuration could not be applied. If sampling is
-withdrawn or unavailable on an Amphora, its next successful render removes
-tracing for the affected listener and keeps serving application traffic.
-A successful render on all current Amphorae restores ACTIVE. Retry the
-same tracing object with PUT to request another render. Use collector health
-or telemetry to monitor live delivery.
+The publication state in ``otlp_tracing_status`` becomes ``ACTIVE`` after
+the current Amphora topology acknowledges the exact running configuration.
+A previously configured listener reports ``null`` and ``ACTIVE`` after
+withdrawal is acknowledged, including when regional opt-in is off.
+``ERROR`` reports an incomplete publication, missing capability or
+collector TLS error. Retry the same object, or retry ``null`` for a
+withdrawal, to request another render. A PUT containing only
+``otlp_tracing: null`` can retry a withdrawal on a load balancer in
+``ERROR``. Amphorae with missing tracing or
+sampling support keep serving application traffic with affected tracing
+removed on the next successful reload. Observe collector health or
+telemetry for live delivery.
 
 .. rest_status_code:: success ../http-status.yaml
 

@@ -160,15 +160,19 @@ CONF = cfg.CONF
 JINJA_ENV = None
 
 
-def otlp_sampling_supported(loadbalancer, amp_details):
+def otlp_tracing_supported(loadbalancer, tracing, amp_details):
+    details = amp_details or {}
+    if details.get(
+            constants.GATEWAY_CAPABILITY_LISTENER_OTLP_TRACING) is not True:
+        return False
+    if 'sampling' not in tracing:
+        return True
     settings = CONF.api_settings
     provider = getattr(loadbalancer, 'provider', None) or 'amphora'
     return (
         provider in settings.enabled_listener_otlp_tracing_providers and
         provider in settings.enabled_listener_otlp_sampling_providers and
-        (amp_details or {}).get(
-            constants.GATEWAY_CAPABILITY_LISTENER_OTLP_TRACING) is True and
-        (amp_details or {}).get(
+        details.get(
             constants.GATEWAY_CAPABILITY_LISTENER_OTLP_SAMPLING) is True)
 
 
@@ -202,7 +206,8 @@ class JinjaTemplater:
 
     def build_config(self, host_amphora, listeners, tls_certs,
                      haproxy_versions, amp_details, socket_path=None,
-                     otlp_tls_certs=None, http_cookie_results=None):
+                     otlp_tls_certs=None, http_cookie_results=None,
+                     otlp_publication=None):
         """Convert a logical configuration to the HAProxy version
 
         :param host_amphora: The Amphora this configuration is hosted on
@@ -236,6 +241,7 @@ class JinjaTemplater:
             feature_compatibility=feature_compatibility,
             amp_details=amp_details, haproxy_version=version,
             otlp_tls_certs=otlp_tls_certs,
+            otlp_publication=otlp_publication,
             **({'http_cookie_results': http_cookie_results}
                if http_cookie_results is not None else {}))
 
@@ -277,7 +283,8 @@ class JinjaTemplater:
                                 feature_compatibility=None,
                                 amp_details: tp.Optional[dict] = None,
                                 haproxy_version=None, otlp_tls_certs=None,
-                                http_cookie_results=None):
+                                http_cookie_results=None,
+                                otlp_publication=None):
         """Renders a templated configuration from a load balancer object
 
         :param host_amphora: The Amphora this configuration is hosted on
@@ -313,7 +320,8 @@ class JinjaTemplater:
             loadbalancer_obj,
             listeners,
             tls_certs,
-            feature_compatibility, otlp_tls_certs=otlp_tls_certs)
+            feature_compatibility, otlp_tls_certs=otlp_tls_certs,
+            amp_details=amp_details)
         if http_cookie_results is not None and loadbalancer['enabled']:
             for listener in loadbalancer['listeners']:
                 if listener['enabled']:
@@ -356,22 +364,9 @@ class JinjaTemplater:
                         version=f'HAProxy {haproxy_version}; CORS requires 2.2')
         if loadbalancer['enabled']:
             supports_mirrors = (amp_details or {}).get(mirror_capability)
-            supports_sampling = otlp_sampling_supported(loadbalancer_obj,
-                                                        amp_details)
             for listener in loadbalancer['listeners']:
                 if not listener['enabled']:
                     continue
-                tracing = listener.get('otlp_tracing')
-                if tracing and 'sampling' in tracing and not supports_sampling:
-                    # A v1-only Lua script would accept extra arguments and
-                    # sample every request. Keep serving without tracing.
-                    del listener['otlp_tracing']
-                elif (tracing and
-                        (amp_details or {}).get(
-                            constants.GATEWAY_CAPABILITY_LISTENER_OTLP_TRACING)
-                        is not True):
-                    raise driver_except.AmpVersionUnsupported(
-                        version='HAProxy lacks listener OTLP tracing support')
                 if ('http_request_policies_by_pool' in listener and
                         (amp_details or {}).get(policy_capability)
                         is not True):
@@ -489,6 +484,7 @@ class JinjaTemplater:
             for lsnr in listeners)
 
         jinja_dict = {
+            'otlp_publication': otlp_publication,
             'loadbalancer': loadbalancer,
             'stats_sock': socket_path,
             'log_http': self.log_http,
@@ -550,7 +546,7 @@ class JinjaTemplater:
 
     def _transform_loadbalancer(self, host_amphora, loadbalancer, listeners,
                                 tls_certs, feature_compatibility,
-                                otlp_tls_certs=None):
+                                otlp_tls_certs=None, amp_details=None):
         """Transforms a load balancer into an object that will
 
            be processed by the templating system
@@ -564,7 +560,9 @@ class JinjaTemplater:
             tracing = getattr(listener, 'otlp_tracing', None)
             if (tracing and listener.enabled and loadbalancer.enabled and
                     listener.provisioning_status not in (
-                        constants.PENDING_DELETE, constants.DELETED)):
+                        constants.PENDING_DELETE, constants.DELETED) and
+                    otlp_tracing_supported(loadbalancer, tracing,
+                                           amp_details)):
                 transformed['otlp_tracing'] = self._transform_otlp_tracing(
                     listener, loadbalancer, feature_compatibility,
                     otlp_tls_certs or {})

@@ -107,6 +107,7 @@ GATEWAY_CAPABILITY_LISTENER_OTLP_SAMPLING = 'listener_otlp_sampling_v1'
 HAPROXY_OTLP_TRACING_SCRIPT = '/var/lib/octavia/octavia-telemetry.lua'
 HAPROXY_OTLP_SAMPLING_SCRIPT = (
     '/var/lib/octavia/octavia-telemetry-sampling-v1.lua')
+HAPROXY_OTLP_PUBLICATION_HEADER = 'X-Octavia-OTLP-Publication'
 HAPROXY_OTLP_TRACING_PROXY_PREFIX = 'octavia-otlp-'
 HAPROXY_OTLP_TRACING_SOCKET_DIR = '/run/octavia/telemetry'
 GATEWAY_CAPABILITY_LISTENER_REQUEST_FILTERS = 'listener_request_filters_v1'

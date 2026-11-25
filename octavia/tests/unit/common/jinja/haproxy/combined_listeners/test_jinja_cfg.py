@@ -942,8 +942,10 @@ class TestHaproxyCfg(base.TestCase):
             id='neighbor', protocol_port=81, load_balancer=load_balancer)
         amphora = sample_configs_combined.sample_amphora_tuple()
         render = self.jinja_cfg.render_loadbalancer_obj
-        self.assertRaises(driver_except.AmpVersionUnsupported,
-                          render, amphora, [enabled, neighbor])
+        config = render(amphora, [enabled, neighbor])
+        self.assertIn(f'frontend {enabled.id}', config)
+        self.assertIn(f'frontend {neighbor.id}', config)
+        self.assertNotIn('octavia-trace-', config)
         cap = constants.GATEWAY_CAPABILITY_LISTENER_OTLP_TRACING
         config = render(amphora, [enabled, neighbor], amp_details={cap: True})
         self.assertEqual(1, config.count(

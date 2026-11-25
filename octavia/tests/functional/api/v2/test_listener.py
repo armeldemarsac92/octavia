@@ -54,6 +54,30 @@ class TestListener(base.BaseAPITest):
         self.pool_id = self.pool.get('pool').get('id')
         self.set_lb_status(self.lb_id)
 
+    def _otlp_driver(self, details):
+        driver = rest_api_driver.HaproxyAmphoraLoadBalancerDriver()
+        driver.clients['base'] = mock.Mock()
+        driver.clients['base'].get_api_version.return_value = {
+            'api_version': '1.0'}
+        client = driver.clients['1.0'] = mock.Mock()
+        client.get_info.return_value = {'haproxy_version': '3.0.19'}
+        client.get_details.return_value = details
+        client.reload_listener.return_value.status_code = 202
+
+        def acknowledge(amphora, lb_id, *, otlp_publication, **kwargs):
+            self.assertIn(f'description octavia-otlp-{otlp_publication}',
+                          client.upload_config.call_args.args[2])
+            return mock.Mock(status_code=202, headers={
+                constants.HAPROXY_OTLP_PUBLICATION_HEADER: otlp_publication})
+
+        client.reload_listener.side_effect = acknowledge
+        return driver, client, acknowledge
+
+    def _vote_otlp_status(self, session, listener_id, tracing, status):
+        listener = self.listener_repo.get(session, id=listener_id)
+        self.listener_repo.set_otlp_tracing_statuses(session, {
+            listener_id: (tracing, listener.otlp_tracing_revision, status)})
+
     @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
     def test_otlp_failover_recovery_requires_the_current_pair(self, rpc):
         self.conf.config(group='api_settings',
@@ -79,17 +103,12 @@ class TestListener(base.BaseAPITest):
                 self.amphora_repo.create(
                     session, id=amp_id, role=role, status=constants.ACTIVE,
                     load_balancer_id=lb['id'], lb_network_ip=ip)
-            self.listener_repo.set_otlp_tracing_statuses(
-                session, {listener_id: (tracing, constants.ERROR)})
+            self._vote_otlp_status(session, listener_id, tracing,
+                                   constants.ACTIVE)
 
-        driver = rest_api_driver.HaproxyAmphoraLoadBalancerDriver()
-        driver.clients['base'] = mock.Mock()
-        driver.clients['base'].get_api_version.return_value = {
-            'api_version': '1.0'}
-        client = driver.clients['1.0'] = mock.Mock()
-        client.get_info.return_value = {'haproxy_version': '3.0.19'}
-        client.get_details.return_value = {
+        details = {
             constants.GATEWAY_CAPABILITY_LISTENER_OTLP_TRACING: True}
+        driver, client, acknowledge = self._otlp_driver(details)
         task = amphora_driver_tasks.AmphoraIndexListenerUpdate()
         task.amphora_driver = driver
         loadbalancer = {constants.LOADBALANCER_ID: lb['id']}
@@ -115,26 +134,30 @@ class TestListener(base.BaseAPITest):
         self.assertEqual(constants.ERROR, failover(reachable))
         self.assertEqual(2, client.reload_listener.call_count)
 
-        client.reload_listener.side_effect = None
+        client.reload_listener.side_effect = acknowledge
         self.assertEqual(constants.ACTIVE, failover(reachable))
         self.assertEqual({first, second}, {
             call.args[0].id for call in client.reload_listener.call_args_list})
 
-        with db_api.session().begin() as session:
-            self.listener_repo.set_otlp_tracing_statuses(
-                session, {listener_id: (tracing, constants.ERROR)})
+        client.get_details.side_effect = lambda amp, **_: (
+            details if amp.id == first else {})
+        self.assertEqual(constants.ERROR, failover(reachable))
+        self.assertEqual(2, client.reload_listener.call_count)
+        client.get_details.side_effect = None
+        self.assertEqual(constants.ACTIVE, failover(reachable))
 
         def retire_second(amphora, *args, **kwargs):
             if amphora.id == second:
                 with db_api.session().begin() as session:
                     self.amphora_repo.update(
                         session, second, status=constants.DELETED)
+            return acknowledge(amphora, *args, **kwargs)
 
         client.reload_listener.side_effect = retire_second
         self.assertEqual(constants.ERROR, failover(reachable))
         self.assertEqual(2, client.reload_listener.call_count)
 
-        client.reload_listener.side_effect = None
+        client.reload_listener.side_effect = acknowledge
         client.reload_listener.reset_mock()
         initial_phase = amphora_driver_tasks.AmpListenersUpdate()
         initial_phase.amphora_driver = driver
@@ -200,8 +223,8 @@ class TestListener(base.BaseAPITest):
             lb_state = self.lb_repo.get(session, id=lb['id'])
             self.assertEqual(updated_tracing,
                              lb_state.listeners[0].otlp_tracing)
-            self.listener_repo.set_otlp_tracing_statuses(
-                session, {listener['id']: (updated_tracing, constants.ERROR)})
+            self._vote_otlp_status(session, listener['id'], updated_tracing,
+                                   constants.ERROR)
         degraded = self.get(path).json['listener']
         self.assertEqual(constants.ERROR, degraded['otlp_tracing_status'])
         self.assertEqual(updated_tracing, degraded['otlp_tracing'])
@@ -212,8 +235,8 @@ class TestListener(base.BaseAPITest):
         self.assertEqual(constants.PENDING_UPDATE,
                          repair['otlp_tracing_status'])
         with db_api.session().begin() as session:
-            self.listener_repo.set_otlp_tracing_statuses(session, {
-                listener['id']: (updated_tracing, constants.ACTIVE)})
+            self._vote_otlp_status(session, listener['id'], updated_tracing,
+                                   constants.ACTIVE)
         self.assertEqual(constants.ACTIVE, self.get(path).json['listener'][
             'otlp_tracing_status'])
 
@@ -229,10 +252,17 @@ class TestListener(base.BaseAPITest):
         self.put(path, {'listener': {'otlp_tracing': None}})
         self.assertIsNone(rpc.return_value.cast.call_args.kwargs[
             'listener_updates']['otlp_tracing'])
-        self.assertNotIn('otlp_tracing', self.get(path).json['listener'])
-        self.assertNotIn('otlp_tracing_status',
-                         self.get(path).json['listener'])
+        clearing = self.get(path).json['listener']
+        self.assertIsNone(clearing['otlp_tracing'])
+        self.assertEqual(constants.PENDING_UPDATE,
+                         clearing['otlp_tracing_status'])
         self.set_lb_status(lb['id'])
+        self.delete(pool_path, status=409)
+        with db_api.session().begin() as session:
+            self._vote_otlp_status(session, listener['id'], None,
+                                   constants.ACTIVE)
+        self.assertEqual(constants.ACTIVE, self.get(path).json['listener'][
+            'otlp_tracing_status'])
         self.delete(pool_path)
 
     @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
@@ -286,14 +316,8 @@ class TestListener(base.BaseAPITest):
                 session, id=amphora_id, role=constants.ROLE_STANDALONE,
                 status=constants.ACTIVE, load_balancer_id=lb['id'],
                 lb_network_ip='192.0.2.1')
-        driver = rest_api_driver.HaproxyAmphoraLoadBalancerDriver()
-        driver.clients['base'] = mock.Mock()
-        driver.clients['base'].get_api_version.return_value = {
-            'api_version': '1.0'}
-        client = driver.clients['1.0'] = mock.Mock()
-        client.get_info.return_value = {'haproxy_version': '3.0.19'}
         details = {constants.GATEWAY_CAPABILITY_LISTENER_OTLP_TRACING: True}
-        client.get_details.return_value = details
+        driver, client, _ = self._otlp_driver(details)
 
         def render():
             client.reload_listener.reset_mock()
@@ -328,6 +352,99 @@ class TestListener(base.BaseAPITest):
         self.put(path, {'listener': {'otlp_tracing': None}})
         self.set_lb_status(lb['id'])
         self.put(lb_path, reopen)
+
+    @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
+    def test_otlp_withdrawal_holds_collectors_until_matching_reload(self, rpc):
+        self.conf.config(group='api_settings',
+                         enabled_listener_otlp_tracing_providers=['amphora'])
+        lb = self.create_load_balancer(
+            uuidutils.generate_uuid(), provider='amphora')['loadbalancer']
+        pool_ids = []
+        for _ in range(2):
+            self.set_lb_status(lb['id'])
+            collector = self.create_pool(lb['id'], 'HTTP', 'ROUND_ROBIN')
+            pool_ids.append(collector['pool']['id'])
+        self.set_lb_status(lb['id'])
+        tracing = dict(collector_pool_id=pool_ids[0],
+                       service_name='test.gateway', span_name='Gateway HTTP')
+        listener = self.create_listener(
+            'HTTP', 8050, lb['id'], otlp_tracing=tracing)['listener']
+        listener_id = listener['id']
+        path = self.LISTENER_PATH.format(listener_id=listener_id)
+        with db_api.session().begin() as session:
+            self.amphora_repo.create(
+                session, id=uuidutils.generate_uuid(),
+                role=constants.ROLE_STANDALONE, status=constants.ACTIVE,
+                load_balancer_id=lb['id'], lb_network_ip='192.0.2.1')
+
+        def configure(spec, status, *, recover=False):
+            if not recover:
+                self.set_lb_status(lb['id'])
+            body = self.put(path, {'listener': {'otlp_tracing': spec}})
+            self.assertEqual(status, body.json['listener'][
+                'otlp_tracing_status'])
+            self.set_lb_status(lb['id'])
+
+        def render():
+            with db_api.session().begin() as session:
+                lb_state = self.lb_repo.get(session, id=lb['id'])
+            driver.update(lb_state)
+
+        def assert_held(pool_id):
+            pool_path = self.POOL_PATH.format(pool_id=pool_id)
+            self.delete(pool_path, status=409)
+
+        driver, client, acknowledge = self._otlp_driver({})
+        configure(None, constants.PENDING_UPDATE)
+        assert_held(pool_ids[0])
+        # A successful upload and a failed/non-acknowledged reload cannot
+        # release the collector even when the regional tracing flags are off.
+        self.conf.config(group='api_settings',
+                         enabled_listener_otlp_tracing_providers=[])
+        client.reload_listener.side_effect = OSError('reload failed')
+        self.assertRaises(OSError, render)
+        state = self.get(path).json['listener']
+        self.assertEqual(constants.ERROR, state['otlp_tracing_status'])
+        self.set_lb_status(lb['id'], constants.ERROR)
+        self.put(path, {'listener': {'otlp_tracing': None,
+                                     'name': 'unrelated'}}, status=409)
+        configure(None, constants.PENDING_UPDATE, recover=True)
+
+        client.upload_config.reset_mock()
+        client.reload_listener.side_effect = None
+        client.reload_listener.return_value.headers = {}
+        render()
+        client.upload_config.assert_called_once()
+        state = self.get(path).json['listener']
+        self.assertIsNone(state['otlp_tracing'])
+        self.assertEqual(constants.ERROR, state['otlp_tracing_status'])
+        assert_held(pool_ids[0])
+        with db_api.session().begin() as session:
+            stale = self.listener_repo.get(
+                session, id=listener_id).otlp_tracing_revision
+
+        configure(None, constants.PENDING_UPDATE)
+        self.conf.config(group='api_settings',
+                         enabled_listener_otlp_tracing_providers=['amphora'])
+        configure(dict(tracing, collector_pool_id=pool_ids[1]),
+                  constants.PENDING_UPDATE)
+        configure(None, constants.PENDING_UPDATE)
+        with db_api.session().begin() as session:
+            self.listener_repo.set_otlp_tracing_statuses(session, {
+                listener_id: (None, stale, constants.ACTIVE)})
+        self.assertEqual(constants.PENDING_UPDATE, self.get(path).json[
+            'listener']['otlp_tracing_status'])
+        for pool_id in pool_ids:
+            assert_held(pool_id)
+
+        client.reload_listener.side_effect = acknowledge
+        render()
+        state = self.get(path).json['listener']
+        self.assertIsNone(state['otlp_tracing'])
+        self.assertEqual(constants.ACTIVE, state['otlp_tracing_status'])
+        for pool_id in pool_ids:
+            self.set_lb_status(lb['id'])
+            self.delete(self.POOL_PATH.format(pool_id=pool_id))
 
     @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
     def test_listener_request_filters_pool_scope_and_withdrawal(self, rpc):

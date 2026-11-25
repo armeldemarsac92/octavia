@@ -897,6 +897,7 @@ def listener_dict_to_provider_dict(listener_dict, for_delete=False,
     # Preserve the existing driver payload for ordinary listeners.
     new_listener_dict.pop('frontend_fallback_owns_error', None)
     new_listener_dict.pop('otlp_tracing_status', None)
+    new_listener_dict.pop('otlp_tracing_revision', None)
     if not LISTENER_OTLP_TRACING_PAYLOAD_AVAILABLE:
         new_listener_dict.pop('otlp_tracing', None)
     if not LISTENER_REQUEST_FILTERS_PAYLOAD_AVAILABLE:

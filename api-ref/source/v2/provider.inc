@@ -461,13 +461,17 @@ Amphora fleet before adding the provider name to
 ``[api_settings] enabled_listener_otlp_tracing_providers``. Removing the
 provider name stops discovery and new enrollment. Existing settings remain
 readable and can be cleared with ``otlp_tracing: null``. Clear existing
-settings before rolling back the Amphora fleet.
+settings and wait for ``otlp_tracing_status: ACTIVE`` with the null
+configuration before rolling back the Amphora fleet.
 
 ``listener_otlp_sampling_v1`` adds base and parent-based sampling to
 ``listener_otlp_tracing_v1``. After upgrading the API, workers, and all
 eligible Amphora agents and installing their versioned Lua script, add the
 provider to ``[api_settings] enabled_listener_otlp_sampling_providers`` as
-well as the tracing allowlist. This adds no database schema requirement.
+well as the tracing allowlist. Apply database revision ``f831dfeaac94``
+and update all API processes and workers before accepting tracing updates.
+Agents must acknowledge the running configuration to complete publication
+or release old collector references.
 Removing the provider from either list withdraws sampling discovery and
 admission. Clear sampled tracing with ``otlp_tracing: null`` and verify the
 affected listeners have reloaded before rolling back.

@@ -59,7 +59,7 @@ local function read_parent(txn)
        or (#header > 55 and (version == "00" or header:sub(56, 56) ~= "-")) then
         return
     end
-    return trace_id, parent_id, tonumber(flags, 16) & 1 == 1
+    return trace_id, parent_id, tonumber(flags, 16)
 end
 
 local function sample(rate)
@@ -94,7 +94,7 @@ local function start_span(txn, id)
     if not exporter then
         return
     end
-    local trace_id, parent_id, parent_sampled = read_parent(txn)
+    local trace_id, parent_id, parent_flags = read_parent(txn)
     local random = octavia_telemetry_entropy:read(24)
     if not random then
         return
@@ -106,9 +106,13 @@ local function start_span(txn, id)
     end
     local sampled
     if parent_id and exporter.parent_rate then
-        sampled = parent_sampled and sample(exporter.parent_rate)
+        sampled = parent_flags & 1 == 1 and sample(exporter.parent_rate)
     else
         sampled = sample(exporter.base_rate)
+    end
+    local trace_flags = (parent_flags or 2) & 2
+    if sampled then
+        trace_flags = trace_flags | 1
     end
     txn:set_priv({
         exporter = exporter,
@@ -116,6 +120,7 @@ local function start_span(txn, id)
         span_id = span_id,
         parent_id = parent_id,
         sampled = sampled,
+        trace_flags = trace_flags,
         start_ns = sampled and unix_nanos(),
     })
     txn:set_var(var_name, true)
@@ -126,9 +131,8 @@ local function propagate_span(txn)
         return
     end
     local span = txn:get_priv()
-    local flags = span.sampled and "01" or "00"
     txn.http:req_set_header(
-        "traceparent", ("00-%s-%s-%s"):format(span.trace_id, span.span_id, flags))
+        "traceparent", ("00-%s-%s-%02x"):format(span.trace_id, span.span_id, span.trace_flags))
     if not span.parent_id then
         txn.http:req_del_header("tracestate")
     end
@@ -157,8 +161,8 @@ local function finish_span(txn)
         return
     end
     local parent = span.parent_id and (',"parentSpanId":"%s"'):format(span.parent_id) or ""
-    -- The sampled bit plus both OTLP remote-parent bits for a W3C parent.
-    local flags = span.parent_id and (0x300 | 1) or 1
+    -- Preserve W3C flags and add the OTLP bits marking a known remote parent.
+    local flags = span.trace_flags | (span.parent_id and 0x300 or 0)
     local status = http_status >= 500 and ',"status":{"code":2}' or ""
     exporter.pending:push(otlp:format(
         exporter.service_name, span.trace_id, span.span_id, parent,
