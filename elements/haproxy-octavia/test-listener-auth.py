@@ -12,6 +12,7 @@ from http.server import ThreadingHTTPServer
 import json
 from pathlib import Path
 import socket
+from socketserver import ThreadingUnixStreamServer
 import ssl
 import subprocess
 import sys
@@ -19,12 +20,12 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 import uuid
 
 from oslo_config import cfg
 
 from octavia.amphorae.backends.agent.api_server import haproxy_compatibility
-from octavia.amphorae.driver_exceptions import exceptions
 from octavia.common import constants as c
 from octavia.common import data_models as dm
 from octavia.common.jinja.haproxy.combined_listeners import jinja_cfg
@@ -185,14 +186,10 @@ class TestListenerAuth(unittest.TestCase):
         details = haproxy_compatibility.get_haproxy_capabilities()
         assert details.get(c.GATEWAY_CAPABILITY_LISTENER_REQUEST_FILTERS)
         cls.body_supported = details.get(c.AMPHORA_CAPABILITY_HTTP_AUTH_BODY)
-        try:
-            templater.build_config(cls.amp, cls.lb.listeners,
-                                   amp_details={}, **render)
-        except exceptions.AmpVersionUnsupported:
-            pass
-        else:
-            message = 'a listener with auth requires the Amphora capability'
-            raise AssertionError(message)
+        without_auth = templater.build_config(
+            cls.amp, cls.lb.listeners, amp_details={}, **render)
+        assert 'http-request deny deny_status 503 if ' in without_auth
+        assert 'filter octavia-auth' not in without_auth
         templater.build_config(cls.amp, [ordinary], amp_details={}, **render)
 
         if cls.body_supported:
@@ -482,6 +479,135 @@ class TestListenerAuth(unittest.TestCase):
         self.assertEqual(503, self.request('missing.example')[0])
         self.assertEqual(503, self.request('empty.example')[0])
         self.assertEqual(503, self.request('auth.example', '/slow')[0])
+
+    def test_envoy_listener_auth_precedes_routing(self):
+        checks = []
+
+        class Adapter(BaseHTTPRequestHandler):
+            def do_POST(self):
+                if self.headers.get('Transfer-Encoding') == 'chunked':
+                    chunks = []
+                    while size := int(self.rfile.readline(), 16):
+                        chunks.append(self.rfile.read(size))
+                        assert self.rfile.read(2) == b'\r\n'
+                    assert self.rfile.readline() == b'\r\n'
+                    form = b''.join(chunks)
+                else:
+                    form = self.rfile.read(int(self.headers['Content-Length']))
+                checks.append(form)
+                body = (b'decision=deny&status=401&body=denied'
+                        if b'path=%2Fdeny' in form else
+                        b'decision=allow&set.x-identity=verified'
+                        b'&response.set.x-authorized=listener')
+                if b'h.x-identity=verified' in form:
+                    body = b'decision=allow&response.add.x-authorized=second'
+                if b'path=%2Fmutate-host' in form:
+                    body = b'decision=allow&set.host=public.example'
+                self.send_response(200)
+                self.send_header('Content-Type',
+                                 'application/x-www-form-urlencoded')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, fmt, *args):
+                pass
+
+        grpc = self.listener('grpc', c.PROTOCOL_HTTP)
+        grpc_auth = dm.Pool(
+            id=str(uuid.uuid4()), load_balancer_id=self.lb.id,
+            project_id=self.project, protocol=c.PROTOCOL_HTTP,
+            lb_algorithm=c.LB_ALGORITHM_ROUND_ROBIN, enabled=True,
+            tls_enabled=False, backend_h2c=True,
+            tags=[c.GATEWAY_GRPC_AUTH_POOL_TAG])
+        step = {'type': 'ExternalAuth', 'grpc': {'pool_id': grpc_auth.id}}
+        grpc.request_filter_sections = [
+            {'hostname': 'grpc.example', 'requests': [step, step]},
+            {'hostname': 'public.example'},
+        ]
+        script = Path(__file__).resolve().with_name('octavia-grpc-auth.lua')
+        config = cfg.CONF
+        with ExitStack() as stack:
+            config.set_override('haproxy_cmd', HAPROXY,
+                                group='haproxy_amphora')
+            stack.callback(config.clear_override, 'haproxy_cmd',
+                           group='haproxy_amphora')
+            details = haproxy_compatibility.get_haproxy_capabilities()
+            for setting in ('enabled_listener_request_filter_providers',
+                            'enabled_listener_grpc_external_auth_providers',
+                            'enabled_backend_h2c_providers'):
+                config.set_override(setting, ['amphora'], group='api_settings')
+                stack.callback(config.clear_override, setting,
+                               group='api_settings')
+            self.lb.pools.append(grpc_auth)
+            stack.callback(self.lb.pools.remove, grpc_auth)
+            adapter_path = self.path / 'grpc-adapter.sock'
+            adapter = stack.enter_context(
+                ThreadingUnixStreamServer(str(adapter_path), Adapter))
+            thread = threading.Thread(target=adapter.serve_forever,
+                                      daemon=True)
+            thread.start()
+            stack.callback(adapter.shutdown)
+
+            templater = jinja_cfg.JinjaTemplater(
+                base_amp_path=str(self.path), connection_logging=False)
+            grpc_cap = c.GATEWAY_CAPABILITY_LISTENER_GRPC_EXTERNAL_AUTH
+            probe = haproxy_compatibility._supports_listener_grpc_external_auth
+            with mock.patch.object(c, 'HAPROXY_GRPC_AUTH_SCRIPT', str(script)):
+                self.assertTrue(probe(HAPROXY))
+
+            def run(available):
+                grpc.protocol_port = unused_port()
+                config_path = self.path / f'grpc-{available}.cfg'
+                rendered = templater.build_config(
+                    self.amp, [grpc], tls_certs=None,
+                    socket_path=str(self.path / f'grpc-{available}.sock'),
+                    haproxy_versions=['3', '0', '19'],
+                    amp_details={**details, grpc_cap: available})
+                config_path.write_text(rendered.replace(
+                    '/run/octavia/grpc-auth/', f'{self.path}/').replace(
+                    'user nobody', f'user {getpass.getuser()}').replace(
+                    c.HAPROXY_GRPC_AUTH_SCRIPT, f'{script} {adapter_path}'))
+                proxy = stack.enter_context(subprocess.Popen(
+                    [HAPROXY, '-db', '-f', str(config_path)]))
+                stack.callback(proxy.terminate)
+                deadline = time.monotonic() + 5
+                while True:
+                    try:
+                        with socket.create_connection(
+                                ('127.0.0.1', grpc.protocol_port), timeout=1):
+                            return
+                    except OSError:
+                        self.assertIsNone(proxy.poll())
+                        self.assertLess(time.monotonic(), deadline)
+                        time.sleep(0.05)
+
+            def request(host, path):
+                with closing(http.client.HTTPConnection(
+                        '127.0.0.1', grpc.protocol_port, timeout=5)) as conn:
+                    conn.request('PATCH', path, headers={'Host': host})
+                    response = conn.getresponse()
+                    identity = response.getheader('x-authorized')
+                    return response.status, identity, response.read()
+
+            run(True)
+            status, identity, payload = request('grpc.example', '/allow')
+            self.assertEqual((200, 'listener, second'), (status, identity))
+            app = json.loads(payload)
+            self.assertEqual('selected', app['route'])
+            self.assertEqual('grpc.example', app['headers']['host'])
+            self.origin_requests.clear()
+            self.assertEqual((401, None, b'denied'),
+                             request('grpc.example', '/deny'))
+            self.assertEqual(503, request('grpc.example', '/mutate-host')[0])
+            self.assertEqual([], self.origin_requests)
+            self.assertEqual(4, len(checks))
+
+            run(False)
+            self.assertEqual(503, request('grpc.example', '/allow')[0])
+            public = request('public.example', '/allow')
+            self.assertEqual('fallback', json.loads(public[2])['route'])
+            self.assertEqual(4, len(checks))
 
 
 if __name__ == '__main__':

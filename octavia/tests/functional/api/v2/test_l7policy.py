@@ -469,7 +469,7 @@ class TestInitialL7Rules(base.BaseAPITest):
                          enabled_listener_request_filter_providers=providers)
         self.put(listener_path, {'listener': {'request_filter_sections': [
             {'hostname': 'example.test', 'requests': [
-                {'type': 'ExternalAuth', 'http': auth}]}]}}, status=400)
+                {'type': 'ExternalAuth', 'http': auth}]}]}}, status=501)
 
         self.conf.config(group='api_settings', **{tls_setting: []})
         self.put(listener_path, {'listener': {'admin_state_up': False}})

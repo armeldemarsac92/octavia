@@ -178,6 +178,22 @@ backend probe_pool
     return _valid_haproxy_config(haproxy_cmd, config)
 
 
+def _supports_listener_grpc_external_auth(haproxy_cmd):
+    # The route adapter probe has already validated the existing gRPC
+    # actions and socket. The listener can invoke the same actions in a chain.
+    return _valid_haproxy_config(haproxy_cmd, f"""global
+    lua-load-per-thread {constants.HAPROXY_GRPC_AUTH_SCRIPT}
+defaults
+    mode http
+    timeout client 3s
+    timeout connect 1s
+    timeout server 3s
+frontend probe
+    bind 127.0.0.1:1
+    http-request set-var(txn.octavia_auth_chain) lua.octavia-grpc-auth-chain
+""")
+
+
 _HTTP_EXTERNAL_AUTH_FORWARD_BODY_PROBE = (
     """global
     tune.octavia-auth-body-max-memory 4096
@@ -378,6 +394,12 @@ def get_haproxy_capabilities():
     if '+LUA' in output.split() and _supports_grpc_external_auth(haproxy_cmd):
         capabilities[
             constants.GATEWAY_CAPABILITY_L7POLICY_GRPC_EXTERNAL_AUTH] = True
+        if (capabilities.get(
+                constants.GATEWAY_CAPABILITY_LISTENER_REQUEST_FILTERS) and
+                _supports_listener_grpc_external_auth(haproxy_cmd)):
+            capabilities[
+                constants.GATEWAY_CAPABILITY_LISTENER_GRPC_EXTERNAL_AUTH
+            ] = True
         if _supports_grpc_external_auth_forward_body(haproxy_cmd):
             capabilities[
                 constants.AMPHORA_CAPABILITY_GRPC_AUTH_BODY

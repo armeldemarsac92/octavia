@@ -213,16 +213,37 @@ suffixes, longer suffixes precede shorter ones, and ``*`` is the default.
 If no section matches, the listener returns 404 for HTTP or 421 for
 terminated HTTPS before selecting a route.
 
-Each request filter has ``type: ExternalAuth`` and an ``http`` object with
-``pool_id``. The authorization pool must use plain HTTP, carry the tag
-``gw-api-listener-auth-pool-v1`` and be in the same load balancer and project.
+Each authorization pool belongs to the same load balancer and project as the
+listener. A request filter has ``type: ExternalAuth`` and exactly one
+protocol object, ``http`` or ``grpc``, containing the ``pool_id``.
+
+For ``http``, use a plain HTTP pool tagged ``gw-api-listener-auth-pool-v1``
+or a verified TLS pool tagged ``gw-api-http-auth-tls-pool-v1`` when the provider
+advertises ``listener_http_external_auth_tls_v1``. A verified TLS pool requires
+``tls_enabled``, an exact ``backend_tls_hostname`` and either
+``ca_tls_container_ref`` or ``backend_tls_system_ca``. It uses HTTP/1.1.
+If an ALPN list is set, it must include ``http/1.1``.
 The ``http`` object can also contain ``path_prefix``,
 ``allowed_request_headers`` and ``allowed_response_headers``. The authorizer
 receives the request method, path and query, Host, Authorization when present
 and Content-Length 0. The request header allow list adds to these defaults.
 An empty response header allow list copies all response headers that may be
 applied to the original request. Host, authority and HTTP framing are retained.
-Only a 200 response from every configured authorizer allows routing.
+An HTTP check allows routing only with a 200 authorization response.
+
+For ``grpc``, the provider must advertise ``listener_grpc_external_auth_v1``.
+Use a dedicated HTTP pool tagged ``gw-api-grpc-auth-pool-v1``. Set
+``backend_h2c`` for cleartext HTTP/2 or set ``tls_enabled``,
+``backend_tls_require_h2``, an exact ``backend_tls_hostname`` and one CA
+source for verified HTTP/2 over TLS. The ``grpc`` object accepts an optional
+``allowed_request_headers`` list and uses Envoy v3
+``envoy.service.auth.v3.Authorization/Check``.
+
+Both protocol objects accept ``forward_body_max_size`` when the provider
+advertises body forwarding for the frontend protocol. An oversized request
+returns 413 before reaching that authorizer. Routing starts after every
+configured check allows the request. An unavailable transport returns 503
+for the protected section. Other sections retain their own filters and routing.
 
 
 .. rest_status_code:: success ../http-status.yaml

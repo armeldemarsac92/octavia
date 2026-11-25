@@ -300,7 +300,7 @@ class PoolsController(base.BaseController):
                     pool_dict['tags'])
             if not listener_request_filters.valid_pool(
                     data_models.Pool(protocol=pool_dict['protocol']),
-                    tags=pool_dict['tags'], changes=pool_dict, rule=True):
+                    tags=pool_dict['tags'], changes=pool_dict):
                 raise exceptions.ValidationException(detail=_(
                     'An HTTP TLS authorizer pool requires verified '
                     'HTTP/1.1 over TLS and its own authorization role.'))
@@ -328,8 +328,7 @@ class PoolsController(base.BaseController):
                     lock_session, pool_dict['load_balancer_id']).provider
                 driver = driver_factory.get_driver(provider)
         if tls_authorizer:
-            driver_utils.require_l7policy_http_external_auth_tls(
-                driver, constants.PROTOCOL_HTTP)
+            driver_utils.require_http_tls_authorizer_pool(driver)
         if pool_dict.get('backend_h2c'):
             _validate_backend_h2c(driver, pool_dict['protocol'],
                                   pool_dict['tls_enabled'], enrolling=True)
@@ -851,20 +850,21 @@ class PoolsController(base.BaseController):
                            session, pool_id))
         policies = (self.repositories.l7policy
                     .get_external_auth_policies_using_pool(session, pool_id))
+        protocol = ('GRPC' if constants.GATEWAY_GRPC_AUTH_POOL_TAG in
+                    previous_tags else constants.PROTOCOL_HTTP)
         if listener_id and not listener_request_filters.valid_pool(
-                current, tags=tags, changes=changes):
+                current, protocol=protocol, tags=tags, changes=changes):
             raise exceptions.PoolInUseByListenerRequestFilter(
                 id=pool_id, listener_id=listener_id)
         for policy in policies:
             protocol = ('GRPC' if validate.is_grpc_external_auth(
                 policy.external_auth) else constants.PROTOCOL_HTTP)
             if not listener_request_filters.valid_pool(
-                    current, protocol=protocol, tags=tags, changes=changes,
-                    rule=True):
+                    current, protocol=protocol, tags=tags, changes=changes):
                 raise exceptions.PoolInUseByL7Policy(
                     id=pool_id, l7policy_id=policy.l7policy_id)
         if role in tags and not listener_request_filters.valid_pool(
-                current, tags=tags, changes=changes, rule=True):
+                current, tags=tags, changes=changes):
             raise exceptions.ValidationException(detail=_(
                 'An HTTP TLS authorizer pool requires verified '
                 'HTTP/1.1 over TLS and its own authorization role.'))

@@ -105,10 +105,8 @@ def snapshot(session, repositories, lb, listener, *, pending=False,
     repo = repositories.l7policy
     policies = repo.get_listener_policies_for_update(session, listener.id)
     repo.load_activation_references(session, policies)
-    auth_pool_protocols = {
-        pool_id: {(constants.PROTOCOL_HTTP, False)}
-        for pool_id in listener_request_filters.pool_ids(
-            listener.request_filter_sections)}
+    auth_pool_protocols = listener_request_filters.pool_protocols(
+        listener.request_filter_sections)
     pool_ids = {listener.default_pool_id, *additional_pools}
     snapshots = []
     for policy in policies:
@@ -122,7 +120,7 @@ def snapshot(session, repositories, lb, listener, *, pending=False,
             except exceptions.ValidationException as exc:
                 raise exceptions.L7PolicyActivationConflict() from exc
             auth_pool_protocols.setdefault(auth['pool_id'], set()).add(
-                (auth.get('protocol', constants.PROTOCOL_HTTP), True))
+                auth.get('protocol', constants.PROTOCOL_HTTP))
         pool_ids.add(policy.redirect_pool_id)
         pool_ids.update(target.get('pool_id') for target in policy.targets)
         pool_ids.update(validate.request_mirror_pool_ids(
@@ -142,8 +140,8 @@ def snapshot(session, repositories, lb, listener, *, pending=False,
                  (pool.load_balancer_id != lb.id or
                   pool.provisioning_status == constants.PENDING_DELETE or
                   any(not listener_request_filters.valid_pool(
-                      pool, protocol=protocol, rule=rule)
-                      for protocol, rule in auth_pool_protocols[pool_id])))):
+                      pool, protocol=protocol)
+                      for protocol in auth_pool_protocols[pool_id])))):
             raise exceptions.L7PolicyActivationConflict()
         members = sorted(
             (m for m in pool.members if m.provisioning_status !=

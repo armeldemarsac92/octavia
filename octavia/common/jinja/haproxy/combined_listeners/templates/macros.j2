@@ -618,8 +618,8 @@ frontend {{ listener.id }}
     http-request set-var(txn.octavia_grpc_mirror) bool(true) if METH_POST { fc_http_major eq 2 } { req.fhdr_cnt(content-type) eq 1 } octavia_grpc_mirror_media
     {% endif %}
     {% set listener_auth = listener.get('request_filter_sections', [])|map(attribute='requests')|sum(start=[]) %}
-    {% set ready_auth = route_auth|map(attribute='external_auth')|selectattr('available')|list %}
-    {% if listener_auth|selectattr('available')|list or ready_auth|rejectattr('protocol', 'defined')|list %}
+    {% set ready_auth = (listener_auth + route_auth|map(attribute='external_auth')|list)|selectattr('available')|list %}
+    {% if ready_auth|rejectattr('protocol', 'defined')|list %}
     filter octavia-auth
     {% endif %}
     {% if ready_auth|selectattr('protocol', 'defined')|selectattr('protocol', 'equalto', 'GRPC')|list %}

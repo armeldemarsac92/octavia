@@ -950,6 +950,11 @@ class HaproxyAmphoraLoadBalancerDriver(
         for listener in listeners:
             if not cls._is_active_http_listener(listener):
                 continue
+            if listener.project_id == loadbalancer.project_id:
+                sections = getattr(listener, 'request_filter_sections', None)
+                for auth in listener_request_filters.authorizers(sections):
+                    if auth.get('protocol', consts.PROTOCOL_HTTP) == protocol:
+                        result[auth['pool_id']] = listener
             for policy in getattr(listener, 'l7policies', ()) or ():
                 auth = getattr(policy, 'external_auth', None)
                 if (policy.enabled and
@@ -1032,7 +1037,7 @@ class HaproxyAmphoraLoadBalancerDriver(
                         if listener_request_filters.is_http_tls_authorizer(
                             pool) else 'GRPC')
                     if listener_request_filters.valid_pool(
-                            pool, protocol, rule=True):
+                            pool, protocol):
                         pools.setdefault(pool.id, (auth_frontend, pool))
         return opted_in, pools
 
@@ -1043,6 +1048,8 @@ class HaproxyAmphoraLoadBalancerDriver(
                                      for listener in listeners):
             return
         grpc_cap = consts.GATEWAY_CAPABILITY_L7POLICY_GRPC_EXTERNAL_AUTH
+        listener_caps = jinja_combo.listener_authorizer_capabilities(
+            lb, details)
         profiles = (
             ('GRPC', consts.GATEWAY_GRPC_AUTH_POOL_TAG,
              (details or {}).get(grpc_cap) is True),
@@ -1050,9 +1057,8 @@ class HaproxyAmphoraLoadBalancerDriver(
              jinja_combo.http_auth_tls_supported(lb, details)),
         )
         for protocol, tag, supported in profiles:
-            if not supported:
-                continue
             attached = cls._external_auth_listeners(lb, listeners, protocol)
+            auth = {'protocol': protocol}
             for pool in lb.pools:
                 digest = certs.get(pool.id, {}).get('system_ca_sha256')
                 if (digest and pool.id not in attached and pool.enabled and
@@ -1063,7 +1069,10 @@ class HaproxyAmphoraLoadBalancerDriver(
                         tag in (getattr(pool, 'tags', None) or ()) and
                         getattr(pool, 'backend_tls_system_ca', False) is
                         True and listener_request_filters.valid_pool(
-                            pool, protocol, rule=True)):
+                            pool, protocol) and
+                        (supported or
+                         listener_request_filters.transport_capabilities(
+                             auth, pool).issubset(listener_caps))):
                     # A detached authorizer needs an acknowledgement before
                     # the controller attaches its first policy and members.
                     results[pool.id] = digest

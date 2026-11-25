@@ -1426,33 +1426,38 @@ class ListenerRepository(BaseRepository):
 
     def validate_request_filter_pools(self, session, sections, lb_id,
                                       project_id):
-        self.validate_external_auth_pools(
-            session, listener_request_filters.pool_ids(sections), lb_id,
-            project_id)
+        return self._validate_auth_pools(
+            session, listener_request_filters.pool_protocols(sections),
+            lb_id, project_id)
 
     @staticmethod
     def validate_external_auth_pools(session, pool_ids, lb_id, project_id,
-                                     *, protocol=consts.PROTOCOL_HTTP,
-                                     rule=False):
+                                     *, protocol=consts.PROTOCOL_HTTP):
+        ListenerRepository._validate_auth_pools(
+            session, {pool_id: {protocol} for pool_id in pool_ids},
+            lb_id, project_id)
+
+    @staticmethod
+    def _validate_auth_pools(session, protocols, lb_id, project_id):
         repo = PoolRepository()
-        for pool_id in sorted(pool_ids):
+        result = {}
+        for pool_id, expected in sorted(protocols.items()):
             pool = repo.get_on_load_balancer_for_update(
                 session, lb_id, project_id, pool_id)
             tags = repo.get_tags_for_update(session, pool_id)
-            if not listener_request_filters.valid_pool(
-                    pool, protocol=protocol, tags=tags, rule=rule):
+            for protocol in sorted(expected):
+                if listener_request_filters.valid_pool(
+                        pool, protocol=protocol, tags=tags):
+                    continue
                 if protocol == 'GRPC':
                     raise exceptions.ValidationException(detail=_(
                         'gRPC authorization requires a managed HTTP pool '
                         'with h2c or verified TLS HTTP/2.'))
-                if rule:
-                    raise exceptions.ValidationException(detail=_(
-                        'HTTP rule authorization requires a managed HTTP '
-                        'pool with plain HTTP or verified HTTP/1.1 over '
-                        'TLS.'))
                 raise exceptions.ValidationException(detail=_(
-                    'HTTP authorization requires a managed plain HTTP '
-                    'pool.'))
+                    'HTTP authorization requires a managed HTTP pool '
+                    'with plain HTTP or verified HTTP/1.1 over TLS.'))
+            result[pool_id] = pool
+        return result
 
     def get_otlp_tracing_listener_using_pool(self, session, pool_id):
         refs = models.ListenerOtlpCollectorPool
@@ -2931,8 +2936,7 @@ class L7PolicyRepository(BaseRepository):
         pool_id = auth['pool_id']
         ListenerRepository.validate_external_auth_pools(
             session, {pool_id}, listener.load_balancer_id, project_id,
-            protocol=auth.get('protocol', consts.PROTOCOL_HTTP),
-            rule=True)
+            protocol=auth.get('protocol', consts.PROTOCOL_HTTP))
         if row is None:
             session.add(ref(l7policy_id=policy_id, pool_id=pool_id))
         else:

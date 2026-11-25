@@ -186,6 +186,17 @@ api_opts = [
                 help=_('Providers exposing ordered listener HTTP request '
                        'filters. Enable after updating the database, '
                        'provider library, workers and Amphora images.')),
+    cfg.ListOpt('enabled_listener_grpc_external_auth_providers', default=[],
+                help=_('Providers with listener Envoy gRPC authorizers. '
+                       'Enable with listener request filters and a qualified '
+                       'h2c or verified HTTP/2 TLS backend transport after '
+                       'verifying all eligible Amphora images and adapters.')),
+    cfg.ListOpt('enabled_listener_http_external_auth_tls_providers',
+                default=[],
+                help=_('Providers with listener HTTP authorizers over '
+                       'verified TLS. Enable with listener request filters '
+                       'and verified backend TLS after qualifying all '
+                       'eligible Amphora images.')),
     cfg.ListOpt('enabled_listener_external_auth_forward_body_providers',
                 default=[],
                 help=_('Providers whose regional fleets support forwarding '
