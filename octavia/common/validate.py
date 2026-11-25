@@ -1467,6 +1467,7 @@ def is_ip_member_of_cidr(address, cidr):
 
 HTTP_COOKIE_NAME = re.compile(r'[A-Za-z0-9_.-]{1,255}')
 HTTP_COOKIE_RESERVED_PREFIXES = ('__host-', '__secure-', '__http-')
+HTTP_COOKIE_PATH = re.compile(r'[\x20-\x3a\x3c-\x7e]*')
 HTTP_COOKIE_SCOPE = re.compile(r'[0-9a-f]{64}')
 
 
@@ -1474,6 +1475,12 @@ def is_valid_http_cookie_name(name):
     return (isinstance(name, str) and
             bool(HTTP_COOKIE_NAME.fullmatch(name)) and
             not name.lower().startswith(HTTP_COOKIE_RESERVED_PREFIXES))
+
+
+def is_valid_http_cookie_path(value):
+    return (isinstance(value, str) and
+            len(value) <= constants.HTTP_COOKIE_PATH_MAX_LENGTH and
+            HTTP_COOKIE_PATH.fullmatch(value) is not None)
 
 
 def is_valid_http_cookie_absolute_timeout(value):

@@ -186,10 +186,12 @@ class SessionPersistence(BaseDataModel):
                  pool=None, persistence_timeout=None,
                  persistence_granularity=None, http_cookie_name_enabled=False,
                  cookie_absolute_timeout_ms=None, cookie_scope=None,
-                 cookie_absolute_timeout_error=False, cookie_permanent=False):
+                 cookie_absolute_timeout_error=False, cookie_permanent=False,
+                 cookie_path=None):
         self.pool_id = pool_id
         self.type = type
         self.cookie_name = cookie_name
+        self.cookie_path = cookie_path
         self.pool = pool
         self.persistence_timeout = persistence_timeout
         self.persistence_granularity = persistence_granularity
@@ -316,7 +318,9 @@ def pool_api_provisioning_status(pool):
     persistence = pool.session_persistence
     if (pool.enabled and pool.provisioning_status == constants.ACTIVE and
             persistence is not None and
-            persistence.cookie_absolute_timeout_ms is not None and
+            (persistence.cookie_absolute_timeout_ms is not None or
+             getattr(persistence, 'cookie_path', None) not in
+             (None, constants.HTTP_COOKIE_DEFAULT_PATH)) and
             persistence.cookie_absolute_timeout_error):
         return constants.ERROR
     return pool.provisioning_status

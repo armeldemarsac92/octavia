@@ -2498,6 +2498,129 @@ class TestPool(base.BaseAPITest):
             persistence: None})).json['pool']
         self.assertIsNone(removed[persistence])
 
+    @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
+    def test_http_cookie_path_lifecycle(self, rpc):
+        lb = self.create_load_balancer(
+            uuidutils.generate_uuid(), provider='amphora')['loadbalancer']
+        lb_id = lb['id']
+        self.set_lb_status(lb_id)
+        args = (lb_id, 'HTTP', 'ROUND_ROBIN')
+        persistence = 'session_persistence'
+        default = {'type': 'HTTP_COOKIE'}
+        configured_path = '/api "v1" #?=\\'
+        custom = dict(default, cookie_path=configured_path)
+        cast = rpc.return_value.cast
+        capability = constants.GATEWAY_CAPABILITY_HTTP_COOKIE_PATH
+        caps_path = self.PROVIDERS_PATH + '/{}/gateway_capabilities'
+
+        self.assertNotIn(capability, self.get(
+            caps_path.format('amphora')).json['gateway_capabilities'])
+        self.create_pool(*args, session_persistence=custom, status=501)
+        self.create_pool(*args, session_persistence=dict(
+            default, cookie_path=''), status=501)
+        for settings in (default, dict(default, cookie_path='/')):
+            stock = self.create_pool(
+                *args, session_persistence=settings)['pool']
+            self.assertNotIn('cookie_path', stock[persistence])
+            self.assertNotIn('cookie_path',
+                             cast.call_args.kwargs['pool'][persistence])
+            self.set_lb_status(lb_id)
+
+        self.conf.config(group='api_settings',
+                         enabled_http_cookie_path_providers=[
+                             'amphora', 'noop_driver'])
+        self.assertIn(capability, self.get(
+            caps_path.format('amphora')).json['gateway_capabilities'])
+        self.assertNotIn(capability, self.get(
+            caps_path.format('noop_driver')).json['gateway_capabilities'])
+        self.create_pool(lb_id, 'TCP', 'ROUND_ROBIN',
+                         session_persistence=custom, status=400)
+        self.create_pool(*args, session_persistence=dict(
+            custom, type='SOURCE_IP'), status=400)
+        for invalid in (False, '/api; Secure', '/api\n', '/été', 'x' * 1025):
+            self.create_pool(*args, session_persistence=dict(
+                default, cookie_path=invalid), status=400)
+
+        created = self.create_pool(*args, session_persistence=custom)['pool']
+        path = self.POOL_PATH.format(pool_id=created['id'])
+        self.assertEqual(configured_path, created[persistence]['cookie_path'])
+        self.assertEqual(created[persistence],
+                         cast.call_args.kwargs['pool'][persistence])
+        self.assertEqual(created[persistence],
+                         self.get(path).json['pool'][persistence])
+
+        self.set_lb_status(lb_id)
+        changed = self.put(path, self._build_body({
+            persistence: {'cookie_path': ''}})).json['pool']
+        self.assertEqual('', changed[persistence]['cookie_path'])
+        self.assertEqual('', cast.call_args.kwargs['pool_updates']
+                         [persistence]['cookie_path'])
+
+        self.conf.config(group='api_settings',
+                         enabled_http_cookie_path_providers=[])
+        self.assertNotIn(capability, self.get(
+            caps_path.format('amphora')).json['gateway_capabilities'])
+        self.set_lb_status(lb_id)
+        self.put(path, self._build_body({persistence: custom}), status=501)
+        preserved = self.put(path, self._build_body({
+            persistence: default})).json['pool']
+        self.assertEqual('', preserved[persistence]['cookie_path'])
+        self.assertNotIn('cookie_path', cast.call_args.kwargs['pool_updates']
+                         [persistence])
+        self.set_lb_status(lb_id)
+        reset = self.put(path, self._build_body({
+            persistence: {'cookie_path': None}})).json['pool']
+        self.assertNotIn('cookie_path', reset[persistence])
+        self.assertIsNone(cast.call_args.kwargs['pool_updates']
+                          [persistence]['cookie_path'])
+
+        self.conf.config(group='api_settings',
+                         enabled_http_cookie_path_providers=['amphora'])
+        self.set_lb_status(lb_id)
+        reenrolled = self.put(path, self._build_body({
+            persistence: custom})).json['pool']
+        self.assertEqual(configured_path,
+                         reenrolled[persistence]['cookie_path'])
+        self.set_lb_status(lb_id)
+        removed = self.put(path, self._build_body({
+            persistence: None})).json['pool']
+        self.assertIsNone(removed[persistence])
+
+    @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
+    def test_http_cookie_path_status_is_fenced_by_exact_policy(self, _rpc):
+        self.conf.config(group='api_settings',
+                         enabled_http_cookie_path_providers=['amphora'])
+        lb = self.create_load_balancer(uuidutils.generate_uuid(),
+                                       provider='amphora')
+        lb_id = lb['loadbalancer']['id']
+        self.set_lb_status(lb_id)
+        saved_path = '/scope '
+        pool_id = self.create_pool(
+            lb_id, 'HTTP', 'ROUND_ROBIN',
+            session_persistence={'type': 'HTTP_COOKIE',
+                                 'cookie_path': saved_path})['pool']['id']
+        self.set_lb_status(lb_id)
+        pool_path = self.POOL_PATH.format(pool_id=pool_id)
+        repo = repositories.PoolRepository()
+        applied = (None, None, None, False, saved_path)
+        stale = (*applied[:-1], '/scope')
+        with db_api.session().begin() as session:
+            repo.set_http_cookie_pool_statuses(
+                session, {pool_id: applied}, failed={pool_id}, recovered=set())
+            repo.set_http_cookie_pool_statuses(
+                session, {pool_id: stale}, failed=set(), recovered={pool_id})
+        pool = self.get(pool_path).json['pool']
+        self.assertEqual(constants.ERROR, pool['provisioning_status'])
+        self.assertEqual([{'id': pool_id}], self.get(
+            self.POOLS_PATH, params={
+                'loadbalancer_id': lb_id, 'fields': 'id',
+                'provisioning_status': constants.ERROR}).json['pools'])
+        with db_api.session().begin() as session:
+            repo.set_http_cookie_pool_statuses(
+                session, {pool_id: applied}, failed=set(), recovered={pool_id})
+        pool = self.get(pool_path).json['pool']
+        self.assertEqual(constants.ACTIVE, pool['provisioning_status'])
+
     def test_legacy_http_cookie_name_visibility(self):
         pool = self.create_pool(
             self.lb_id, 'HTTP', 'ROUND_ROBIN',
@@ -2594,7 +2717,7 @@ class TestPool(base.BaseAPITest):
         pool_id = created['id']
         repo = repositories.PoolRepository()
         persisted_policy = {
-            pool_id: (name['cookie_name'], max_timeout, scope, False)}
+            pool_id: (name['cookie_name'], max_timeout, scope, False, None)}
         with db_api.session().begin() as session:
             repo.set_http_cookie_pool_statuses(
                 session, persisted_policy, failed={pool_id}, recovered=set())
@@ -2743,11 +2866,11 @@ class TestPool(base.BaseAPITest):
 
         # A late result for Session must not change the Permanent policy.
         permanent_policy = {pool_id: (named['cookie_name'], 0,
-                                      timed['cookie_scope'], True)}
+                                      timed['cookie_scope'], True, None)}
         with db_api.session().begin() as session:
             repo = repositories.PoolRepository()
             stale = {pool_id: (named['cookie_name'], 0,
-                               timed['cookie_scope'], False)}
+                               timed['cookie_scope'], False, None)}
             repo.set_http_cookie_pool_statuses(
                 session, stale, failed={pool_id}, recovered=set())
             self.assertFalse(repo.get(session, id=pool_id).session_persistence

@@ -20,6 +20,7 @@ from oslo_utils import uuidutils
 from octavia.amphorae.backends.agent import api_server
 from octavia.amphorae.backends.agent.api_server import amphora_info
 from octavia.amphorae.backends.agent.api_server import util
+from octavia.common import constants
 from octavia.common.jinja.haproxy.combined_listeners import jinja_cfg
 from octavia.tests.common import utils as test_utils
 import octavia.tests.unit.base as base
@@ -43,6 +44,11 @@ class TestAmphoraInfo(base.TestCase):
 
     def setUp(self):
         super().setUp()
+        caps = mock.patch.object(
+            amphora_info.haproxy_compatibility, 'get_haproxy_capabilities',
+            return_value={})
+        self.mock_haproxy_capabilities = caps.start()
+        self.addCleanup(caps.stop)
         self.osutils_mock = mock.MagicMock()
         self.amp_info = amphora_info.AmphoraInfo(self.osutils_mock)
         self.lvs_driver = mock.MagicMock()
@@ -141,6 +147,8 @@ class TestAmphoraInfo(base.TestCase):
         m_cpu.return_value = {'user': '252551', 'softirq': '8336',
                               'system': '52554', 'total': 7503411}
         m_pkg_version.side_effect = self._return_version
+        capability = constants.GATEWAY_CAPABILITY_HTTP_COOKIE_PATH
+        self.mock_haproxy_capabilities.return_value = {capability: True}
         mdisk_info = mock.MagicMock()
         m_os.return_value = mdisk_info
         mdisk_info.f_blocks = 34676992
@@ -167,6 +175,7 @@ class TestAmphoraInfo(base.TestCase):
                                   'used': 25718685696},
                          'haproxy_count': 5,
                          'haproxy_version': self.HAPROXY_VERSION,
+                         capability: True,
                          'hostname': 'FAKE_HOST',
                          'listeners': sorted([self.FAKE_LISTENER_ID_1,
                                               self.FAKE_LISTENER_ID_2]),

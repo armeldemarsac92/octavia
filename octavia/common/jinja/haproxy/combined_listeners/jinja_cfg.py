@@ -97,12 +97,13 @@ def _read_http_cookie_signing_key():
 
 
 def _derive_http_cookie_signing_key(key, project_id, scope, name, timeout, *,
-                                    permanent=False):
+                                    permanent=False, path_token=None):
     purpose = ('octavia-http-cookie-permanent-v1' if permanent else
                'octavia-http-cookie-v1')
-    context = json.dumps(
-        [purpose, project_id, scope, name, timeout],
-        separators=(',', ':')).encode('ascii')
+    context = [purpose, project_id, scope, name, timeout]
+    if path_token is not None:
+        context.append(path_token)
+    context = json.dumps(context, separators=(',', ':')).encode('ascii')
     digest = hmac.digest(key, context, 'sha256')
     return base64.b64encode(digest).decode('ascii')
 
@@ -138,6 +139,8 @@ _CORS_PORT = (
 # for larger configured CORS response fields.
 _HAPROXY_BUFFER_SIZE = 16384
 _HAPROXY_REWRITE_RESERVE = 1024
+# Allow for the signed value, expiry attributes, cache control and HTX blocks.
+_HTTP_COOKIE_RESPONSE_OVERHEAD = 256
 _CORS_RESPONSE_OVERHEAD = 512
 _GRPC_CONTENT_TYPE_PATTERN = (
     f'^{_HTTP_OWS}{constants.GRPC_CONTENT_TYPE}([+]{_HTTP_TOKEN})?{_HTTP_OWS}'
@@ -301,6 +304,9 @@ class JinjaTemplater:
         feature_compatibility = dict(feature_compatibility or {})
         cookie_capability = (
             constants.GATEWAY_CAPABILITY_HTTP_COOKIE_ABSOLUTE_TIMEOUT)
+        path_capability = constants.GATEWAY_CAPABILITY_HTTP_COOKIE_PATH
+        feature_compatibility[path_capability] = (
+            (amp_details or {}).get(path_capability) is True)
         if (amp_details or {}).get(cookie_capability) is True:
             feature_compatibility[cookie_capability] = functools.cache(
                 _read_http_cookie_signing_key)
@@ -334,11 +340,16 @@ class JinjaTemplater:
                 if listener['enabled']:
                     for pool in listener['pools']:
                         persistence = pool['session_persistence']
-                        if (pool['enabled'] and
-                                'absolute_timeout_us' in (persistence or {})):
+                        if not pool['enabled']:
+                            continue
+                        if pool.get('cookie_path_unavailable'):
+                            http_cookie_results[pool['id']] = constants.ERROR
+                        elif 'absolute_timeout_us' in persistence:
                             http_cookie_results[pool['id']] = (
                                 constants.ACTIVE if persistence.get(
                                     'signing_key') else constants.ERROR)
+                        elif 'cookie_path_token' in persistence:
+                            http_cookie_results[pool['id']] = constants.ACTIVE
         if (haproxy_version and loadbalancer['enabled'] and
                 not versionutils.is_compatible("2.2.0", haproxy_version,
                                                same_major=False)):
@@ -519,13 +530,22 @@ class JinjaTemplater:
                 for policies in listener.get('cors_by_backend', {}).values()
                 for _, cors in policies
             ), default=0)
-            if cors_reserve > _HAPROXY_REWRITE_RESERVE:
+            cookie_reserve = max((
+                (pool['session_persistence'] or {}).get(
+                    'cookie_response_headroom', 0)
+                for listener in loadbalancer['listeners']
+                if listener['enabled']
+                for pool in listener['pools'] if pool['enabled']
+            ), default=0)
+            headroom = max(cors_reserve, _HAPROXY_REWRITE_RESERVE)
+            headroom += cookie_reserve
+            if headroom > _HAPROXY_REWRITE_RESERVE:
                 # HAProxy clamps maxrewrite to half of bufsize. Round up
                 # to the 64-bit HAProxy buffer alignment before calculating.
-                reserve = (cors_reserve + 15) // 16 * 16
-                jinja_dict['cors_buffer_tuning'] = {
-                    'size': max(_HAPROXY_BUFFER_SIZE - _HAPROXY_REWRITE_RESERVE
-                                + reserve, 2 * reserve),
+                reserve = (headroom + 15) // 16 * 16
+                readable_size = _HAPROXY_BUFFER_SIZE - _HAPROXY_REWRITE_RESERVE
+                jinja_dict['buffer_tuning'] = {
+                    'size': max(readable_size + reserve, 2 * reserve),
                     'rewrite_reserve': reserve,
                 }
         try:
@@ -808,6 +828,22 @@ class JinjaTemplater:
             rendered_pool = self._transform_pool(
                 pool, feature_compatibility, tls_enabled,
                 pool_tls_certs=pool_certs)
+            if 'cookie_path_token' in rendered_pool['session_persistence']:
+                removed = (constants.PENDING_DELETE, constants.DELETED)
+                cookie_path_active = (
+                    active and rendered_pool['enabled'] and
+                    listener.protocol not in constants.LVS_PROTOCOLS and
+                    listener.provisioning_status not in removed and
+                    pool.protocol == constants.PROTOCOL_HTTP and
+                    pool.provisioning_status not in removed)
+                path_supported = feature_compatibility.get(
+                    constants.GATEWAY_CAPABILITY_HTTP_COOKIE_PATH)
+                if not (cookie_path_active and path_supported):
+                    # Render the pool without affinity so a topology that
+                    # cannot serve this path can still withdraw old policies.
+                    rendered_pool['session_persistence'] = ''
+                    if cookie_path_active:
+                        rendered_pool['cookie_path_unavailable'] = True
             if tcp_tls_termination and not pool.enabled:
                 # Keep the matched route closed without falling back.
                 rendered_pool['closed'] = True
@@ -1237,12 +1273,15 @@ class JinjaTemplater:
                 pool.session_persistence, feature_compatibility)
             ret_value['session_persistence'] = persistence
             name = persistence['cookie_name']
+            path_token = persistence.get('cookie_path_token', '')
             if (persistence['type'] ==
-                    constants.SESSION_PERSISTENCE_HTTP_COOKIE and name):
+                    constants.SESSION_PERSISTENCE_HTTP_COOKIE and
+                    (name or path_token)):
                 for member in members:
-                    member['persistence_cookie'] = _http_cookie_member_token(
+                    token = _http_cookie_member_token(
                         pool.project_id, name, member['address'],
-                        member['protocol_port'])
+                        member['protocol_port']) if name else member['id']
+                    member['persistence_cookie'] = path_token + token
             timeout = getattr(pool.session_persistence,
                               'cookie_absolute_timeout_ms', None)
             scope = getattr(pool.session_persistence, 'cookie_scope', None)
@@ -1318,7 +1357,8 @@ class JinjaTemplater:
             if key is not None:
                 persistence['signing_key'] = _derive_http_cookie_signing_key(
                     key, pool.project_id, scope, name, timeout,
-                    permanent=permanent)
+                    permanent=permanent,
+                    path_token=persistence.get('cookie_path_token'))
 
     @staticmethod
     def _transform_session_persistence(persistence, feature_compatibility):
@@ -1327,14 +1367,34 @@ class JinjaTemplater:
             be processed by the templating system
         """
         name = persistence.cookie_name
+        rendered = {'type': persistence.type, 'cookie_name': name}
         if persistence.type == constants.SESSION_PERSISTENCE_HTTP_COOKIE:
             if getattr(persistence, 'http_cookie_name_enabled', False) is True:
                 if not validate.is_valid_http_cookie_name(name):
                     raise exceptions.ValidationException(detail=_(
                         'Invalid configured HTTP_COOKIE name.'))
             else:
-                name = None
-        return {'type': persistence.type, 'cookie_name': name}
+                rendered['cookie_name'] = None
+            path = getattr(persistence, 'cookie_path', None)
+            if path not in (None, constants.HTTP_COOKIE_DEFAULT_PATH):
+                if not validate.is_valid_http_cookie_path(path):
+                    raise exceptions.ValidationException(detail=_(
+                        'Invalid persisted HTTP_COOKIE path.'))
+                # Decode after configuration parsing. Double backslashes for
+                # the regex replacement performed after format expansion.
+                replacement = path.replace('\\', '\\\\').encode('ascii')
+                rendered['cookie_path_replacement'] = (
+                    base64.b64encode(replacement).decode('ascii'))
+                # The prefix distinguishes cookies for this path from stored
+                # cookies of the same name issued with earlier paths.
+                rendered['cookie_path_token'] = hashlib.sha256(
+                    path.encode('ascii')).hexdigest()[:32]
+                rendered['cookie_path_trailing_space'] = path.endswith(' ')
+                cookie_name = rendered['cookie_name'] or 'SRV'
+                rendered['cookie_response_headroom'] = (
+                    len(path) + len(cookie_name) +
+                    _HTTP_COOKIE_RESPONSE_OVERHEAD)
+        return rendered
 
     @staticmethod
     def _transform_member(member, feature_compatibility):

@@ -133,6 +133,11 @@ api_opts = [
                 help=_('Providers whose regional fleets support custom names '
                        'for load balancer-generated HTTP persistence cookies. '
                        'Enable after upgrading all API and worker services.')),
+    cfg.ListOpt('enabled_http_cookie_path_providers', default=[],
+                help=_('Providers whose regional fleets support custom paths '
+                       'for load balancer-generated HTTP persistence cookies. '
+                       'Enable after upgrading the database, API, workers '
+                       'and qualifying eligible Amphora images.')),
     cfg.ListOpt('enabled_http_cookie_absolute_timeout_providers', default=[],
                 help=_('Providers with a qualified HTTP session cookie '
                        'absolute timeout profile. Enable after updating the '

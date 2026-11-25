@@ -243,6 +243,20 @@ setting it to ``null`` in an ``HTTP_COOKIE`` object uses the default name
 preserves the current settings. Setting the object to ``null`` removes session
 persistence.
 
+For an HTTP pool, a provider advertising ``http_cookie_path_v1`` accepts
+``cookie_path`` for any generated ``HTTP_COOKIE``, including one using the
+default cookie name. The API uses the string exactly as supplied, including
+an empty string. A new pool with no configured path uses ``Path=/``.
+Omitting the field on an update preserves an existing path while the
+persistence type stays the same. Set the field to ``null`` or ``/`` to
+restore the root path, including after regional discovery is disabled.
+An update that supplies only ``cookie_path`` keeps an enrolled cookie name.
+Pool GET includes ``cookie_path`` when a custom path is configured.
+When the provider cannot apply a configured path across the Amphorae,
+the affected pool reports ``ERROR``. After reloading, Amphorae balance
+traffic for the pool without cookie affinity until the whole topology
+supports the path again.
+
 A provider advertising ``http_cookie_absolute_timeout_v1`` also accepts
 ``cookie_absolute_timeout_ms`` and ``cookie_scope`` together on a named
 ``HTTP_COOKIE`` HTTP pool. By default the cookie lasts for the browser
@@ -261,8 +275,8 @@ disabled.
 
 A provider advertising ``http_cookie_permanent_v1`` accepts the boolean
 ``cookie_permanent`` with that named cookie, timeout and scope. With
-``true``, a newly issued cookie has ``Path=/`` and ``Max-Age`` equal to
-the timeout rounded up to a whole second. A zero timeout uses
+``true``, a newly issued cookie has the configured path and ``Max-Age``
+equal to the timeout rounded up to a whole second. A zero timeout uses
 ``Max-Age=0``. The load balancer still checks the exact configured
 millisecond timeout. Reusing a valid cookie for the same member leaves
 its original expiry in place. Changing the mode causes existing cookies
@@ -283,6 +297,7 @@ Pool Session Persistence Object
 
    - type: session_persistence_type
    - cookie_name: session_persistence_cookie
+   - cookie_path: session_persistence_cookie_path
    - cookie_absolute_timeout_ms: session_persistence_cookie_absolute_timeout_ms
    - cookie_scope: session_persistence_cookie_scope
    - cookie_permanent: session_persistence_cookie_permanent

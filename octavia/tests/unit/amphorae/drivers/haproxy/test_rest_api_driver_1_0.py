@@ -496,7 +496,7 @@ class TestHaproxyAmphoraLoadBalancerDriverTest(base.TestCase):
             listeners=[listener], amphorae=[primary, secondary])
         client = self.driver.clients[API_VERSION]
         published_in = session().begin().__enter__()
-        policy = {pool.id: ('gw', 1500, scope, True)}
+        policy = {pool.id: ('gw', 1500, scope, True, None)}
         rendered_states = {primary.id: constants.ERROR,
                            secondary.id: constants.ACTIVE}
 
@@ -540,6 +540,71 @@ class TestHaproxyAmphoraLoadBalancerDriverTest(base.TestCase):
         lb.amphorae = [retiring, primary, secondary]
         client.reload_listener.side_effect = [None, RuntimeError()]
         self.assertRaises(RuntimeError, self.driver.update, lb)
+        status.assert_not_called()
+
+    @mock.patch('octavia.db.api.session')
+    @mock.patch('octavia.db.repositories.PoolRepository.'
+                'set_http_cookie_pool_statuses')
+    def test_cookie_path_requires_current_confirmation_from_both_peers(
+            self, status, session):
+        peers = [data_models.Amphora(id=role, role=role,
+                                     status=constants.AMPHORA_ALLOCATED)
+                 for role in (constants.ROLE_MASTER, constants.ROLE_BACKUP)]
+        for peer in peers:
+            peer.api_version = API_VERSION
+        persistence = data_models.SessionPersistence(
+            type=constants.SESSION_PERSISTENCE_HTTP_COOKIE, cookie_path='')
+        pool = data_models.Pool(id='pool', protocol=constants.PROTOCOL_HTTP,
+                                enabled=True, session_persistence=persistence)
+        listener = data_models.Listener(id='http', enabled=True, pools=[pool],
+                                        protocol=constants.PROTOCOL_HTTP)
+        lb = data_models.LoadBalancer(
+            id='lb', enabled=True, topology=constants.TOPOLOGY_ACTIVE_STANDBY,
+            listeners=[listener], amphorae=peers)
+        capability = constants.GATEWAY_CAPABILITY_HTTP_COOKIE_PATH
+        client = self.driver.clients[API_VERSION]
+        published_in = session().begin().__enter__()
+        policy = {pool.id: (None, None, None, False, '')}
+        render = self.driver.jinja_combo.build_config
+
+        def build_config(amp_details, http_cookie_results=None, **kwargs):
+            if http_cookie_results is not None:
+                self.assertEqual(2, client.get_details.call_count)
+                http_cookie_results[pool.id] = (
+                    constants.ACTIVE if amp_details.get(capability) is True
+                    else constants.ERROR)
+            return 'config'
+
+        render.side_effect = build_config
+        yes = {capability: True}
+        client.get_details.side_effect = [yes, yes]
+        self.driver.update(lb)
+        status.assert_called_once_with(
+            published_in, policy, failed=set(), recovered={pool.id})
+
+        status.reset_mock()
+        render.reset_mock()
+        client.get_details.reset_mock()
+        client.get_details.side_effect = [yes, {}]
+        self.driver.update(lb)
+        for call in render.call_args_list:
+            self.assertIs(call.kwargs['amp_details'][capability], False)
+        status.assert_called_once_with(
+            published_in, policy, failed={pool.id}, recovered=set())
+
+        status.reset_mock()
+        client.get_details.reset_mock()
+        client.get_details.side_effect = [yes, yes]
+        client.reload_listener.side_effect = [RuntimeError(), RuntimeError()]
+        self.assertRaises(RuntimeError, self.driver.update, lb)
+        status.assert_called_once_with(
+            published_in, policy, failed={pool.id}, recovered=set())
+
+        status.reset_mock()
+        client.get_details.side_effect = [{}, {}]
+        client.reload_listener.side_effect = None
+        persistence.cookie_path = None
+        self.driver.update(lb)
         status.assert_not_called()
 
     @mock.patch('octavia.db.api.session')

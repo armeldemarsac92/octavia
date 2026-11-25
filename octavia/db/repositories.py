@@ -1163,19 +1163,20 @@ class PoolRepository(BaseRepository):
         persistence = models.SessionPersistence
         pool = self.model_class
         for pool_id in sorted(failed | recovered):
-            name, timeout, scope, permanent = policies[pool_id]
-            session.query(persistence).filter(
+            query = session.query(persistence).filter(
                 persistence.pool_id == pool_id,
-                persistence.cookie_name == name,
-                persistence.cookie_absolute_timeout_ms == timeout,
-                persistence.cookie_scope == scope,
-                persistence.cookie_permanent == permanent,
                 persistence.pool.has(and_(
                     pool.enabled.is_(True),
                     pool.provisioning_status.notin_(
-                        (consts.PENDING_DELETE, consts.DELETED))))).update(
-                            {'cookie_absolute_timeout_error':
-                             pool_id in failed}, synchronize_session=False)
+                        (consts.PENDING_DELETE, consts.DELETED)))))
+            row = query.populate_existing().with_for_update().one_or_none()
+            if row is None:
+                continue
+            # Path and name comparisons must preserve case and whitespace.
+            current = (row.cookie_name, row.cookie_absolute_timeout_ms,
+                       row.cookie_scope, row.cookie_permanent, row.cookie_path)
+            if current == policies[pool_id]:
+                row.cookie_absolute_timeout_error = pool_id in failed
 
     def mark_active(self, session, id):
         if self.batch_owns_graph(session, id):

@@ -143,9 +143,11 @@ class HaproxyAmphoraLoadBalancerDriver(
         fallback, withdrawn = self._frontend_fallback_listeners(loadbalancer)
         with (
             self._otlp_render_results(loadbalancer) as tracing_options,
-            self._http_cookie_render_results(loadbalancer) as cookie_options
+            self._http_cookie_render_results(
+                loadbalancer, target_id=amphora.id) as cookie_options
         ):
-            if opted_in or fallback or withdrawn:
+            if (opted_in or fallback or withdrawn or
+                    self._has_active_http_cookie_path(loadbalancer)):
                 peers = {amp.id: amp for amp in loadbalancer.amphorae
                          if amp.status != consts.DELETED}
                 peers[amphora.id] = amphora
@@ -184,25 +186,17 @@ class HaproxyAmphoraLoadBalancerDriver(
                 response.headers.get(header) == publication)
 
     @contextlib.contextmanager
-    def _http_cookie_render_results(self, loadbalancer):
+    def _http_cookie_render_results(self, loadbalancer, *, target_id=None):
         policies = {}
-        if loadbalancer.enabled:
-            for listener in loadbalancer.listeners:
-                if not listener.enabled or listener.provisioning_status in (
-                        consts.PENDING_DELETE, consts.DELETED):
-                    continue
-                for pool in listener.pools:
-                    persistence = pool.session_persistence
-                    timeout = getattr(
-                        persistence, 'cookie_absolute_timeout_ms', None)
-                    if (pool.enabled and type(timeout) is int and
-                            pool.provisioning_status not in (
-                                consts.PENDING_DELETE, consts.DELETED)):
-                        policies[pool.id] = (
-                            persistence.cookie_name, timeout,
-                            persistence.cookie_scope,
-                            getattr(persistence, 'cookie_permanent',
-                                    False) is True)
+        for pool in self._active_listener_pools(loadbalancer):
+            persistence = pool.session_persistence
+            timeout = getattr(persistence, 'cookie_absolute_timeout_ms', None)
+            if type(timeout) is int or self._has_custom_cookie_path(pool):
+                policies[pool.id] = (
+                    persistence.cookie_name, timeout,
+                    persistence.cookie_scope,
+                    getattr(persistence, 'cookie_permanent', False) is True,
+                    getattr(persistence, 'cookie_path', None))
         if not policies:
             yield {}
             return
@@ -214,10 +208,10 @@ class HaproxyAmphoraLoadBalancerDriver(
             completed = True
         finally:
             self._publish_http_cookie_results(
-                loadbalancer, policies, votes, completed)
+                loadbalancer, policies, votes, completed, target_id)
 
     def _publish_http_cookie_results(self, loadbalancer, policies, votes,
-                                     completed):
+                                     completed, target_id):
         # An acknowledged degradation is observable even if a subsequent
         # peer fails. Recovery requires every member of the allocated topology.
         expected = set()
@@ -236,6 +230,16 @@ class HaproxyAmphoraLoadBalancerDriver(
             pool_id for pool_id in policies.keys() - failed
             if expected and all(votes.get(amp_id, {}).get(pool_id) ==
                                 consts.ACTIVE for amp_id in expected)}
+        # A full render needs every peer to acknowledge the scoped cookie.
+        # A single-peer maintenance render preflights the entire topology
+        # but can only confirm its own reload and cannot recover both peers.
+        requested = {target_id} if target_id else expected
+        failed.update(
+            pool_id for pool_id, policy in policies.items()
+            if policy[-1] not in (None, consts.HTTP_COOKIE_DEFAULT_PATH) and
+            (not completed or not requested or
+             any(votes.get(amp_id, {}).get(pool_id) != consts.ACTIVE
+                 for amp_id in requested)))
         if failed or recovered:
             with db_api.session().begin() as session:
                 repo.PoolRepository().set_http_cookie_pool_statuses(
@@ -599,7 +603,9 @@ class HaproxyAmphoraLoadBalancerDriver(
             self._otlp_render_results(loadbalancer) as tracing_options,
             self._http_cookie_render_results(loadbalancer) as cookie_options
         ):
-            if (opted_in or fallback or withdrawn) and amphorae:
+            if (amphorae and
+                    (opted_in or fallback or withdrawn or
+                     self._has_active_http_cookie_path(loadbalancer))):
                 recovered = self._update_protected_tls_listeners(
                     loadbalancer, amphorae, amphorae, protected, fallback,
                     withdrawn, l7policy_activation=l7policy_activation,
@@ -644,7 +650,9 @@ class HaproxyAmphoraLoadBalancerDriver(
         tracing_pair = (
             loadbalancer.topology == consts.TOPOLOGY_ACTIVE_STANDBY and
             bool(self._otlp_render_targets(loadbalancer)))
-        coordinated = opted_in or bool(fallback or withdrawn) or tracing_pair
+        coordinated = (opted_in or bool(fallback or withdrawn) or
+                       tracing_pair or
+                       self._has_active_http_cookie_path(loadbalancer))
         if coordinated and amphora_index == 0:
             peers = [amp for amp in loadbalancer.amphorae
                      if amp.status != consts.DELETED]
@@ -665,6 +673,33 @@ class HaproxyAmphoraLoadBalancerDriver(
                     unreachable=unreachable, coordinating_failover=True,
                     **tracing_options, **cookie_state)
         return coordinated
+
+    @staticmethod
+    def _active_listener_pools(loadbalancer):
+        if not loadbalancer.enabled:
+            return
+        removed = (consts.PENDING_DELETE, consts.DELETED)
+        for listener in loadbalancer.listeners:
+            if (not listener.enabled or
+                    listener.provisioning_status in removed or
+                    listener.protocol in consts.LVS_PROTOCOLS):
+                continue
+            yield from (pool for pool in listener.pools if
+                        pool.enabled and
+                        pool.provisioning_status not in removed)
+
+    @staticmethod
+    def _has_custom_cookie_path(pool):
+        persistence = pool.session_persistence
+        return (pool.protocol == consts.PROTOCOL_HTTP and
+                persistence is not None and
+                persistence.type == consts.SESSION_PERSISTENCE_HTTP_COOKIE and
+                getattr(persistence, 'cookie_path', None) not in
+                (None, consts.HTTP_COOKIE_DEFAULT_PATH))
+
+    def _has_active_http_cookie_path(self, loadbalancer):
+        return any(self._has_custom_cookie_path(pool)
+                   for pool in self._active_listener_pools(loadbalancer))
 
     @staticmethod
     def _backend_tls_pools(loadbalancer):
@@ -708,9 +743,27 @@ class HaproxyAmphoraLoadBalancerDriver(
             coordinating_failover=False, l7policy_restoration=False,
             otlp_observed=None, tcp_batch_configs=None,
             http_cookie_observed=None):
-        # Preflight the pair and stage the TLS material before any reload.
+        # Preflight the pair before staging material or reloading either peer.
+        probe_targets = {
+            amp.id: amp for amp in (peers if protected or fallback
+                                    else amphorae)}
+        path_required = self._has_active_http_cookie_path(loadbalancer)
+        path_peers = {}
+        complete_topology = False
+        if path_required:
+            path_peers = {amp.id: amp for amp in amphorae}
+            try:
+                path_peers.update(
+                    (amp.id, amp) for amp in
+                    self._allocated_amphorae(loadbalancer))
+                complete_topology = True
+            except driver_except.ListenerProvisioningError:
+                LOG.warning('Could not confirm the Amphora topology for '
+                            'HTTP cookie paths on load balancer %s.',
+                            loadbalancer.id)
+            probe_targets.update(path_peers)
         details = {}
-        for amphora in peers if protected or fallback else amphorae:
+        for amphora in probe_targets.values():
             if amphora.id in unreachable:
                 details[amphora.id] = {}
                 continue
@@ -719,10 +772,22 @@ class HaproxyAmphoraLoadBalancerDriver(
                 client = self.clients[amphora.api_version]
                 detail = client.get_details(amphora, timeout_dict=timeout_dict)
                 details[amphora.id] = (
-                    detail if isinstance(detail, dict) else {})
+                    dict(detail) if isinstance(detail, dict) else {})
             except (driver_except.AmphoraDriverError, exc.APIException,
                     requests.RequestException, ValueError):
                 details[amphora.id] = {}
+
+        if path_required:
+            capability = consts.GATEWAY_CAPABILITY_HTTP_COOKIE_PATH
+            unsupported = [amp_id for amp_id in path_peers
+                           if details[amp_id].get(capability) is not True]
+            if unsupported:
+                LOG.warning('Could not confirm HTTP cookie path support on '
+                            'amphorae %s for load balancer %s.',
+                            unsupported, loadbalancer.id)
+            supported = complete_topology and not unsupported
+            for detail in details.values():
+                detail[capability] = supported
 
         frontend_certs, closed_frontend = self._stage_frontend_client_auth(
             loadbalancer.id, amphorae, peers, details, fallback)

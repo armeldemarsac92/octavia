@@ -194,6 +194,11 @@ bind {% if local_socket %}{{ local_socket }} accept-proxy{% else %}{{ lb_vip_add
 {% endmacro %}
 
 
+{% macro joined_request_header(name, separator) -%}
+"req.hdrs,regsub(\"(^|[\x0d\x0a]+)({{ name }}: ([^\x0d\x0a]*)|[^\x0d\x0a]*)\",\"\\1\\3\",gi),regsub(\"^[\x0d\x0a]+|[\x0d\x0a]+\x24\",\"\",g),regsub(\"[\x0d\x0a]+\",\"{{ separator }}\",g)"
+{%- endmacro %}
+
+
 {% macro cors_request(policies) %}
     {% if policies %}
     acl octavia_cors_preflight var(txn.octavia_cors_preflight) -m bool
@@ -228,7 +233,7 @@ bind {% if local_socket %}{{ local_socket }} accept-proxy{% else %}{{ lb_vip_add
     http-request set-var(txn.octavia_cors_headers) req.fhdr(access-control-request-headers) if {{ capture }} { req.fhdr_cnt(access-control-request-headers) eq 1 }
     {# Extract and join repeated field lines. The config parser decodes the
        CR/LF escapes in outer double quotes for both libc and PCRE2 builds. #}
-    http-request set-var(txn.octavia_cors_headers) "req.hdrs,regsub(\"(^|[\x0d\x0a]+)(access-control-request-headers: ([^\x0d\x0a]*)|[^\x0d\x0a]*)\",\"\\1\\3\",gi),regsub(\"^[\x0d\x0a]+|[\x0d\x0a]+\x24\",\"\",g),regsub(\"[\x0d\x0a]+\",\", \",g)" if {{ capture }} { req.fhdr_cnt(access-control-request-headers) gt 1 }
+    http-request set-var(txn.octavia_cors_headers) {{ joined_request_header('access-control-request-headers', ', ') }} if {{ capture }} { req.fhdr_cnt(access-control-request-headers) gt 1 }
     http-request unset-var(txn.octavia_cors_headers) if {{ capture }} !{ var(txn.octavia_cors_headers) -m reg -i {{ cors.header_list_pattern|safe }} }
     http-request unset-var(txn.octavia_cors_headers) if {{ capture }} { var(txn.octavia_cors_headers) -m reg ",[\x09 ]*\x24" }
             {% if cors.headers_wildcard and cors.credentials %}
@@ -959,6 +964,20 @@ listen octavia-mirror-{{ pool.id }}
 {% endmacro %}
 
 
+{% macro select_scoped_http_cookie(name, value_pattern) %}
+    {% set escaped_name = name|replace('.', '[.]') %}
+    {% set pair = escaped_name ~ '[[:blank:]]*=[[:blank:]]*(' ~ value_pattern ~ ')[[:blank:]]*' %}
+    acl octavia_cookie_repeated req.cook_cnt({{ name }}) gt 1
+    acl octavia_cookie_scoped var(txn.octavia_cookie_headers) -m reg '(^|;)[[:blank:]]*{{ pair }}(;|$)'
+    acl octavia_cookie_scope_repeated var(txn.octavia_cookie_headers) -m reg '(^|;)[[:blank:]]*{{ pair }};([^;]*;)*[[:blank:]]*{{ pair }}(;|$)'
+    http-request set-var(txn.octavia_cookie_headers) req.fhdr(cookie) if octavia_cookie_repeated { req.fhdr_cnt(cookie) eq 1 }
+    {# Join repeated Cookie fields before selecting the single cookie for this
+       path. The literal escapes are parsed by HAProxy before the regex. #}
+    http-request set-var(txn.octavia_cookie_headers) {{ joined_request_header('cookie', '; ') }} if octavia_cookie_repeated { req.fhdr_cnt(cookie) gt 1 }
+    http-request set-var(txn.octavia_cookie) 'var(txn.octavia_cookie_headers),regsub("^([^;]*;)*[[:blank:]]*{{ pair }}(;.*|$)$","\2")' if octavia_cookie_scoped !octavia_cookie_scope_repeated
+{% endmacro %}
+
+
 {% macro absolute_http_cookie(pool) %}
     {% set cookie = pool.session_persistence %}
     {% set name = cookie.cookie_name %}
@@ -968,13 +987,17 @@ listen octavia-mirror-{{ pool.id }}
     {% else %}
         {% set attributes = 'path=/' %}
     {% endif %}
+    {% set value_pattern = 'v1[.]' ~ cookie.get('cookie_path_token', '') ~ '[0-9a-f]{32}[.][1-9][0-9]{0,17}[.][A-Za-z0-9_-]{43}' %}
     acl octavia_cookie_unique req.cook_cnt({{ name }}) eq 1
-    acl octavia_cookie_format var(txn.octavia_cookie) -m reg '^v1[.][0-9a-f]{32}[.][1-9][0-9]{0,17}[.][A-Za-z0-9_-]{43}$'
+    acl octavia_cookie_format var(txn.octavia_cookie) -m reg '^{{ value_pattern }}$'
     acl octavia_cookie_age_valid var(txn.octavia_cookie_age) -m int ge 0
     acl octavia_cookie_age_below_limit var(txn.octavia_cookie_age) -m int lt {{ cookie.absolute_timeout_us }}
     acl octavia_cookie_authenticated var(txn.octavia_cookie_payload),hmac(sha256,txn.octavia_cookie_signing_key),ub64enc,secure_memcmp(txn.octavia_cookie_tag) -m bool
     http-request set-var(txn.octavia_cookie_signing_key) str({{ cookie.signing_key }})
     http-request set-var(txn.octavia_cookie) req.cook({{ name }}) if octavia_cookie_unique
+    {% if cookie.cookie_path_token is defined %}
+{{ select_scoped_http_cookie(name, value_pattern) -}}
+    {% endif %}
     http-request set-var(txn.octavia_cookie_issued) var(txn.octavia_cookie),word(3,.) if octavia_cookie_format
     http-request set-var(txn.octavia_cookie_age) date(0,us),sub(txn.octavia_cookie_issued) if octavia_cookie_format
     http-request set-var(txn.octavia_cookie_tag) var(txn.octavia_cookie),word(4,.) if octavia_cookie_age_valid octavia_cookie_age_below_limit
@@ -1001,6 +1024,15 @@ listen octavia-mirror-{{ pool.id }}
     http-after-response set-var(txn.octavia_cookie_out) var(txn.octavia_cookie) if octavia_cookie_marker !{ var(txn.octavia_cookie_issue) -m found } { var(txn.octavia_cookie_member) -m found }
     {% endif %}
     http-after-response replace-header Set-Cookie '^{{ escaped_name }}=.*$' "{{ name }}=%[var(txn.octavia_cookie_out)]; {{ attributes }}" if octavia_cookie_marker { var(txn.octavia_cookie_out) -m found }
+{% endmacro %}
+
+
+{% macro http_cookie_path(cookie) %}
+    {% set name = (cookie.cookie_name or 'SRV')|replace('.', '[.]') %}
+    {% set replacement = cookie.cookie_path_replacement %}
+    {# The native and signed cookies have a single default Path at this stage.
+       A delimiter keeps a final space within the field for the HTTP/2 mux. #}
+    http-after-response replace-header Set-Cookie '^({{ name }}=.*; [Pp]ath=)/(; Max-Age=[0-9]+)?$' '\1{% if replacement %}%[str({{ replacement }}),b64dec]{% endif %}\2{% if cookie.cookie_path_trailing_space %};{% endif %}'
 {% endmacro %}
 
 
@@ -1035,7 +1067,11 @@ backend {{ pool.id }}:{{ listener.id }}
     {% endif %}
     {% set cors = listener.get('cors_by_backend', {}).get(('pool', pool.id), []) %}
 {{ cors_request(cors) -}}
-    {% set reserved_cookie = pool.session_persistence.cookie_name if pool.session_persistence.absolute_timeout_us is defined else none %}
+    {% set cookie = pool.session_persistence %}
+    {% set reserved_cookie = cookie.cookie_name if cookie.absolute_timeout_us is defined else none %}
+    {% if cookie.cookie_path_replacement is defined %}
+        {% set reserved_cookie = cookie.cookie_name or 'SRV' %}
+    {% endif %}
 {{ policy_response_headers(listener, 'pool', pool.id, reserved_cookie) -}}
 {{ cors_response(cors) -}}
     {% for policy_id, args in listener.get('http_request_policies_by_pool', {}).get(pool.id, []) %}
@@ -1146,6 +1182,9 @@ backend {{ pool.id }}:{{ listener.id }}
     timeout server {{ listener.timeout_member_data }}
     {% if pool.session_persistence.signing_key and pool.members %}
 {{ absolute_http_cookie(pool) -}}
+    {% endif %}
+    {% if cookie.cookie_path_replacement is defined %}
+{{ http_cookie_path(cookie) -}}
     {% endif %}
     {% for member in pool.members %}
         {{- member_macro(constants, lib_consts, pool, member) -}}

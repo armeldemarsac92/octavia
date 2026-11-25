@@ -2926,6 +2926,32 @@ class TestLoadBalancerGraph(base.BaseAPITest):
     def _build_body(self, json):
         return {self.root_tag: json}
 
+    @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.'
+                'AmphoraProviderDriver.loadbalancer_create', autospec=True)
+    def test_graph_create_with_http_cookie_path(self, driver_create):
+        persistence = 'session_persistence'
+        pool = {
+            'name': 'affinity',
+            'protocol': 'HTTP',
+            'lb_algorithm': 'ROUND_ROBIN',
+            persistence: {'type': 'HTTP_COOKIE', 'cookie_path': ''}}
+        body = self._build_body({
+            'vip_subnet_id': uuidutils.generate_uuid(),
+            'project_id': self._project_id,
+            'provider': 'amphora',
+            'pools': [pool]})
+
+        self.post(self.LBS_PATH, body, status=501)
+        self.conf.config(group='api_settings',
+                         enabled_http_cookie_path_providers=['amphora'])
+        created = self.post(self.LBS_PATH, body).json['loadbalancer']
+        driver_pool = driver_create.call_args.args[1].pools[0]
+        self.assertEqual('', driver_pool.session_persistence['cookie_path'])
+        pool_id = created['pools'][0]['id']
+        path = self.POOL_PATH.format(pool_id=pool_id)
+        self.assertEqual('', self.get(path).json['pool']
+                         [persistence]['cookie_path'])
+
     def _assert_graphs_equal(self, expected_graph, observed_graph):
         observed_graph_copy = copy.deepcopy(observed_graph)
         del observed_graph_copy['created_at']
