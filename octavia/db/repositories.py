@@ -2913,7 +2913,8 @@ class L7PolicyRepository(BaseRepository):
     def get_active_request_transforms(
             self, session, *, transform, listener_id=None,
             load_balancer_id=None, reopening=None, restoring_pool=None,
-            removed_pool=None, activating_closed_pool=None):
+            removed_pool=None, activating_closed_pool=None,
+            excluded_grpc_rule_id=None):
         """Read request transforms with a predicate and forwarding target.
 
         Use current reads inside the load balancer provisioning lock.
@@ -2925,6 +2926,7 @@ class L7PolicyRepository(BaseRepository):
         target = models.L7PolicyTarget
         cors = transform == 'request_cors'
         retry_backoff = transform == 'http_retry_backoff'
+        binary_grpc = transform == 'grpc_binary_request_metadata'
         if activating_closed_pool is not None:
             if not cors:
                 return []
@@ -2944,6 +2946,29 @@ class L7PolicyRepository(BaseRepository):
                 policy.action == consts.L7POLICY_ACTION_WEIGHTED_TARGETS,
                 policy._targets.any(
                     active_target & target.request_filters.isnot(None)))
+        elif binary_grpc:
+            rule = models.L7Rule
+            native = (rule.enabled.is_(True) &
+                      (rule.type == consts.L7RULE_TYPE_GRPC_CONTENT_TYPE) &
+                      rule.provisioning_status.notin_(
+                          (consts.PENDING_DELETE, consts.DELETED)))
+            if excluded_grpc_rule_id is not None:
+                native &= rule.id != excluded_grpc_rule_id
+            weighted = policy.action == consts.L7POLICY_ACTION_WEIGHTED_TARGETS
+            redirect = (
+                (policy.action == consts.L7POLICY_ACTION_REDIRECT_TO_POOL) &
+                self._has_redirect_pool(pool))
+            mirrored = self._active_request_mirrors(
+                restoring_pool=restoring_pool, removed_pool=removed_pool)
+            query = (
+                query.add_columns(policy.request_header_operations,
+                                  target.request_filters)
+                .outerjoin(target, (policy.id == target.l7policy_id) &
+                           weighted & active_target)
+                .filter(policy.l7rules.any(native),
+                        (((target.position.isnot(None) | redirect | mirrored) &
+                          policy.request_header_operations.isnot(None)) |
+                         target.request_filters.isnot(None))))
         else:
             weighted = policy.action == consts.L7POLICY_ACTION_WEIGHTED_TARGETS
             if cors:
@@ -2967,10 +2992,17 @@ class L7PolicyRepository(BaseRepository):
         if reopening != 'load_balancer':
             query = query.join(listener.load_balancer).filter(
                 lb.enabled.is_(True))
-        return [row for row in query.with_for_update().all()
+        # PostgreSQL cannot lock the nullable side of the target join.
+        rows = query.with_for_update(of=policy if binary_grpc else None).all()
+        return [row for row in rows
                 if self._in_https_section(row) and
                 (not retry_backoff or
-                 'backoff_ms' in row.http_request_policy.get('retry', {}))]
+                 'backoff_ms' in row.http_request_policy.get('retry', {})) and
+                (not binary_grpc or validate.grpc_binary_metadata_lists(
+                    row.request_header_operations) or
+                 validate.grpc_binary_metadata_lists(
+                    (row.request_filters or {}).get(
+                        'request_header_operations')))]
 
     def get_transform_exposed_by_policy(
             self, session, *, transform, policy_id=None, disabling_pool=None,

@@ -240,6 +240,14 @@ def gateway_capabilities(driver):
     if (driver.name in api_settings.enabled_grpc_content_type_providers and
             getattr(driver, 'supports_grpc_content_type', False) is True):
         capabilities.append(constants.GATEWAY_CAPABILITY_GRPC_CONTENT_TYPE)
+        request_filters = (
+            constants.GATEWAY_CAPABILITY_REQUEST_HEADER_OPERATIONS,
+            constants.GATEWAY_CAPABILITY_WEIGHTED_TARGET_FILTERS)
+        if (getattr(driver, 'supports_grpc_binary_request_metadata',
+                    False) is True and
+                any(feature in capabilities for feature in request_filters)):
+            capabilities.append(
+                constants.GATEWAY_CAPABILITY_GRPC_BINARY_REQUEST_METADATA)
         if (constants.GATEWAY_CAPABILITY_RESPONSE_HEADER_OPERATIONS in
                 capabilities and getattr(
                     driver, 'supports_grpc_binary_response_metadata',
@@ -555,6 +563,35 @@ def require_weighted_target_request_filters(driver, protocol):
                 'for this provider.'))
 
 
+def require_grpc_binary_request_metadata(driver, protocol):
+    validate.validate_header_protocol(protocol)
+    if (constants.GATEWAY_CAPABILITY_GRPC_BINARY_REQUEST_METADATA not in
+            gateway_capabilities(driver)):
+        raise exceptions.ProviderUnsupportedOptionError(
+            prov=driver.name, user_msg=_(
+                'Binary gRPC request metadata lists are unavailable for '
+                'this provider.'))
+
+
+def require_grpc_request_metadata(driver, protocol, request, targets):
+    if (validate.grpc_binary_metadata_lists(request) or
+            any(validate.grpc_binary_metadata_lists(
+                target.get('request_header_operations'))
+                for target in targets or [])):
+        require_grpc_binary_request_metadata(driver, protocol)
+
+
+def require_no_active_grpc_request_metadata(driver, policy_repo, session,
+                                            *, policy_id, listener_id):
+    if (constants.GATEWAY_CAPABILITY_GRPC_BINARY_REQUEST_METADATA not in
+            gateway_capabilities(driver)):
+        for row in policy_repo.get_active_request_transforms(
+                session, transform='grpc_binary_request_metadata',
+                listener_id=listener_id):
+            if row.id == policy_id:
+                require_grpc_binary_request_metadata(driver, row.protocol)
+
+
 def _withdrawn_request_transforms(driver):
     capabilities = gateway_capabilities(driver)
     if constants.GATEWAY_CAPABILITY_REQUEST_URL_REWRITE not in capabilities:
@@ -570,6 +607,10 @@ def _withdrawn_request_transforms(driver):
         yield 'http_retry_backoff', require_http_retry_backoff
     if constants.GATEWAY_CAPABILITY_HTTP_REQUEST_MIRROR not in capabilities:
         yield 'request_mirrors', require_http_request_mirror
+    if (constants.GATEWAY_CAPABILITY_GRPC_BINARY_REQUEST_METADATA not in
+            capabilities):
+        yield ('grpc_binary_request_metadata',
+               require_grpc_binary_request_metadata)
 
 
 def require_no_exposed_request_transforms(driver, policy_repo, session,

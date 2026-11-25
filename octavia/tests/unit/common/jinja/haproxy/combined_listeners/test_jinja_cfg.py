@@ -2789,6 +2789,40 @@ class TestHaproxyCfg(base.TestCase):
         ], [line.strip() for line in config.splitlines()
             if line.lstrip().startswith('http-after-response ')])
 
+    def test_grpc_request_metadata_follows_weighted_occurrence(self):
+        amp = sample_configs_combined.sample_amphora_tuple()
+        listener = sample_configs_combined.sample_listener_tuple(l7=True)
+        ordinary = listener.l7policies[0]
+        pool = ordinary.redirect_pool
+        field = 'request_header_operations'
+        shared = {'operation': 'SET', 'name': 'rule-bin', 'value': 'YQ, Yg=='}
+        chosen = {'operation': 'ADD', 'name': 'peer-bin', 'value': 'Yw, ZA=='}
+        target = {'weight': 1, 'pool_id': pool.id}
+        grpc = ordinary._replace(
+            id='grpc', action='WEIGHTED_TARGETS', redirect_pool=None,
+            targets=[dict(target, **{field: [chosen]}), target],
+            l7rules=[sample_configs_combined.sample_l7rule_tuple(
+                'media', type='GRPC_CONTENT_TYPE', compare_type='EQUAL_TO',
+                value='application/grpc')], **{field: [shared]})
+        ordinary = ordinary._replace(id='http', **{field: [shared]})
+        listener = listener._replace(l7policies=[grpc, ordinary])
+        config = self.jinja_cfg.build_config(
+            amp, [listener], None, haproxy_versions=['3', '0', '19'],
+            amp_details=None)
+        instructions = [line.strip() for line in config.splitlines()
+                        if line.lstrip().startswith('http-request ') and
+                        ('"rule-bin"' in line or '"peer-bin"' in line)]
+        matched = '{ var(txn.octavia_l7_policy) -m str grpc }'
+        selected = matched + ' { var(txn.octavia_weighted_draw) -m int 0:0 }'
+        self.assertCountEqual([
+            f'http-request set-header "rule-bin" "YQ" if {matched}',
+            f'http-request add-header "rule-bin" "Yg==" if {matched}',
+            f'http-request add-header "peer-bin" "Yw" if {selected}',
+            f'http-request add-header "peer-bin" "ZA==" if {selected}',
+            'http-request set-header "rule-bin" "YQ, Yg==" if '
+            '{ var(txn.octavia_l7_policy) -m str http }',
+        ], instructions)
+
     def test_weighted_policy_keeps_unavailable_targets_in_its_range(self):
         amp = sample_configs_combined.sample_amphora_tuple()
         listener = sample_configs_combined.sample_listener_tuple(l7=True)

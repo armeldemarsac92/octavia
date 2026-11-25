@@ -124,6 +124,17 @@ winning L7 policy modifies its responses, including a programmed fixed
 response. Operators can disable the option and clear existing lists.
 Request and response header options can be enabled independently.
 
+To send binary request metadata, upgrade the API and Amphora workers and
+enable ``enabled_grpc_content_type_providers``. Enroll rule-level headers
+with ``enabled_request_header_operation_providers``. For headers on a
+selected target, enroll ``enabled_gateway_action_providers`` and
+``enabled_weighted_target_request_filter_providers``. The driver advertises
+``grpc_binary_request_metadata_v1`` when the gRPC match and at least one of
+the corresponding request operations are available. In each list, SET and
+ADD may supply up to 48 fields after expanding binary metadata. A stored
+request modifier exceeding that limit retains its original literal values
+and removals until it is updated.
+
 For lists of gRPC binary response metadata, upgrade the provider's
 rendering workers and API replicas before enabling both
 ``enabled_response_header_operation_providers`` and

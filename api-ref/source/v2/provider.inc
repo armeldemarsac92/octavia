@@ -200,6 +200,14 @@ listener. Operations on ``Connection``, ``Content-Length``, ``Keep-Alive``,
 return HTTP 400. A policy update preserves omitted fields. Send an empty
 list to clear the response operations.
 
+``grpc_binary_request_metadata_v1`` applies to request header operations on
+a policy with an active ``GRPC_CONTENT_TYPE`` rule. A binary metadata list
+in SET replaces the original values. ADD appends each value separately.
+A weighted target applies its own operations only within its selected
+range. The rule and each target can each set or add up to 48 fields after
+expanding lists. Ordinary HTTP policies preserve commas in their values.
+To withdraw the modifier, clear the relevant request operations.
+
 ``grpc_binary_response_metadata_v1`` allows a selected policy with an
 active ``GRPC_CONTENT_TYPE`` rule to send comma-separated base64 values
 for a ``-bin`` response header as separate fields. ``SET`` replaces the
