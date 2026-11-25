@@ -179,7 +179,11 @@ bind {% if local_socket %}{{ local_socket }} accept-proxy{% else %}{{ lb_vip_add
 
 
 {% macro policy_response_headers(listener, backend_kind, backend_id, reserved_cookie=None, reserved_header=None) %}
-    {% for policy_id, operations in listener.get('response_header_operations_by_backend', {}).get((backend_kind, backend_id), []) %}
+    {% for policy_id, target, operations in listener.get('response_header_operations_by_backend', {}).get((backend_kind, backend_id), []) %}
+        {# A backend modifier applies only when this occurrence receives an
+           upstream response. Rule modifiers also apply to local responses. #}
+        {% set phase = 'http-response' if target else 'http-after-response' %}
+        {% set selected = weighted_target_match_macro(policy_id, target) if target else selected_policy_match_macro(policy_id) %}
         {% for operation in operations %}
             {% set parts = operation.split(' ', 2) %}
             {# The renderer quotes literal operation values. Ignore
@@ -187,7 +191,7 @@ bind {% if local_socket %}{{ local_socket }} accept-proxy{% else %}{{ lb_vip_add
                which would otherwise delete unrelated cookies. #}
             {% set targets_reserved = reserved_cookie and parts|length == 3 and parts[1]|lower == '"set-cookie"' and parts[2].split('=', 1)[0][1:].strip() == reserved_cookie %}
             {% if not targets_reserved and parts[1] != reserved_header %}
-    http-after-response {{ operation|safe }} if {{ selected_policy_match_macro(policy_id) }}
+    {{ phase }} {{ operation|safe }} if {{ selected }}
             {% endif %}
         {% endfor %}
     {% endfor %}

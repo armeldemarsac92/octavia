@@ -191,6 +191,11 @@ api_opts = [
                 help=_('Providers supporting streaming gRPC mirrors. '
                        'Enable after upgrading regional APIs, workers and '
                        'eligible Amphora images.')),
+    cfg.ListOpt('enabled_weighted_target_response_header_providers',
+                default=[],
+                help=_('Providers qualified to modify response headers for '
+                       'individual weighted pool targets. Enable after '
+                       'upgrading the database, API and rendering workers.')),
     cfg.ListOpt('enabled_l7policy_initial_rules_providers', default=[],
                 help=_('Provider driver names that can create a disabled HTTP '
                        'L7 policy with its initial rules in one operation. '

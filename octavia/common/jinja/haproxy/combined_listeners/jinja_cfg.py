@@ -1128,6 +1128,11 @@ class JinjaTemplater:
                     if 'pool_id' in target:
                         pool_id = target['pool_id']
                         pool_ids.add(pool_id)
+                        if target.get('response_header_operations'):
+                            responses_by_backend.setdefault(
+                                ('pool', pool_id), []).append((
+                                    policy['id'], target,
+                                    target['response_header_operations']))
                         if target.get('request_filters'):
                             target_filters_by_pool.setdefault(
                                 pool_id, []).append((policy['id'], target))
@@ -1176,7 +1181,7 @@ class JinjaTemplater:
                 if response_ops:
                     responses_by_backend.setdefault(('pool', pool_id),
                                                     []).append(
-                        (policy['id'], response_ops))
+                        (policy['id'], None, response_ops))
                 if cors is not None:
                     cors_by_backend.setdefault(('pool', pool_id), []).append(
                         (policy['id'], cors))
@@ -1184,7 +1189,7 @@ class JinjaTemplater:
                 for response_id in fixed_responses:
                     responses_by_backend.setdefault(('fixed', response_id),
                                                     []).append(
-                        (policy['id'], response_ops))
+                        (policy['id'], None, response_ops))
             if cors is not None:
                 for response_id in fixed_responses:
                     cors_by_backend.setdefault(('fixed', response_id),
@@ -2088,6 +2093,12 @@ class JinjaTemplater:
                     target['fixed_response'])
             elif target['pool_id'] in available_pool_ids:
                 interval['pool_id'] = target['pool_id']
+                if target.get('response_header_operations'):
+                    interval['response_header_operations'] = (
+                        self._transform_header_operations(
+                            target['response_header_operations'],
+                            'response_header_operations',
+                            grpc_policy_id=grpc_policy_id))
                 operations = target.get('request_header_operations', [])
                 headers = self._transform_header_operations(
                     operations, 'request_header_operations',

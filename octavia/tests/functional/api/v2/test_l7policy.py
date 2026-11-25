@@ -2747,6 +2747,65 @@ class TestL7Policy(base.BaseAPITest):
         self.delete(policy_path)
 
     @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
+    def test_weighted_target_response_headers_round_trip_and_retire(self, rpc):
+        self.conf.config(group='api_settings',
+                         enabled_gateway_action_providers=['amphora'])
+        project = uuidutils.generate_uuid()
+        lb = self.create_load_balancer(
+            project, provider='amphora')['loadbalancer']['id']
+        self.set_lb_status(lb)
+        pool = self.create_pool(lb, 'HTTP', 'ROUND_ROBIN')['pool']['id']
+        self.set_lb_status(lb)
+        listener = self.create_listener('HTTP', 80, lb)['listener']['id']
+        self.set_lb_status(lb)
+        plain = {'weight': 3, 'pool_id': pool}
+        ops = [{'operation': 'SET', 'name': 'x-source', 'value': 'backend'}]
+        selected = {'weight': 1, 'pool_id': pool,
+                    'response_header_operations': ops}
+        targets = [plain, selected]
+        action = constants.L7POLICY_ACTION_WEIGHTED_TARGETS
+        self.create_l7policy(listener, action, targets=targets, status=501)
+        self.conf.config(group='api_settings',
+                         enabled_response_header_operation_providers=[
+                             'amphora'])
+        self.create_l7policy(listener, action, targets=targets, status=501)
+        self.conf.config(
+            group='api_settings',
+            enabled_weighted_target_response_header_providers=['amphora'])
+        self.create_l7policy(
+            listener, action, status=400,
+            targets=[{'weight': 1, 'fixed_response': {'status_code': 500},
+                      'response_header_operations': ops}])
+        self.create_l7policy(
+            listener, action, status=400, targets=[plain | {
+                'response_header_operations': [
+                    {'operation': 'REMOVE', 'name': 'content-length'}]}])
+        policy = self.create_l7policy(listener, action, targets=targets)
+        policy_id = policy['l7policy']['id']
+        path = self.L7POLICY_PATH.format(l7policy_id=policy_id)
+        self.set_lb_status(lb)
+        rule = self.create_l7rule(policy_id, 'PATH', 'STARTS_WITH', '/app')
+        self.set_lb_status(lb)
+        self.assertEqual(targets, self.get(path).json['l7policy']['targets'])
+        self.conf.config(group='api_settings',
+                         enabled_weighted_target_response_header_providers=[])
+        self.put(path, {self.root_tag: {
+            'targets': [plain, dict(selected, weight=2)]}}, status=501)
+        self.assertEqual(targets, self.get(path).json['l7policy']['targets'])
+        rule_path = self.L7RULE_PATH.format(
+            l7policy_id=policy_id, l7rule_id=rule['rule']['id'])
+        self.put(rule_path, {'rule': {'value': '/other'}}, status=501)
+        pool_path = self.POOL_PATH.format(pool_id=pool)
+        self.put(pool_path, {'pool': {'admin_state_up': False}})
+        self.set_lb_status(lb)
+        self.put(pool_path, {'pool': {'admin_state_up': True}}, status=501)
+        cleared = [plain, {'weight': 1, 'pool_id': pool}]
+        self.put(path, {self.root_tag: {'targets': cleared}})
+        self.assertEqual(cleared, self.get(path).json['l7policy']['targets'])
+        self.set_lb_status(lb)
+        self.put(pool_path, {'pool': {'admin_state_up': True}})
+
+    @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
     def test_weighted_target_filters_round_trip_and_cleanup(self, rpc):
         self.conf.config(
             group='api_settings', enabled_gateway_action_providers=['amphora'])
@@ -5882,6 +5941,136 @@ class TestL7Policy(base.BaseAPITest):
         self.assertFalse(self.get(rule_path).json['rule']['admin_state_up'])
 
     @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
+    def test_grpc_target_response_binary_capability(self, rpc):
+        listener, lb, target, rule = self._grpc_target_response_context()
+        action = constants.L7POLICY_ACTION_WEIGHTED_TARGETS
+        headers = [{'operation': 'SET', 'name': 'trace-bin',
+                    'value': 'YQ, Yg=='}]
+        filtered = dict(target, response_header_operations=headers)
+        policy = self.create_l7policy(
+            listener, action, targets=[target], rules=[rule],
+            admin_state_up=False)['l7policy']
+        path = self.L7POLICY_PATH.format(l7policy_id=policy['id'])
+        self.set_lb_status(lb)
+        self.put(path, {'l7policy': {'admin_state_up': True}})
+        self.set_lb_status(lb)
+
+        support = ('octavia.api.drivers.amphora_driver.v2.driver.'
+                   'AmphoraProviderDriver.'
+                   'supports_grpc_binary_response_metadata')
+        rpc.return_value.cast.reset_mock()
+        with mock.patch(support, False):
+            self.create_l7policy(
+                listener, action, targets=[filtered], rules=[rule],
+                admin_state_up=False, status=501)
+            rejected = self.put(path, {'l7policy': {'targets': [filtered]}},
+                                status=501)
+        self.assertIn('Binary gRPC response metadata',
+                      rejected.json['faultstring'])
+        rpc.return_value.cast.assert_not_called()
+        self.assertEqual([target], self.get(path).json['l7policy']['targets'])
+
+        self.put(path, {'l7policy': {'targets': [target, filtered]}})
+        self.set_lb_status(lb)
+        with mock.patch(support, False):
+            pool_path = self.POOL_PATH.format(pool_id=target['pool_id'])
+            self.put(pool_path, {'pool': {'admin_state_up': False}})
+            self.set_lb_status(lb)
+            self.put(pool_path, {'pool': {'admin_state_up': True}}, status=501)
+            self.put(path, {'l7policy': {'targets': [filtered]}}, status=501)
+            self.put(path, {'l7policy': {'admin_state_up': False}})
+            self.set_lb_status(lb)
+            self.put(path, {'l7policy': {'admin_state_up': True}}, status=501)
+            self.put(path, {'l7policy': {
+                'admin_state_up': True, 'targets': [target]}})
+            self.set_lb_status(lb)
+            self.put(pool_path, {'pool': {'admin_state_up': True}})
+        self.set_lb_status(lb)
+
+        with mock.patch(support, False):
+            staged = self.create_l7policy(
+                listener, action, targets=[filtered],
+                admin_state_up=False)['l7policy']
+            self.assertEqual([filtered], staged['targets'])
+            self.set_lb_status(lb)
+            rules = self.L7RULES_PATH.format(l7policy_id=staged['id'])
+            self.post(rules, {'rule': rule}, status=501)
+            disabled = self.post(
+                rules, {'rule': dict(rule, admin_state_up=False)}).json['rule']
+            self.set_lb_status(lb)
+            rule_path = self.L7RULE_PATH.format(
+                l7policy_id=staged['id'], l7rule_id=disabled['id'])
+            self.put(rule_path, {'rule': {'admin_state_up': True}}, status=501)
+        self.put(rule_path, {'rule': {'admin_state_up': True}})
+
+    @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
+    def test_grpc_target_response_metadata_validation(self, rpc):
+        listener, lb, target, rule = self._grpc_target_response_context()
+        action = constants.L7POLICY_ACTION_WEIGHTED_TARGETS
+        field = 'response_header_operations'
+        invalid = [
+            {'operation': 'REMOVE', 'name': 'grpc-status'},
+            {'operation': 'SET', 'name': 'content-type',
+             'value': 'text/plain'},
+            {'operation': 'SET', 'name': 'trace-bin', 'value': 'YQ,%%%'},
+            {'operation': 'ADD', 'name': 'trace-bin', 'value': 'YR=='},
+        ]
+        policy = self.create_l7policy(
+            listener, action, targets=[target], rules=[rule],
+            admin_state_up=False)['l7policy']
+        self.set_lb_status(lb)
+        path = self.L7POLICY_PATH.format(l7policy_id=policy['id'])
+        rpc.return_value.cast.reset_mock()
+        for operation in invalid:
+            targets = [dict(target, **{field: [operation]})]
+            self.create_l7policy(
+                listener, action, targets=targets, rules=[rule],
+                admin_state_up=False, status=400)
+            self.put(path, {'l7policy': {'targets': targets}}, status=400)
+        rpc.return_value.cast.assert_not_called()
+        self.assertEqual([target], self.get(path).json['l7policy']['targets'])
+        self.put(path, {'l7policy': {'targets': [
+            dict(target, **{field: [{'operation': 'REMOVE',
+                                     'name': 'trace-bin'}]})]}})
+        self.set_lb_status(lb)
+
+        # An HTTP policy can keep the literal value until native matching
+        # is requested. Failed rule activation preserves the staged rule.
+        staged = self.create_l7policy(
+            listener, action, targets=[dict(target, **{field: [invalid[2]]})],
+            admin_state_up=False)['l7policy']
+        self.set_lb_status(lb)
+        rules = self.L7RULES_PATH.format(l7policy_id=staged['id'])
+        self.post(rules, {'rule': rule}, status=400)
+        disabled = self.post(
+            rules, {'rule': dict(rule, admin_state_up=False)}).json['rule']
+        self.set_lb_status(lb)
+        rule_path = self.L7RULE_PATH.format(
+            l7policy_id=staged['id'], l7rule_id=disabled['id'])
+        self.put(rule_path, {'rule': {'admin_state_up': True}}, status=400)
+        self.assertFalse(self.get(rule_path).json['rule']['admin_state_up'])
+
+    def _grpc_target_response_context(self):
+        self.conf.config(
+            group='api_settings', enabled_gateway_action_providers=['amphora'],
+            enabled_grpc_content_type_providers=['amphora'],
+            enabled_response_header_operation_providers=['amphora'],
+            enabled_weighted_target_response_header_providers=['amphora'],
+            enabled_l7policy_initial_rules_providers=['amphora'])
+        project = uuidutils.generate_uuid()
+        lb = self.create_load_balancer(
+            project, provider='amphora')['loadbalancer']['id']
+        self.set_lb_status(lb)
+        listener = self.create_listener('HTTP', 80, lb)['listener']['id']
+        self.set_lb_status(lb)
+        pool = self.create_pool(lb, 'HTTP', 'ROUND_ROBIN')['pool']['id']
+        self.set_lb_status(lb)
+        target = {'weight': 1, 'pool_id': pool}
+        rule = {'type': 'GRPC_CONTENT_TYPE', 'compare_type': 'EQUAL_TO',
+                'value': 'application/grpc'}
+        return listener, lb, target, rule
+
+    @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
     def test_grpc_binary_response_header_field_limit(self, rpc):
         self.conf.config(
             group='api_settings',
@@ -5918,6 +6107,25 @@ class TestL7Policy(base.BaseAPITest):
         path = self.L7POLICY_PATH.format(l7policy_id=policy_id)
         self.put(path, {'l7policy': {field: over}}, status=400)
         self.assertEqual(limit, self.get(path).json['l7policy'][field])
+
+        self.conf.config(
+            group='api_settings', enabled_gateway_action_providers=['amphora'],
+            enabled_weighted_target_response_header_providers=['amphora'])
+        target = {'weight': 1, 'pool_id': pool_id}
+        weighted = {'rules': [rule], 'admin_state_up': False}
+        self.create_l7policy(
+            listener_id, 'WEIGHTED_TARGETS', status=400,
+            targets=[dict(target, **{field: over})], **weighted)
+        targets = [target, dict(target, **{field: limit})]
+        selected = self.create_l7policy(
+            listener_id, 'WEIGHTED_TARGETS', targets=targets, **weighted)
+        self.set_lb_status(lb_id)
+        selected_path = self.L7POLICY_PATH.format(
+            l7policy_id=selected['l7policy']['id'])
+        self.put(selected_path, {'l7policy': {
+            'targets': [target, dict(target, **{field: over})]}}, status=400)
+        self.assertEqual(targets,
+                         self.get(selected_path).json['l7policy']['targets'])
 
         # The same value is literal until an active native rule is installed.
         created = self.create_l7policy(listener_id, 'REDIRECT_TO_POOL',
