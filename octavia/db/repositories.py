@@ -1303,10 +1303,24 @@ class ListenerRepository(BaseRepository):
         return (session.query(refs.listener_id).filter_by(pool_id=pool_id)
                 .with_for_update().limit(1).scalar())
 
-    def set_otlp_tracing_statuses(self, session, statuses):
+    def set_otlp_tracing_statuses(self, session, statuses, *,
+                                  expected_pair=None):
+        if expected_pair is not None:
+            lb_id, expected = expected_pair
+            lb = LoadBalancerRepository().get_for_update(session, lb_id)
+            if (lb is None or not lb.enabled or
+                    lb.topology != consts.TOPOLOGY_ACTIVE_STANDBY):
+                return
+            amp = models.Amphora
+            current = session.scalars(select(amp.id).where(
+                amp.load_balancer_id == lb_id,
+                amp.status != consts.DELETED).with_for_update())
+            if expected != set(current):
+                return
         model = self.model_class
         listeners = (session.query(model).filter(
             model.id.in_(statuses),
+            model.enabled.is_(True),
             model.provisioning_status.notin_(
                 (consts.PENDING_DELETE, consts.DELETED)))
             .options(lazyload('*')).populate_existing()
