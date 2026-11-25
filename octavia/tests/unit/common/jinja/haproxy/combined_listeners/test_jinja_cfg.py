@@ -2119,6 +2119,27 @@ class TestHaproxyCfg(base.TestCase):
             self.assertIn(f'http-request {action} {guard}', backends)
         self.assertEqual(3, backends.count(guard))
 
+    def test_backend_retry_budget_requires_native_amphora_support(self):
+        listener = sample_configs_combined.sample_listener_tuple(proto='HTTP')
+        budget = dict(service_uid='service-uid', budget_percent=20,
+                      budget_interval_ms=10000, min_retry_count=10,
+                      min_retry_interval_ms=1000)
+        pool = SimpleNamespace(**listener.default_pool._asdict(),
+                               backend_retry_budget=budget)
+        listener = listener._replace(default_pool=pool, pools=[pool])
+        amphora = sample_configs_combined.sample_amphora_tuple()
+        version = ['3', '0', '19']
+        self.assertRaises(driver_except.AmpVersionUnsupported,
+                          self.jinja_cfg.build_config, amphora, [listener],
+                          None, version, {})
+        capability = constants.GATEWAY_CAPABILITY_BACKEND_RETRY_BUDGET
+        config = self.jinja_cfg.build_config(
+            amphora, [listener], None, version, {capability: True})
+        _, backend = config.split('\nbackend ', 1)
+        self.assertIn(
+            'http-request octavia-retry-budget service-uid 20 10000 10 1000',
+            backend)
+
     def test_http_request_policy_in_selected_forwarding_backends(self):
         amphora = sample_configs_combined.sample_amphora_tuple()
         capability = constants.GATEWAY_CAPABILITY_HTTP_REQUEST_POLICY

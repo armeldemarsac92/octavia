@@ -262,6 +262,15 @@ backend-tls-require-h2:
   in: body
   required: false
   type: boolean
+backend-retry-budget:
+  description: |
+    The Service retry budget for this HTTP pool. Provide the five fields
+    documented under the ``backend_retry_budget_v1`` provider capability.
+    Omission in an update keeps the previous settings. Set the field to null
+    to remove the budget from this pool.
+  in: body
+  required: false
+  type: object
 backend-tls-subject-alt-names:
   description: |
     Up to five explicit backend TLS identities. Each entry is an object

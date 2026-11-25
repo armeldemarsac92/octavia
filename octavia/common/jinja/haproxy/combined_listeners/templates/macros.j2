@@ -887,6 +887,11 @@ backend {{ pool.id }}:{{ listener.id }}
                constants.PROTOCOL_HTTP.lower()))%}
     http-reuse safe
     {% endif %}
+    {% if pool.backend_retry_budget is defined and
+          listener.protocol in (constants.PROTOCOL_HTTP, constants.PROTOCOL_TERMINATED_HTTPS) %}
+      {% set budget = pool.backend_retry_budget %}
+    http-request octavia-retry-budget {{ budget.service_uid }} {{ budget.budget_percent }} {{ budget.budget_interval_ms }} {{ budget.min_retry_count }} {{ budget.min_retry_interval_ms }}
+    {% endif %}
     {% set cors = listener.get('cors_by_backend', {}).get(('pool', pool.id), []) %}
 {{ cors_request(cors) -}}
 {{ policy_response_headers(listener, 'pool', pool.id) -}}

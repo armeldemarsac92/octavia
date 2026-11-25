@@ -314,6 +314,30 @@ A policy can combine both deadlines with status-based retries.
 Omission in an update preserves the object. Send
 ``http_request_policy: null`` to clear it.
 
+``backend_retry_budget_v1`` enables ``backend_retry_budget`` on HTTP
+pools forwarding ingress on HTTP and ``TERMINATED_HTTPS`` listeners. It
+shares request and retry history among participating pools with the same
+``service_uid`` in a single HAProxy process. Use the same Service UID for
+all pools and ports targeting that Service. Each process, including a
+replacement upon reload or failover, has independent counters.
+
+Each object requires all five fields.
+
+* ``service_uid`` accepts 1 to 128 ASCII letters, digits, dots, underscores,
+  or hyphens.
+* ``budget_percent`` accepts integers from 0 to 100. The percentage counts
+  retries as a share of original requests plus retries over
+  ``budget_interval_ms`` (1000 to 3600000 milliseconds).
+* ``min_retry_count`` accepts 1 to 1000000. The minimum allows this many
+  retries over a moving window of ``min_retry_interval_ms`` (1 to 3600000
+  milliseconds) even when the percentage allowance is lower.
+
+Each permitted retry consumes budget. Original requests proceed normally.
+A retry selected by native HAProxy or ``http_request_policy`` receives a
+local HTTP 503 when the Service budget is exhausted. The pool budget does
+not create retry attempts. Omit the field on update to keep the current
+policy, or send ``backend_retry_budget: null`` to withdraw it.
+
 ``http_request_mirror_v1`` enables an ordered ``request_mirrors`` list
 on a winning HTTP policy and on each selected weighted HTTP pool target.
 A list can hold up to 16 entries. Each entry identifies an HTTP pool

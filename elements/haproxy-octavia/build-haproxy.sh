@@ -25,6 +25,7 @@ sha256sum --check --strict <<'HASHES'
 4b48556f1b54ab2633c818b4aebabff3b5b3040c1a64a4cd093cb1eed752dd4e  haproxy-3.0.19-http-policy.patch
 7d1fba6e89ac26f706b4eedca3e804be8b63c1289402179f3ae366579413f7dc  haproxy-3.0.19-http-mirror.patch
 dfe62edf7729bb332753384c13d6b58488d0c8c19f9a0651c8b18d8dbce89891  haproxy-3.0.19-listener-auth.patch
+25acd2f670a84c567b082520cb74c4cf6841bc9171d5c8570927363a32932136  haproxy-3.0.19-backend-retry-budget.patch
 HASHES
 
 tar -xzf "$tarball" -C "$work_dir"
@@ -32,11 +33,11 @@ cd -- "$work_dir/haproxy-3.0.19"
 for patch_name in haproxy-3.0.19-strict-dns.patch \
     haproxy-3.0.19-require-alpn-h2.patch haproxy-3.0.19-backend-sans.patch \
     haproxy-3.0.19-http-policy.patch haproxy-3.0.19-http-mirror.patch \
-    haproxy-3.0.19-listener-auth.patch; do
+    haproxy-3.0.19-listener-auth.patch haproxy-3.0.19-backend-retry-budget.patch; do
     patch --batch --forward --fuzz=0 -p1 -i "$element_dir/$patch_name"
 done
 
 LC_ALL=C SOURCE_DATE_EPOCH=1773936536 make \
     TARGET=linux-glibc USE_OPENSSL=1 USE_SYSTEMD=1 \
-    EXTRAVERSION=-octavia-strict-dns-v1-h2-alpn-v1-backend-sans-v1-http-policy-v1-http-mirror-v1-listener-auth-v1
+    EXTRAVERSION=-octavia-strict-dns-v1-h2-alpn-v1-backend-sans-v1-http-policy-v1-http-mirror-v1-listener-auth-v1-backend-retry-budget-v1
 install -m 0755 haproxy "$binary"

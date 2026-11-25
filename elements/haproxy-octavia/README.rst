@@ -164,3 +164,18 @@ runtime dependencies, OpenSSL, a curl build with HTTP/2 and the patched
 HAProxy installed::
 
     PYTHONPATH=. python elements/haproxy-octavia/test-listener-auth.py         /path/to/haproxy -v
+
+
+HTTP backend retry budgets
+==========================
+
+The ``backend_retry_budget_v1`` capability shares rolling request and
+retry counts across the HTTP pools serving a Service in one HAProxy
+process. It applies to connection retries and replayable HTTP retries
+already selected by the backend or its per-route request policy. The
+proxy returns 503 when a retry would exceed both configured allowances.
+Each Amphora process keeps its own history.
+
+Run the loopback checks with the patched binary::
+
+    python elements/haproxy-octavia/test-backend-retry-budget.py /path/to/haproxy -v
