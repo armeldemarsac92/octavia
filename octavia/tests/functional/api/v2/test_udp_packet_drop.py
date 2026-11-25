@@ -245,6 +245,13 @@ class TestUDPPacketDrop(base.BaseAPITest):
 
     def test_delete_replaces_pending_batch_after_opt_out(self):
         self._enroll()
+        amphora_id = uuidutils.generate_uuid()
+        with db_api.session().begin() as session:
+            self.amphora_repo.create(
+                session, id=amphora_id, load_balancer_id=self.lb_id,
+                status=constants.AMPHORA_ALLOCATED,
+                role=constants.ROLE_STANDALONE, lb_network_ip='192.0.2.11',
+                compute_id=uuidutils.generate_uuid())
         self.create_member(self.pool_id, '192.0.2.4', 9000)
         self.set_lb_status(self.lb_id)
         other_listener_id = self.create_listener(
@@ -286,6 +293,7 @@ class TestUDPPacketDrop(base.BaseAPITest):
                             if item.id == self.listener_id)
             self.assertEqual(constants.PENDING_DELETE,
                              listener.default_pool.provisioning_status)
+            return ((amphora_id, constants.ROLE_STANDALONE),)
 
         with mock.patch.object(amphora_noop.NoopAmphoraLoadBalancerDriver,
                                'update_udp_pool_listeners', create=True,
@@ -299,8 +307,18 @@ class TestUDPPacketDrop(base.BaseAPITest):
             retry = self.rpc.cast.call_args
             self.assertNotEqual(pending, retry)
             render.reset_mock(side_effect=True)
-            render.side_effect = retire
             worker.delete_managed_udp_pool({}, **pending.kwargs)
+            render.assert_not_called()
+            render.return_value = ((amphora_id, constants.ROLE_BACKUP),)
+            with self.assertRaises(driver_except.ListenerProvisioningError):
+                worker.delete_managed_udp_pool({}, **retry.kwargs)
+            self.assertEqual(constants.ERROR,
+                             self._pool()['provisioning_status'])
+            self.assertEqual(2, self._member_use())
+            self.delete(self.pool_path, status=204)
+            retry = self.rpc.cast.call_args
+            render.reset_mock()
+            render.side_effect = retire
             worker.delete_managed_udp_pool({}, **retry.kwargs)
             worker.delete_managed_udp_pool({}, **retry.kwargs)
             self.assertEqual(1, render.call_count)

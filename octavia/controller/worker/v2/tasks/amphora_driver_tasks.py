@@ -408,6 +408,14 @@ class ApplyTCPMemberBatch(_ApplyManagedMemberBatch):
         self.amphora_driver.update(graph, tcp_member_batch=True)
 
 
+def _confirm_udp_peers(loadbalancer, receipt):
+    current = tuple(sorted(
+        (amp.id, amp.role) for amp in loadbalancer.amphorae
+        if amp.status == constants.AMPHORA_ALLOCATED))
+    if not receipt or receipt != current:
+        raise driver_except.ListenerProvisioningError()
+
+
 class ApplyUDPMemberBatch(_ApplyManagedMemberBatch):
     """Apply one committed UDP member graph and its drop fraction."""
 
@@ -418,11 +426,7 @@ class ApplyUDPMemberBatch(_ApplyManagedMemberBatch):
         return self.amphora_driver.apply_udp_member_batch(graph, listener_id)
 
     def _confirm_render(self, lb, receipt):
-        current = tuple(sorted(
-            (amp.id, amp.role) for amp in lb.amphorae
-            if amp.status == constants.AMPHORA_ALLOCATED))
-        if not receipt or receipt != current:
-            raise driver_except.ListenerProvisioningError()
+        _confirm_udp_peers(lb, receipt)
 
 
 class DeleteManagedUDPPool(_ManagedPoolOperation):
@@ -445,18 +449,22 @@ class DeleteManagedUDPPool(_ManagedPoolOperation):
             graph = lb.to_data_model()
             listener_ids = lb.tcp_member_batch['listener_ids']
         try:
-            self.amphora_driver.update_udp_pool_listeners(graph, listener_ids)
-            self._finish(lb_id, pool_id, batch_id, applied=True)
+            receipt = self.amphora_driver.update_udp_pool_listeners(
+                graph, listener_ids)
+            self._finish(lb_id, pool_id, batch_id, applied=True,
+                         receipt=receipt)
         except Exception:
             self._finish(lb_id, pool_id, batch_id, applied=False)
             raise
 
-    def _finish(self, lb_id, pool_id, batch_id, *, applied):
+    def _finish(self, lb_id, pool_id, batch_id, *, applied, receipt=None):
         with db_apis.session().begin() as session:
             lb, pool = self._owned(session, lb_id, pool_id, batch_id)
             if pool is None:
                 return
             if applied:
+                if lb.tcp_member_batch['listener_ids']:
+                    _confirm_udp_peers(lb, receipt)
                 health_monitors, members = self.pool_repo.get_children_count(
                     session, pool.id)
                 for resource, count in (
