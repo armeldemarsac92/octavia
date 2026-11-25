@@ -109,6 +109,13 @@ def _validate_backend_tls_subject_alt_names(driver, protocol, hostname, *,
                 'unavailable for this provider.'))
 
 
+def _has_named_http_cookie(persistence):
+    return (persistence and
+            persistence.get('type') ==
+            constants.SESSION_PERSISTENCE_HTTP_COOKIE and
+            persistence.get('cookie_name') is not None)
+
+
 class PoolsController(base.BaseController):
     RBAC_TYPE = constants.RBAC_POOL
 
@@ -201,8 +208,10 @@ class PoolsController(base.BaseController):
         if sans is None:
             validate.backend_tls_subject_alt_names(sans)
         budget = pool_dict.get('backend_retry_budget')
+        persistence = pool_dict.get('session_persistence')
+        named_http_cookie = _has_named_http_cookie(persistence)
         if (pool_dict.get('backend_h2c') or hostname is not None or
-                require_h2 or sans or budget is not None):
+                require_h2 or sans or budget is not None or named_http_cookie):
             if driver is None:
                 # Fully populated load balancer creation uses this path too.
                 provider = self._get_db_lb(
@@ -226,6 +235,12 @@ class PoolsController(base.BaseController):
         if budget is not None:
             driver_utils.require_backend_retry_budget(
                 driver, pool_dict['protocol'])
+        if named_http_cookie:
+            # Fully populated load balancer creation also reaches this path.
+            validate.check_session_persistence(persistence)
+            driver_utils.require_http_cookie_name(
+                driver, pool_dict['protocol'])
+            persistence['http_cookie_name_enabled'] = True
 
         # Make sure we have a client CA if they specify a CRL
         if (pool_dict.get('crl_container_id') and
@@ -659,7 +674,7 @@ class PoolsController(base.BaseController):
             driver_utils.require_no_exposed_request_transforms(
                 driver, policy_repo, session, disabling_pool=pool_id)
 
-    def _validate_pool_PUT(self, pool, current):
+    def _validate_pool_PUT(self, pool, current, driver):
 
         if current.protocol in (constants.PROTOCOL_UDP,
                                 lib_consts.PROTOCOL_SCTP):
@@ -675,6 +690,8 @@ class PoolsController(base.BaseController):
         if pool.session_persistence:
             sp_dict = pool.session_persistence.to_dict(render_unsets=False)
             validate.check_session_persistence(sp_dict)
+            if _has_named_http_cookie(sp_dict):
+                driver_utils.require_http_cookie_name(driver, current.protocol)
 
         crl_ref = None
         # If we got a crl_ref and it's not unset, use it
@@ -812,7 +829,7 @@ class PoolsController(base.BaseController):
                         pool_dict.get('tls_enabled', current.tls_enabled),
                         pool_dict.get('alpn_protocols',
                                       current.alpn_protocols))
-            self._validate_pool_PUT(pool, current)
+            self._validate_pool_PUT(pool, current, driver)
             self._validate_tcp_listener_pool_update(
                 context.session, id, current, pool, driver)
             self._validate_request_transform_exposure(
@@ -839,6 +856,10 @@ class PoolsController(base.BaseController):
             # Update the database to reflect what the driver just accepted
             pool.provisioning_status = constants.PENDING_UPDATE
             db_pool_dict = pool.to_dict(render_unsets=False)
+            persistence = db_pool_dict.get('session_persistence')
+            if persistence:
+                persistence['http_cookie_name_enabled'] = (
+                    _has_named_http_cookie(persistence))
             self.repositories.update_pool_and_sp(context.session, id,
                                                  db_pool_dict)
 

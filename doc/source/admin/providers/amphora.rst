@@ -517,3 +517,25 @@ Each separate Amphora process, including a process started by reload or
 failover, starts with its own history. Regional discovery applies to
 new writes. Clear a persisted budget with ``backend_retry_budget: null``
 even when discovery is disabled.
+
+Load balancer-generated persistence cookie names
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Apply the session persistence database migration and upgrade the API and
+workers before enabling the option in the region.
+
+.. code-block:: ini
+
+   [api_settings]
+   enabled_http_cookie_name_providers = amphora
+
+An authenticated ``GET /v2/lbaas/providers/amphora/gateway_capabilities``
+then includes ``http_cookie_name_v1``. HTTP pools can set
+``session_persistence.cookie_name`` when using ``HTTP_COOKIE``.
+Each cookie retains the session lifetime, root path and member UUID
+used by the default ``SRV`` cookie.
+
+When regional discovery is disabled, writes supplying a name are blocked.
+Pools with a name already configured keep serving it. To return to the
+default, send ``session_persistence: {"type": "HTTP_COOKIE"}`` in a pool
+update. To remove persistence entirely, send ``session_persistence: null``.

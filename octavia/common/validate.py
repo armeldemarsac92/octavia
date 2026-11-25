@@ -1385,8 +1385,23 @@ def is_ip_member_of_cidr(address, cidr):
     return False
 
 
+HTTP_COOKIE_NAME = re.compile(r'[A-Za-z0-9_.-]{1,255}')
+
+
+def is_valid_http_cookie_name(name):
+    return isinstance(name, str) and bool(HTTP_COOKIE_NAME.fullmatch(name))
+
+
 def check_session_persistence(SP_dict):
     try:
+        if SP_dict['type'] == constants.SESSION_PERSISTENCE_HTTP_COOKIE:
+            name = SP_dict['cookie_name']
+            if name is not None and not is_valid_http_cookie_name(name):
+                raise exceptions.ValidationException(detail=_(
+                    'Supplied "cookie_name" is invalid. HTTP_COOKIE names '
+                    'must use ASCII letters, digits, underscores, dots or '
+                    'hyphens.'))
+            return
         if SP_dict['cookie_name']:
             if SP_dict['type'] != constants.SESSION_PERSISTENCE_APP_COOKIE:
                 raise exceptions.ValidationException(detail=_(

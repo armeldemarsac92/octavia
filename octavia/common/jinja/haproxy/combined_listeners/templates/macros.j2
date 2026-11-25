@@ -980,7 +980,7 @@ backend {{ pool.id }}:{{ listener.id }}
     stick match req.cook({{ pool.session_persistence.cookie_name }})
         {% elif (pool.session_persistence.type ==
                   constants.SESSION_PERSISTENCE_HTTP_COOKIE) %}
-    cookie SRV insert indirect nocache
+    cookie {{ pool.session_persistence.cookie_name or 'SRV' }} insert indirect nocache
         {% endif %}
     {% endif %}
 {{ pool_health_monitor(constants, pool, state_file) -}}

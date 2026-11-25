@@ -24,6 +24,7 @@ from oslo_config import fixture as oslo_fixture
 
 from octavia.amphorae.driver_exceptions import exceptions as driver_except
 from octavia.common import constants
+from octavia.common import data_models
 from octavia.common import exceptions
 from octavia.common.jinja.haproxy.combined_listeners import jinja_cfg
 from octavia.tests.unit import base
@@ -2794,6 +2795,16 @@ class TestHaproxyCfg(base.TestCase):
         ret = self.jinja_cfg._transform_session_persistence(
             in_persistence, {})
         self.assertEqual(sample_configs_combined.RET_PERSISTENCE, ret)
+
+    def test_transform_session_persistence_with_named_http_cookie(self):
+        persistence = data_models.SessionPersistence(
+            type=constants.SESSION_PERSISTENCE_HTTP_COOKIE,
+            cookie_name='gateway_pool')
+        ret = self.jinja_cfg._transform_session_persistence(persistence, {})
+        self.assertIsNone(ret['cookie_name'])
+        persistence.http_cookie_name_enabled = True
+        ret = self.jinja_cfg._transform_session_persistence(persistence, {})
+        self.assertEqual('gateway_pool', ret['cookie_name'])
 
     def test_transform_health_monitor(self):
         in_persistence = sample_configs_combined.sample_health_monitor_tuple()

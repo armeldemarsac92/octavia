@@ -141,6 +141,8 @@ class SessionPersistence(base_models.BASE):
             name="fk_session_persistence_session_persistence_type_name"),
         nullable=False)
     cookie_name = sa.Column(sa.String(255), nullable=True)
+    http_cookie_name_enabled = sa.Column(
+        sa.Boolean(), nullable=False, server_default=sa.false())
     persistence_timeout = sa.Column(sa.Integer(), nullable=True)
     persistence_granularity = sa.Column(sa.String(64), nullable=True)
     pool = orm.relationship("Pool", uselist=False,

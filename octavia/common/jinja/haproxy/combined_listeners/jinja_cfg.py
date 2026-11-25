@@ -1136,10 +1136,15 @@ class JinjaTemplater:
 
             be processed by the templating system
         """
-        return {
-            'type': persistence.type,
-            'cookie_name': persistence.cookie_name
-        }
+        name = persistence.cookie_name
+        if persistence.type == constants.SESSION_PERSISTENCE_HTTP_COOKIE:
+            if getattr(persistence, 'http_cookie_name_enabled', False) is True:
+                if not validate.is_valid_http_cookie_name(name):
+                    raise exceptions.ValidationException(detail=_(
+                        'Invalid configured HTTP_COOKIE name.'))
+            else:
+                name = None
+        return {'type': persistence.type, 'cookie_name': name}
 
     @staticmethod
     def _transform_member(member, feature_compatibility):

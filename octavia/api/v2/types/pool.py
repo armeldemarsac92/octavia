@@ -145,6 +145,13 @@ class PoolResponse(BasePoolType):
                 SessionPersistenceResponse
                 .from_db_obj(db_obj.session_persistence)
             )
+            if (result.session_persistence.type ==
+                    constants.SESSION_PERSISTENCE_HTTP_COOKIE and
+                    not db_obj.session_persistence.http_cookie_name_enabled and
+                    getattr(db_obj.load_balancer, 'provider', None) in
+                    ('amphora', 'octavia')):
+                # Old Amphora graph creates accepted a name HAProxy ignored.
+                result.session_persistence.cookie_name = None
 
         if cls._full_response():
             if db_obj.health_monitor:
