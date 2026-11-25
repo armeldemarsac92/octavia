@@ -24,6 +24,7 @@ import ipaddress
 import re
 import socket
 import typing
+import uuid
 
 from cryptography import fernet
 from oslo_config import cfg
@@ -43,6 +44,13 @@ LOG = logging.getLogger(__name__)
 
 def get_hostname():
     return socket.gethostname()
+
+
+def haproxy_otlp_export_socket_prefix(loadbalancer_id):
+    # The full LB UUID fits as base64url with space left for the revision
+    # and HAProxy's temporary bind suffix within sockaddr_un.sun_path.
+    encoded = base64.urlsafe_b64encode(uuid.UUID(loadbalancer_id).bytes)
+    return 'export-' + encoded.decode('ascii').rstrip('=') + '-'
 
 
 def backend_tls_system_ca_pool_ids(loadbalancer):

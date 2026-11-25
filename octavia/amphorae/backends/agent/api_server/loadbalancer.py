@@ -12,11 +12,13 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
+import errno
 import hashlib
 import io
 import os
 import re
 import shutil
+import socket
 import stat
 import subprocess
 import tempfile
@@ -46,6 +48,9 @@ SYSTEM_CA_BUNDLE_LIMIT = 8 * 1024 * 1024
 SYSTEM_CA_CERTIFICATE = re.compile(
     rb'-----BEGIN CERTIFICATE-----[\r\n]+'
     rb'[A-Za-z0-9+/=\r\n]+-----END CERTIFICATE-----')
+OTLP_EXPORT_HEADER_LINE = re.compile(
+    r'(?m)^[ \t]*lua-load [^\n]*' +
+    re.escape(consts.HAPROXY_OTLP_EXPORT_HEADER_MARKER) + r'[ \t]*$')
 
 CONF = cfg.CONF
 
@@ -87,7 +92,8 @@ class Loadbalancer:
         """
         self._check_lb_exists(lb_id)
         with open(util.config_path(lb_id), encoding='utf-8') as file:
-            cfg = file.read()
+            cfg = OTLP_EXPORT_HEADER_LINE.sub(
+                '    # OTLP export header redacted', file.read())
             resp = webob.Response(cfg, content_type='text/plain')
             resp.headers['ETag'] = (
                 hashlib.md5(octavia_utils.b(cfg),
@@ -192,6 +198,10 @@ class Loadbalancer:
                                     encoding='utf-8')
         except subprocess.CalledProcessError as e:
             details = e.output
+            if OTLP_EXPORT_HEADER_LINE.search(new_config):
+                # HAProxy can embed config fragments in diagnostics.
+                details = ('HAProxy rejected a configuration with '
+                           'OTLP export headers.')
             for key in re.findall(
                     r'(?m)^\s*http-request set-var'
                     r'\(txn\.octavia_cookie_signing_key\) '
@@ -267,6 +277,51 @@ class Loadbalancer:
             return uptime
         LOG.error('Failed to get haproxy uptime after %d tries.', retries)
         return None
+
+    @staticmethod
+    def _prune_otlp_export_sockets(lb_id, *, keep_configured=True):
+        directory = consts.HAPROXY_OTLP_TRACING_SOCKET_DIR
+        try:
+            prefix = octavia_utils.haproxy_otlp_export_socket_prefix(lb_id)
+        except ValueError:
+            return
+        name = re.compile(re.escape(prefix) + r'[a-f0-9]{32}\.sock')
+        try:
+            with os.scandir(directory) as sockets:
+                candidates = {
+                    entry.path for entry in sockets
+                    if name.fullmatch(entry.name) and
+                    stat.S_ISSOCK(entry.stat(follow_symlinks=False).st_mode)}
+            if not candidates:
+                return
+            keep = set()
+            if keep_configured:
+                with open(util.config_path(lb_id), encoding='utf-8') as cfg:
+                    keep = set(re.findall(r'(?m)^[ \t]*bind[ \t]+(\S+)',
+                                          cfg.read()))
+            candidates -= keep
+            for attempt in range(HAPROXY_QUERY_RETRIES):
+                bound = set()
+                for path in candidates:
+                    # On Linux, probing a live stream socket with a datagram
+                    # socket returns EPROTOTYPE without opening a connection.
+                    with socket.socket(socket.AF_UNIX,
+                                       socket.SOCK_DGRAM) as probe:
+                        state = probe.connect_ex(path)
+                    if state == errno.ECONNREFUSED:
+                        os.unlink(path)
+                    elif state == errno.EPROTOTYPE:
+                        bound.add(path)
+                if not bound or attempt == HAPROXY_QUERY_RETRIES - 1:
+                    break
+                # An asynchronous reload can return just before the outgoing
+                # HAProxy unbinds its listeners.
+                candidates = bound
+                time.sleep(0.1)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            LOG.warning('Could not remove retired OTLP sockets for %s.', lb_id)
 
     def start_stop_lb(self, lb_id, action):
         action = action.lower()
@@ -375,6 +430,7 @@ class Loadbalancer:
                     info = {}
                 if (info.get('description') == description and
                         info.get('Stopping') == '0'):
+                    self._prune_otlp_export_sockets(lb_id)
                     response = webob.Response(
                         json={'message': 'OK'}, status=202)
                     response.headers[header] = publication
@@ -384,6 +440,8 @@ class Loadbalancer:
                 json={'message': 'HAProxy publication unconfirmed'},
                 status=503)
 
+        self._prune_otlp_export_sockets(
+            lb_id, keep_configured=action != consts.AMP_ACTION_STOP)
         if action in [consts.AMP_ACTION_STOP,
                       consts.AMP_ACTION_RELOAD]:
             return webob.Response(json={
@@ -443,6 +501,7 @@ class Loadbalancer:
             consts.DISABLE, consts.LOADBALANCER_SYSTEMD % lb_id, False)
 
         # delete the directory + init script for that listener
+        self._prune_otlp_export_sockets(lb_id, keep_configured=False)
         shutil.rmtree(util.haproxy_dir(lb_id))
         if os.path.exists(init_path):
             os.remove(init_path)

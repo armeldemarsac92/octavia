@@ -926,12 +926,18 @@ backend {{ reject }}
 {% macro otlp_tracing_delivery_macro(constants, lib_consts, listener, state_file) %}
 listen {{ constants.HAPROXY_OTLP_TRACING_PROXY_PREFIX }}{{ listener.otlp_tracing.collector_pool_id }}:{{ listener.id }}
     bind {{ listener.otlp_tracing.socket }} user nobody mode 600
+    {% if listener.otlp_tracing.export_headers_arg is defined %}
+    mode tcp
+    {% else %}
     mode http
+    {% endif %}
     no log
     maxconn 1
     retries 0
     no option redispatch
+    {% if listener.otlp_tracing.export_headers_arg is not defined %}
     http-request disable-l7-retry
+    {% endif %}
     option abortonclose
     timeout client 1s
     timeout connect 1s

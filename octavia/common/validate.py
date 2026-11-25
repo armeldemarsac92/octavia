@@ -51,13 +51,23 @@ _ListenerPUT = 'octavia.api.v2.types.listener.ListenerPUT'
 # ends up in HAProxy config files — allowing config injection via newlines.
 INVALID_URL_CHARS_RE = re.compile(r'[\x00-\x20\x7f-\x9f]')
 
+_OTLP_EXPORT_HEADER_NAME = re.compile(
+    r"[A-Za-z0-9!#$%&'*+\-.^_`|~]{1,256}")
+_OTLP_EXPORT_HEADER_VALUE = re.compile(r'[!-~]+(?:[ \t][!-~]+)*')
+_OTLP_RESERVED_EXPORT_HEADERS = frozenset({
+    'host', 'connection', 'content-length', 'content-type', 'content-encoding',
+    'transfer-encoding', 'te', 'trailer', 'upgrade', 'proxy-connection',
+    'keep-alive', 'expect',
+})
+
 
 def otlp_tracing(value):
     if value is None:
         return None
     required = {'collector_pool_id', 'service_name', 'span_name'}
+    optional = {'sampling', 'attributes', 'headers'}
     if (not isinstance(value, dict) or not
-            required <= value.keys() <= required | {'sampling', 'attributes'}):
+            required <= value.keys() <= required | optional):
         raise exceptions.ValidationException(detail=_(
             'otlp_tracing requires collector_pool_id, service_name, and '
             'span_name.'))
@@ -96,7 +106,42 @@ def otlp_tracing(value):
         attributes = _otlp_span_attributes(value['attributes'])
         if attributes:
             tracing['attributes'] = attributes
+    if 'headers' in value:
+        headers = _otlp_export_headers(value['headers'])
+        if headers:
+            tracing['headers'] = headers
     return tracing
+
+
+def _otlp_export_headers(headers):
+    if not isinstance(headers, list) or len(headers) > 16:
+        raise exceptions.ValidationException(detail=_(
+            'OTLP export headers must be an array of at most 16 entries.'))
+    canonical = {}
+    for header in headers:
+        if not isinstance(header, dict) or header.keys() != {'name', 'value'}:
+            raise exceptions.ValidationException(detail=_(
+                'Each OTLP export header requires a name and a value.'))
+        name, value = header['name'], header['value']
+        if (not isinstance(name, str) or
+                not _OTLP_EXPORT_HEADER_NAME.fullmatch(name)):
+            raise exceptions.ValidationException(detail=_(
+                'Invalid OTLP export header name.'))
+        name = name.lower()
+        if name in _OTLP_RESERVED_EXPORT_HEADERS:
+            raise exceptions.ValidationException(detail=_(
+                'OTLP export header name is reserved for collector '
+                'transport.'))
+        if name in canonical:
+            raise exceptions.ValidationException(detail=_(
+                'OTLP export header names must be unique.'))
+        if (not isinstance(value, str) or not 1 <= len(value) <= 4096 or
+                not _OTLP_EXPORT_HEADER_VALUE.fullmatch(value)):
+            raise exceptions.ValidationException(detail=_(
+                'Invalid OTLP export header value.'))
+        canonical[name] = value
+    return [dict(name=name, value=canonical[name])
+            for name in sorted(canonical)]
 
 
 def _otlp_span_attributes(attributes):

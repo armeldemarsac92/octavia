@@ -49,7 +49,8 @@ global
     {% set sampling = tracing.get('sampling') %}
     {% set base = ' ' ~ sampling.base.numerator ~ ' ' ~ sampling.base.denominator if sampling else '' %}
     {% set parent = ' ' ~ sampling.parent.numerator ~ ' ' ~ sampling.parent.denominator if sampling and sampling.parent is defined else '' %}
-    lua-load {{ tracing.script }} {{ listener.id }} {{ tracing.socket }} {{ tracing.service_name }} "{{ tracing.span_name }}"{{ tracing.get('attributes_arg', '') }}{{ base }}{{ parent }}
+    {% set export_marker = constants.HAPROXY_OTLP_EXPORT_HEADER_MARKER if tracing.export_headers_arg is defined else '' %}
+    lua-load {{ tracing.script }} {{ listener.id }} {{ tracing.socket }} {{ tracing.service_name }} "{{ tracing.span_name }}"{{ tracing.get('export_headers_arg', '') }}{{ tracing.get('attributes_arg', '') }}{{ base }}{{ parent }}{{ export_marker }}
     {% endfor %}
     {% set found_ns = namespace(found=false) %}
     {% for listener in loadbalancer.listeners if listener.get('otlp_tracing', {}).get('pool') %}

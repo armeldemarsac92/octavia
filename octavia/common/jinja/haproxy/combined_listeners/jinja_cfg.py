@@ -185,6 +185,8 @@ def otlp_tracing_supported(loadbalancer, tracing, amp_details):
         ('attributes',
          settings.enabled_listener_otlp_span_attributes_providers,
          constants.GATEWAY_CAPABILITY_LISTENER_OTLP_SPAN_ATTRIBUTES),
+        ('headers', settings.enabled_listener_otlp_export_headers_providers,
+         constants.GATEWAY_CAPABILITY_LISTENER_OTLP_EXPORT_HEADERS),
     )
     return all(
         profile not in tracing or (
@@ -227,7 +229,8 @@ class JinjaTemplater:
                      otlp_publication=None, http_retry_backoff_results=None,
                      weighted_passthrough_degraded=False,
                      config_publication=None, system_ca_results=None,
-                     otlp_system_ca_applied=None, read_http_header_key=None):
+                     otlp_system_ca_applied=None, read_http_header_key=None,
+                     otlp_headers_applied=None):
         """Convert a logical configuration to the HAProxy version
 
         :param host_amphora: The Amphora this configuration is hosted on
@@ -270,6 +273,8 @@ class JinjaTemplater:
                if system_ca_results is not None else {}),
             **({'otlp_system_ca_applied': otlp_system_ca_applied}
                if otlp_system_ca_applied is not None else {}),
+            **({'otlp_headers_applied': otlp_headers_applied}
+               if otlp_headers_applied is not None else {}),
             **({'http_retry_backoff_results': http_retry_backoff_results}
                if http_retry_backoff_results is not None else {}),
             **({'http_persistence_results': http_persistence_results}
@@ -322,7 +327,8 @@ class JinjaTemplater:
                                 config_publication=None,
                                 system_ca_results=None,
                                 otlp_system_ca_applied=None,
-                                read_http_header_key=None):
+                                read_http_header_key=None,
+                                otlp_headers_applied=None):
         """Renders a templated configuration from a load balancer object
 
         :param host_amphora: The Amphora this configuration is hosted on
@@ -441,8 +447,12 @@ class JinjaTemplater:
             for listener in loadbalancer['listeners']:
                 if not listener['enabled']:
                     continue
+                tracing = listener.get('otlp_tracing', {})
+                if (otlp_headers_applied is not None and
+                        tracing.get('export_headers_arg')):
+                    otlp_headers_applied.add(listener['id'])
                 if otlp_system_ca_applied is not None:
-                    collector = listener.get('otlp_tracing', {}).get('pool')
+                    collector = tracing.get('pool')
                     if collector and collector.get(
                             'backend_tls_system_ca_sha256'):
                         otlp_system_ca_applied.add(listener['id'])
@@ -667,9 +677,11 @@ class JinjaTemplater:
                         constants.PENDING_DELETE, constants.DELETED) and
                     otlp_tracing_supported(loadbalancer, tracing,
                                            amp_details)):
-                transformed['otlp_tracing'] = self._transform_otlp_tracing(
+                exporter = self._transform_otlp_tracing(
                     listener, loadbalancer, feature_compatibility,
                     otlp_tls_certs or {})
+                if exporter is not None:
+                    transformed['otlp_tracing'] = exporter
             listener_transforms.append(transformed)
         additional_vips = [
             vip.ip_address for vip in loadbalancer.additional_vips]
@@ -1249,6 +1261,8 @@ class JinjaTemplater:
     def _transform_otlp_tracing(self, listener, loadbalancer,
                                 feature_compatibility, pool_certs):
         tracing = validate.otlp_tracing(listener.otlp_tracing)
+        headers = tracing.pop('headers', [])
+        unavailable = None if headers else tracing
         sampling_capability = (
             constants.GATEWAY_CAPABILITY_LISTENER_OTLP_SAMPLING)
         tracing['script'] = (
@@ -1275,7 +1289,7 @@ class JinjaTemplater:
                      pool.id == tracing['collector_pool_id']), None)
         if (pool is None or not pool.enabled or pool.provisioning_status in
                 (constants.PENDING_DELETE, constants.DELETED)):
-            return tracing
+            return unavailable
 
         try:
             validate.validate_otlp_collector_transport(
@@ -1290,15 +1304,15 @@ class JinjaTemplater:
             if certs.get('closed') or (pool.tls_enabled and any(
                     ref and not certs.get(name)
                     for name, ref in required_material.items())):
-                return tracing
+                return unavailable
             rendered = self._transform_pool(
                 pool, feature_compatibility, False, pool_tls_certs=certs)
             if not rendered['enabled']:
-                return tracing
+                return unavailable
             if (rendered.get('backend_tls_system_ca_sha256') and
                     pool.alpn_protocols is not None and
                     'alpn_protocols' not in rendered):
-                return tracing
+                return unavailable
             if 'alpn_protocols' in rendered:
                 rendered['alpn_protocols'] = 'http/1.1'
             sans = rendered.get('backend_tls_subject_alt_names')
@@ -1307,7 +1321,25 @@ class JinjaTemplater:
                     self._backend_tls_san_options(sans))
         except exceptions.ValidationException:
             LOG.warning('Ignoring invalid OTLP collector pool %s', pool.id)
-            return tracing
+            return unavailable
+        if headers:
+            tracing['script'] = constants.HAPROXY_OTLP_EXPORT_HEADERS_SCRIPT
+            tracing['action_prefix'] += '-export-headers'
+            # Fence old Lua workers from the newly published relay. The
+            # listener repository assigns a new revision to every update.
+            revision = getattr(listener, 'otlp_tracing_revision', None)
+            if not revision:
+                return None
+            socket_prefix = octavia_utils.haproxy_otlp_export_socket_prefix(
+                loadbalancer.id)
+            tracing['socket'] = (
+                f'{constants.HAPROXY_OTLP_TRACING_SOCKET_DIR}/'
+                f'{socket_prefix}{revision.replace("-", "")}.sock')
+            encoded = ','.join(
+                f'{header["name"].encode("ascii").hex()}:'
+                f'{header["value"].encode("ascii").hex()}'
+                for header in headers)
+            tracing['export_headers_arg'] = f' export_headers={encoded}'
         tracing['pool'] = rendered
         return tracing
 

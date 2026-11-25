@@ -12,8 +12,11 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import hashlib
+
 from octavia_lib.common import constants as lib_constants
 from oslo_config import cfg
+from wsme import exc as wsme_exc
 from wsme import types as wtypes
 
 from octavia.api.common import types
@@ -37,7 +40,25 @@ class OtlpTracing(wtypes.UserType):
         try:
             return validate.otlp_tracing(value)
         except exceptions.ValidationException as exc:
-            raise ValueError(str(exc)) from exc
+            # WSME includes the supplied value in errors for ValueError.
+            raise wsme_exc.ClientSideError(str(exc)) from None
+
+
+class OtlpTracingResponse(wtypes.UserType):
+    basetype = object
+    name = 'otlp_tracing_response'
+
+    @staticmethod
+    def validate(value):
+        result = dict(value)
+        headers = result.pop('headers', None)
+        if headers:
+            digest = hashlib.sha256()
+            for header in headers:
+                digest.update(
+                    f"{header['name']}\0{header['value']}\0".encode('ascii'))
+            result['headers_sha256'] = digest.hexdigest()
+        return result
 
 
 class RequestFilterSections(wtypes.UserType):
@@ -81,7 +102,7 @@ class ListenerResponse(BaseListenerType):
     default_pool_id = wtypes.wsattr(wtypes.UuidType())
     default_http_response = wtypes.wsattr(types.FixedHTTPResponse)
     request_filter_sections = wtypes.wsattr(RequestFilterSections())
-    otlp_tracing = wtypes.wsattr(OtlpTracing())
+    otlp_tracing = wtypes.wsattr(OtlpTracingResponse())
     otlp_tracing_status = wtypes.wsattr(wtypes.Enum(
         str, constants.PENDING_UPDATE, constants.ACTIVE, constants.ERROR))
     https_virtual_hosts = wtypes.wsattr(

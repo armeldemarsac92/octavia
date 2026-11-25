@@ -116,11 +116,16 @@ GATEWAY_CAPABILITY_LISTENER_OTLP_TRACING = 'listener_otlp_tracing_v1'
 GATEWAY_CAPABILITY_LISTENER_OTLP_SAMPLING = 'listener_otlp_sampling_v1'
 GATEWAY_CAPABILITY_LISTENER_OTLP_SPAN_ATTRIBUTES = (
     'listener_otlp_span_attributes_v1')
+GATEWAY_CAPABILITY_LISTENER_OTLP_EXPORT_HEADERS = (
+    'listener_otlp_export_headers_v1')
 HAPROXY_OTLP_TRACING_SCRIPT = '/var/lib/octavia/octavia-telemetry.lua'
 HAPROXY_OTLP_SAMPLING_SCRIPT = (
     '/var/lib/octavia/octavia-telemetry-sampling-v1.lua')
 HAPROXY_OTLP_SPAN_ATTRIBUTES_SCRIPT = (
     '/var/lib/octavia/octavia-telemetry-span-attributes-v1.lua')
+HAPROXY_OTLP_EXPORT_HEADERS_SCRIPT = (
+    '/var/lib/octavia/octavia-telemetry-export-headers-v1.lua')
+HAPROXY_OTLP_EXPORT_HEADER_MARKER = ' # octavia-otlp-export-header'
 OTLP_HTTP_STATUS_ATTRIBUTE = 'http.response.status_code'
 OTLP_BUILTIN_SPAN_ATTRIBUTES = frozenset((
     OTLP_HTTP_STATUS_ATTRIBUTE, 'http.request.method',
@@ -944,6 +949,7 @@ RBAC_ROLES_DEPRECATED_REASON = (
 # PROVIDERS
 OCTAVIA = 'octavia'
 AMPHORAV2 = 'amphorav2'
+AMPHORA_API_PROVIDER_NAMES = frozenset(('amphora', AMPHORAV2, OCTAVIA))
 
 # systemctl commands
 DISABLE = 'disable'

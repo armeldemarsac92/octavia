@@ -862,7 +862,7 @@ class ListenersController(base.BaseController):
                 'OTLP tracing requires an HTTP or TERMINATED_HTTPS listener.'))
         driver_utils.require_listener_otlp_tracing(
             driver, sampling='sampling' in tracing,
-            attributes='attributes' in tracing)
+            attributes='attributes' in tracing, headers='headers' in tracing)
         pool = self.repositories.pool.get_on_load_balancer_for_update(
             session, lb_id, project_id, tracing['collector_pool_id'])
         validate.validate_otlp_collector_transport(
@@ -875,9 +875,12 @@ class ListenersController(base.BaseController):
         if tracing is None:
             return (current is not None or listener.otlp_tracing_status in (
                 constants.PENDING_UPDATE, constants.ERROR))
-        return (current is not None and 'attributes' in current and
+        if current is None:
+            return False
+        removed = current.keys() - tracing.keys()
+        return (bool(removed) and removed <= {'attributes', 'headers'} and
                 tracing == {key: value for key, value in current.items()
-                            if key != 'attributes'})
+                            if key not in removed})
 
     def _validate_listener_request_filters(
             self, session, driver, protocol, sections, lb_id, project_id):
