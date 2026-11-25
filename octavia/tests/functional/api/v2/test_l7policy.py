@@ -5648,19 +5648,89 @@ class TestL7Policy(base.BaseAPITest):
     def test_grpc_content_type_rule_nested_load_balancer_create(self, rpc):
         rule = {'type': 'GRPC_CONTENT_TYPE', 'compare_type': 'EQUAL_TO',
                 'value': 'application/grpc'}
+        policy = {'action': 'REDIRECT_TO_POOL', 'rules': [rule],
+                  'redirect_pool': {'name': 'grpc-echo', 'protocol': 'HTTP',
+                                    'lb_algorithm': 'ROUND_ROBIN'}}
         listener = {'protocol': 'HTTP', 'protocol_port': 80,
-                    'l7policies': [{'action': 'REJECT', 'rules': [rule]}]}
+                    'l7policies': [policy]}
         body = {'loadbalancer': {'project_id': uuidutils.generate_uuid(),
                                  'provider': 'amphora',
                                  'vip_subnet_id': uuidutils.generate_uuid(),
                                  'listeners': [listener]}}
         self.post(self.LBS_PATH, body, status=501)
-        self.conf.config(group='api_settings',
-                         enabled_grpc_content_type_providers=['amphora'])
+        self.conf.config(
+            group='api_settings',
+            enabled_grpc_content_type_providers=['amphora'],
+            enabled_response_header_operation_providers=['amphora'])
         listener['protocol'] = 'TCP'
         self.post(self.LBS_PATH, body, status=400)
-        rpc.return_value.cast.assert_not_called()
         listener['protocol'] = 'HTTP'
+        metadata = {'operation': 'ADD', 'name': 'trace-bin',
+                    'value': ', '.join(['Yg'] * 49)}
+        policy['response_header_operations'] = [metadata]
+        rejected = self.post(self.LBS_PATH, body, status=400)
+        self.assertIn('48 fields', rejected.json['faultstring'])
+        rpc.return_value.cast.assert_not_called()
+        metadata['value'] = ', '.join(['Yg'] * 48)
         lb = self.post(self.LBS_PATH, body).json['loadbalancer']
-        saved_rule = lb['listeners'][0]['l7policies'][0]['rules'][0]
+        saved = lb['listeners'][0]['l7policies'][0]
+        saved_rule = saved['rules'][0]
         self.assertEqual(rule, {key: saved_rule[key] for key in rule})
+        self.assertEqual([metadata], saved['response_header_operations'])
+
+    @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
+    def test_grpc_binary_response_header_field_limit(self, rpc):
+        self.conf.config(
+            group='api_settings',
+            enabled_grpc_content_type_providers=['amphora'],
+            enabled_response_header_operation_providers=['amphora'],
+            enabled_l7policy_initial_rules_providers=['amphora'])
+        lb = self.create_load_balancer(uuidutils.generate_uuid(),
+                                       provider='amphora')['loadbalancer']
+        lb_id = lb['id']
+        self.set_lb_status(lb_id)
+        listener_id = self.create_listener('HTTP', 80, lb_id)['listener']['id']
+        self.set_lb_status(lb_id)
+        pool_id = self.create_pool(lb_id, 'HTTP', 'ROUND_ROBIN')['pool']['id']
+        self.set_lb_status(lb_id)
+        rule = {'type': 'GRPC_CONTENT_TYPE', 'compare_type': 'EQUAL_TO',
+                'value': 'application/grpc'}
+        field = 'response_header_operations'
+        limit = [{'operation': 'SET', 'name': 'replace-bin',
+                  'value': ', '.join(['YQ=='] * 24)},
+                 {'operation': 'ADD', 'name': 'trace-bin',
+                  'value': ', '.join(['Yg'] * 24)},
+                 {'operation': 'REMOVE', 'name': 'x-old'}]
+        over = [limit[0], dict(limit[1], value=limit[1]['value'] + ', Yg'),
+                limit[2]]
+        opts = {'redirect_pool_id': pool_id, 'admin_state_up': False}
+        rpc.return_value.cast.reset_mock()
+        self.create_l7policy(listener_id, 'REDIRECT_TO_POOL', status=400,
+                             rules=[rule], **opts, **{field: over})
+        rpc.return_value.cast.assert_not_called()
+        policy_id = self.create_l7policy(
+            listener_id, 'REDIRECT_TO_POOL', rules=[rule],
+            **opts, **{field: limit})['l7policy']['id']
+        self.set_lb_status(lb_id)
+        path = self.L7POLICY_PATH.format(l7policy_id=policy_id)
+        self.put(path, {'l7policy': {field: over}}, status=400)
+        self.assertEqual(limit, self.get(path).json['l7policy'][field])
+
+        # The same value is literal until an active native rule is installed.
+        created = self.create_l7policy(listener_id, 'REDIRECT_TO_POOL',
+                                       **opts, **{field: over})
+        ordinary = created['l7policy']
+        self.assertEqual(over, ordinary[field])
+        self.set_lb_status(lb_id)
+        ordinary_id = ordinary['id']
+        self.create_l7rule(ordinary_id, rule['type'], rule['compare_type'],
+                           rule['value'], status=400)
+        legacy = self.create_l7rule(ordinary_id, 'PATH', 'EQUAL_TO', '/legacy')
+        self.set_lb_status(lb_id)
+        rule_path = self.L7RULE_PATH.format(
+            l7policy_id=ordinary_id, l7rule_id=legacy['rule']['id'])
+        self.put(rule_path, {'rule': rule}, status=400)
+        ordinary_path = self.L7POLICY_PATH.format(l7policy_id=ordinary_id)
+        self.put(ordinary_path, {'l7policy': {field: limit}})
+        self.set_lb_status(lb_id)
+        self.put(rule_path, {'rule': rule})

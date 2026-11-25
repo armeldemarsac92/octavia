@@ -833,6 +833,11 @@ class L7PolicyController(base.BaseController):
             validate_policy_headers(
                 l7policy_dict, listener.protocol, driver,
                 old_policy=db_l7policy)
+            response_ops = l7policy_dict.get('response_header_operations')
+            if response_ops and policy_repo.has_enabled_l7rule(
+                    lock_session, constants.L7RULE_TYPE_GRPC_CONTENT_TYPE,
+                    policy_id=id):
+                validate.validate_grpc_response_header_fields(response_ops)
 
             # Prepare the data for the driver data model
             provider_l7policy_dict = (

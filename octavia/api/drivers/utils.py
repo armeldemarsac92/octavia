@@ -233,6 +233,12 @@ def gateway_capabilities(driver):
     if (driver.name in api_settings.enabled_grpc_content_type_providers and
             getattr(driver, 'supports_grpc_content_type', False) is True):
         capabilities.append(constants.GATEWAY_CAPABILITY_GRPC_CONTENT_TYPE)
+        if (constants.GATEWAY_CAPABILITY_RESPONSE_HEADER_OPERATIONS in
+                capabilities and getattr(
+                    driver, 'supports_grpc_binary_response_metadata',
+                    False) is True):
+            capabilities.append(
+                constants.GATEWAY_CAPABILITY_GRPC_BINARY_RESPONSE_METADATA)
     if (driver.name in api_settings.enabled_backend_h2c_providers and
             getattr(driver, 'supports_backend_h2c', False) is True):
         capabilities.append(constants.GATEWAY_CAPABILITY_BACKEND_H2C)
