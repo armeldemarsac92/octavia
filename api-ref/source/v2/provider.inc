@@ -321,6 +321,11 @@ on HTTP pools with ``HTTP_COOKIE`` persistence. The load balancer generates
 the cookie and uses it to select a member after selecting the pool. See
 :ref:`session_persistence` for the name and update rules.
 
+``http_cookie_absolute_timeout_v1`` enables an absolute lifetime for named
+HTTP session cookies. Providers advertise it alongside ``http_cookie_name_v1``
+when operators opt in. See :ref:`session_persistence` for the timeout and
+scope fields.
+
 ``tcp_connection_rejection_v1`` enables a per-connection rejection fraction
 on Amphora TCP pools. Operators enable it by setting
 ``[api_settings] enabled_tcp_connection_rejection_providers`` after upgrading

@@ -115,7 +115,8 @@ class Loadbalancer:
         # by an older Octavia controller. This is needed in order to prevent
         # a duplicate entry for 'group' in haproxy configuration, which will
         # result an error when haproxy starts.
-        new_config = re.sub(r"\s+group\s.+", "", s_io.getvalue())
+        new_config = re.sub(r"(?m)^[ \t]*group[ \t]+[^\n]+\n?", "",
+                            s_io.getvalue())
 
         # Handle any haproxy version compatibility issues
         new_config = haproxy_compatibility.process_cfg_for_version_compat(
@@ -132,11 +133,17 @@ class Loadbalancer:
             subprocess.check_output(cmd, stderr=subprocess.STDOUT,
                                     encoding='utf-8')
         except subprocess.CalledProcessError as e:
-            LOG.error("Failed to verify haproxy file: %s %s", e, e.output)
+            details = e.output
+            for key in re.findall(
+                    r'(?m)^\s*http-request set-var'
+                    r'\(txn\.octavia_cookie_signing_key\) '
+                    r'str\(([A-Za-z0-9+/]{43}=)\)$', new_config):
+                details = details.replace(key, '[redacted]')
+            LOG.error("Failed to verify haproxy file: %s %s", e, details)
             # Save the last config that failed validation for debugging
             os.rename(name, ''.join([name, '-failed']))
             return webob.Response(
-                json={'message': "Invalid request", 'details': e.output},
+                json={'message': "Invalid request", 'details': details},
                 status=400)
 
         # file ok - move it

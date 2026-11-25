@@ -127,6 +127,13 @@ def gateway_capabilities(driver):
     if (driver.name in api_settings.enabled_http_cookie_name_providers and
             getattr(driver, 'supports_http_cookie_name', False) is True):
         capabilities.append(constants.GATEWAY_CAPABILITY_HTTP_COOKIE_NAME)
+        absolute_cookie_providers = (
+            api_settings.enabled_http_cookie_absolute_timeout_providers)
+        if (driver.name in absolute_cookie_providers and
+                getattr(driver, 'supports_http_cookie_absolute_timeout',
+                        False) is True):
+            capabilities.append(
+                constants.GATEWAY_CAPABILITY_HTTP_COOKIE_ABSOLUTE_TIMEOUT)
     budget_providers = api_settings.enabled_backend_retry_budget_providers
     if (BACKEND_RETRY_BUDGET_PAYLOAD_AVAILABLE and
             driver.name in budget_providers and
@@ -371,6 +378,15 @@ def require_http_cookie_name(driver, protocol):
         raise exceptions.ProviderUnsupportedOptionError(
             prov=driver.name, user_msg=_(
                 'Custom HTTP_COOKIE names are unavailable for this provider.'))
+
+
+def require_http_cookie_absolute_timeout(driver):
+    if (constants.GATEWAY_CAPABILITY_HTTP_COOKIE_ABSOLUTE_TIMEOUT not in
+            gateway_capabilities(driver)):
+        raise exceptions.ProviderUnsupportedOptionError(
+            prov=driver.name, user_msg=_(
+                'Absolute HTTP_COOKIE timeouts are unavailable for this '
+                'provider.'))
 
 
 def require_http_request_policy(driver, protocol):
@@ -1123,6 +1139,15 @@ def pool_dict_to_provider_dict(pool_dict, for_delete=False, for_update=False):
             del new_pool_dict['session_persistence']['pool']
         new_pool_dict['session_persistence'].pop(
             'http_cookie_name_enabled', None)
+        new_pool_dict['session_persistence'].pop(
+            'cookie_absolute_timeout_error', None)
+        # Keep legacy provider payloads unchanged. An update carrying explicit
+        # nulls uses them to clear the timeout and scope.
+        if not for_update:
+            persistence = new_pool_dict['session_persistence']
+            if persistence.get('cookie_absolute_timeout_ms') is None:
+                persistence.pop('cookie_absolute_timeout_ms', None)
+                persistence.pop('cookie_scope', None)
     if 'l7policies' in new_pool_dict:
         del new_pool_dict['l7policies']
     if 'listeners' in new_pool_dict:

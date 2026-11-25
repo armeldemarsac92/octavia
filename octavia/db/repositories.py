@@ -1096,6 +1096,10 @@ class HealthMonitorRepository(BaseRepository):
 class SessionPersistenceRepository(BaseRepository):
     model_class = models.SessionPersistence
 
+    def get_for_update(self, session, pool_id):
+        return (session.query(self.model_class).filter_by(pool_id=pool_id)
+                .populate_existing().with_for_update().one_or_none())
+
     def update(self, session, pool_id, **model_kwargs):
         """Updates a session persistence entity in the database by pool_id."""
         session.query(self.model_class).filter_by(
@@ -1151,6 +1155,24 @@ class PoolRepository(BaseRepository):
                     pool.tcp_member_batch_id !=
                     consts.TCP_MEMBER_BATCH_FAILED)).update(
                     {'provisioning_status': consts.ACTIVE})
+
+    def set_http_cookie_pool_statuses(self, session, policies, *,
+                                      failed, recovered):
+        persistence = models.SessionPersistence
+        pool = self.model_class
+        for pool_id in sorted(failed | recovered):
+            name, timeout, scope = policies[pool_id]
+            session.query(persistence).filter(
+                persistence.pool_id == pool_id,
+                persistence.cookie_name == name,
+                persistence.cookie_absolute_timeout_ms == timeout,
+                persistence.cookie_scope == scope,
+                persistence.pool.has(and_(
+                    pool.enabled.is_(True),
+                    pool.provisioning_status.notin_(
+                        (consts.PENDING_DELETE, consts.DELETED))))).update(
+                            {'cookie_absolute_timeout_error':
+                             pool_id in failed}, synchronize_session=False)
 
     def mark_active(self, session, id):
         if self.batch_owns_graph(session, id):

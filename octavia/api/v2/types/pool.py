@@ -23,6 +23,31 @@ from octavia.common import constants
 from octavia.common import data_models
 from octavia.common import exceptions
 from octavia.common import validate
+from octavia.i18n import _
+
+
+class HTTPAbsoluteCookieTimeout(wtypes.UserType):
+    basetype = object
+    name = 'cookie_absolute_timeout_ms'
+
+    @staticmethod
+    def validate(value):
+        if not validate.is_valid_http_cookie_absolute_timeout(value):
+            raise ValueError(_('cookie_absolute_timeout_ms must be an '
+                               'integer from 0 to 1439985600000.'))
+        return value
+
+
+class HTTPCookieScope(wtypes.UserType):
+    basetype = object
+    name = 'cookie_scope'
+
+    @staticmethod
+    def validate(value):
+        if not validate.is_valid_http_cookie_scope(value):
+            raise ValueError(_('cookie_scope must be 64 lowercase '
+                               'hexadecimal characters.'))
+        return value
 
 
 class SessionPersistenceResponse(types.BaseType):
@@ -31,6 +56,16 @@ class SessionPersistenceResponse(types.BaseType):
     cookie_name = wtypes.wsattr(wtypes.text)
     persistence_timeout = wtypes.wsattr(wtypes.IntegerType())
     persistence_granularity = wtypes.wsattr(types.IPAddressType())
+    cookie_absolute_timeout_ms = wtypes.wsattr(HTTPAbsoluteCookieTimeout())
+    cookie_scope = wtypes.wsattr(HTTPCookieScope())
+
+    @classmethod
+    def from_db_obj(cls, db_obj):
+        result = super().from_db_obj(db_obj)
+        if result.cookie_absolute_timeout_ms is None:
+            result.cookie_absolute_timeout_ms = wtypes.Unset
+            result.cookie_scope = wtypes.Unset
+        return result
 
 
 class SessionPersistencePOST(types.BaseType):
@@ -45,6 +80,8 @@ class SessionPersistencePOST(types.BaseType):
     persistence_timeout = wtypes.wsattr(wtypes.IntegerType(), default=None)
     persistence_granularity = wtypes.wsattr(types.IPAddressType(),
                                             default=None)
+    cookie_absolute_timeout_ms = wtypes.wsattr(HTTPAbsoluteCookieTimeout())
+    cookie_scope = wtypes.wsattr(HTTPCookieScope())
 
 
 class SessionPersistencePUT(types.BaseType):
@@ -53,11 +90,12 @@ class SessionPersistencePUT(types.BaseType):
     # pattern of invalid characters is based on
     # https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Set-Cookie
     cookie_name = wtypes.wsattr(wtypes.StringType(
-        max_length=255, pattern=r'^[^\s,;\\]+$'),
-        default=None)
+        max_length=255, pattern=r'^[^\s,;\\]+$'))
     persistence_timeout = wtypes.wsattr(wtypes.IntegerType(), default=None)
     persistence_granularity = wtypes.wsattr(types.IPAddressType(),
                                             default=None)
+    cookie_absolute_timeout_ms = wtypes.wsattr(HTTPAbsoluteCookieTimeout())
+    cookie_scope = wtypes.wsattr(HTTPCookieScope())
 
 
 class BackendTLSSubjectAltNames(wtypes.UserType):
@@ -94,6 +132,13 @@ class BasePoolType(types.BaseType):
                        'crl_container_ref': 'crl_container_id'}
 
     _child_map = {'health_monitor': {'id': 'healthmonitor_id'}}
+
+    @classmethod
+    def from_db_obj(cls, db_obj):
+        result = super().from_db_obj(db_obj)
+        result.provisioning_status = data_models.pool_api_provisioning_status(
+            db_obj)
+        return result
 
 
 class PoolResponse(BasePoolType):

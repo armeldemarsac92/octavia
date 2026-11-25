@@ -18,6 +18,7 @@
 from oslo_db.sqlalchemy import models
 import sqlalchemy as sa
 from sqlalchemy.dialects import mysql
+from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.ext import orderinglist
 from sqlalchemy import orm
 from sqlalchemy.orm import Mapped
@@ -142,6 +143,10 @@ class SessionPersistence(base_models.BASE):
         nullable=False)
     cookie_name = sa.Column(sa.String(255), nullable=True)
     http_cookie_name_enabled = sa.Column(
+        sa.Boolean(), nullable=False, server_default=sa.false())
+    cookie_absolute_timeout_ms = sa.Column(sa.BigInteger(), nullable=True)
+    cookie_scope = sa.Column(sa.String(64), nullable=True)
+    cookie_absolute_timeout_error = sa.Column(
         sa.Boolean(), nullable=False, server_default=sa.false())
     persistence_timeout = sa.Column(sa.Integer(), nullable=True)
     persistence_granularity = sa.Column(sa.String(64), nullable=True)
@@ -400,6 +405,22 @@ class Pool(base_models.BASE, base_models.IdMixin, base_models.ProjectMixin,
     tls_ciphers = sa.Column(sa.String(2048), nullable=True)
     tls_versions = sa.Column(db_types.ScalarListType(), nullable=True)
     alpn_protocols = sa.Column(db_types.ScalarListType(), nullable=True)
+
+    @hybrid_property
+    def _api_provisioning_status(self):
+        return data_models.pool_api_provisioning_status(self)
+
+    @_api_provisioning_status.expression
+    def _api_provisioning_status(cls):
+        # Match the API response projection for filtering and pagination.
+        impaired = cls.session_persistence.has(sa.and_(
+            SessionPersistence.cookie_absolute_timeout_ms.is_not(None),
+            SessionPersistence.cookie_absolute_timeout_error.is_(True)))
+        return sa.case(
+            (sa.and_(cls.enabled.is_(True),
+                     cls.provisioning_status == constants.ACTIVE, impaired),
+             constants.ERROR),
+            else_=cls.provisioning_status)
 
     # This property should be a unique list of any listeners that reference
     # this pool as its default_pool and any listeners referenced by enabled

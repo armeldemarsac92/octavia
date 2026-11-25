@@ -458,6 +458,66 @@ class TestHaproxyAmphoraLoadBalancerDriverTest(base.TestCase):
 
     @mock.patch('octavia.db.api.session')
     @mock.patch('octavia.db.repositories.PoolRepository.'
+                'set_http_cookie_pool_statuses')
+    def test_http_cookie_status_uses_acknowledged_amphorae(self, status,
+                                                           session):
+        primary, secondary = [
+            data_models.Amphora(id=name, role=role,
+                                status=constants.AMPHORA_ALLOCATED)
+            for name, role in (('primary', constants.ROLE_MASTER),
+                               ('secondary', constants.ROLE_BACKUP))]
+        primary.api_version = secondary.api_version = API_VERSION
+        scope = 'a' * 64
+        pool = data_models.Pool(
+            id='pool', protocol=constants.PROTOCOL_HTTP, enabled=True,
+            session_persistence=data_models.SessionPersistence(
+                cookie_name='gw', cookie_absolute_timeout_ms=1500,
+                cookie_scope=scope))
+        listener = data_models.Listener(
+            id='http', protocol=constants.PROTOCOL_HTTP, enabled=True,
+            pools=[pool])
+        lb = data_models.LoadBalancer(
+            id='lb', enabled=True, topology=constants.TOPOLOGY_ACTIVE_STANDBY,
+            listeners=[listener], amphorae=[primary, secondary])
+        client = self.driver.clients[API_VERSION]
+        published_in = session().begin().__enter__()
+        policy = {pool.id: ('gw', 1500, scope)}
+        rendered_states = {primary.id: constants.ERROR,
+                           secondary.id: constants.ACTIVE}
+
+        def build_config(host_amphora, http_cookie_results, **kwargs):
+            http_cookie_results[pool.id] = rendered_states[host_amphora.id]
+            return 'config'
+
+        self.driver.jinja_combo.build_config.side_effect = build_config
+        for batch in (False, True):
+            with self.subTest(batch=batch):
+                status.reset_mock()
+                client.reload_listener.side_effect = [None, RuntimeError()]
+                self.assertRaises(RuntimeError, self.driver.update, lb,
+                                  tcp_member_batch=batch)
+                status.assert_called_once_with(
+                    published_in, policy, failed={pool.id}, recovered=set())
+
+        status.reset_mock()
+        client.upload_config.side_effect = [None, RuntimeError()]
+        self.assertRaises(RuntimeError, self.driver.update, lb,
+                          tcp_member_batch=True)
+        status.assert_not_called()
+
+        client.upload_config.side_effect = None
+        client.reload_listener.side_effect = None
+        rendered_states[primary.id] = constants.ACTIVE
+        secondary.role = constants.ROLE_MASTER
+        self.driver.update(lb)
+        status.assert_not_called()
+        secondary.role = constants.ROLE_BACKUP
+        self.driver.update(lb)
+        status.assert_called_once_with(
+            published_in, policy, failed=set(), recovered={pool.id})
+
+    @mock.patch('octavia.db.api.session')
+    @mock.patch('octavia.db.repositories.PoolRepository.'
                 'set_backend_tls_pool_statuses')
     def test_failover_uses_same_trust_decision_on_both_peers(
             self, status, session):

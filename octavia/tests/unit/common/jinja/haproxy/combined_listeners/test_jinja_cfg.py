@@ -13,8 +13,11 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import base64
 import copy
 import os
+from pathlib import Path
+import tempfile
 from types import SimpleNamespace
 from unittest import mock
 
@@ -2817,6 +2820,76 @@ class TestHaproxyCfg(base.TestCase):
         other_project = jinja_cfg._http_cookie_member_token(
             'other-project', 'gateway_pool', '2001:db8::10', 8080)
         self.assertNotEqual(token, other_project)
+
+    def test_render_managed_absolute_http_cookie(self):
+        capability = constants.GATEWAY_CAPABILITY_HTTP_COOKIE_ABSOLUTE_TIMEOUT
+        listener = sample_configs_combined.sample_listener_tuple(monitor=False)
+        pool = SimpleNamespace(**listener.default_pool._asdict())
+        pool.project_id = listener.project_id
+        pool.session_persistence = data_models.SessionPersistence(
+            type=constants.SESSION_PERSISTENCE_HTTP_COOKIE,
+            cookie_name='gw.session', http_cookie_name_enabled=True,
+            cookie_absolute_timeout_ms=0, cookie_scope='a' * 64)
+        policy_tuple = sample_configs_combined.sample_l7policy_tuple(
+            'cookie-filter')
+        policy = SimpleNamespace(**policy_tuple._asdict())
+        policy.redirect_pool = pool
+        policy.redirect_pool_id = pool.id
+        policy.response_header_operations = [
+            {'operation': 'SET', 'name': 'sEt-CoOkIe',
+             'value': 'gw.session=from-filter'},
+            {'operation': 'SET', 'name': 'X-Cookie-Fixture', 'value': 'kept'},
+        ]
+        listener = listener._replace(default_pool=pool, pools=[pool],
+                                     l7policies=[policy])
+        amphora = sample_configs_combined.sample_amphora_tuple()
+        conf = self.useFixture(oslo_fixture.Config(cfg.CONF))
+        with tempfile.TemporaryDirectory() as directory:
+            key = b'x' * 32
+            key_file = Path(directory) / 'signing-key'
+            key_file.write_bytes(key)
+            conf.config(group='haproxy_amphora',
+                        http_cookie_signing_key_file=str(key_file))
+
+            # A key readable by another account is unavailable for signing.
+            key_file.chmod(0o644)
+            results = {}
+            degraded = self.jinja_cfg.render_loadbalancer_obj(
+                amphora, [listener], amp_details={capability: True},
+                http_cookie_results=results)
+            self.assertEqual({pool.id: constants.ERROR}, results)
+            self.assertIn('cookie gw.session insert indirect nocache',
+                          degraded)
+            self.assertNotIn('octavia_cookie_signing_key', degraded)
+            self.assertNotRegex(degraded, r'(?m)^    server .* cookie ')
+
+            key_file.chmod(0o600)
+            rendered = self.jinja_cfg.render_loadbalancer_obj(
+                amphora, [listener], amp_details={capability: True},
+                http_cookie_results=results)
+            self.assertEqual({pool.id: constants.ACTIVE}, results)
+            # Keep the signing material out of assertion failure messages.
+            encoded_key = base64.b64encode(key).decode('ascii')
+            self.assertEqual(-1, rendered.find(encoded_key))
+            config_for_assertions = '\n'.join(
+                line for line in rendered.splitlines()
+                if 'set-var(txn.octavia_cookie_signing_key) str(' not in line)
+            for expected in (
+                    ' -m int lt 0', 'req.cook_cnt(gw.session) eq 1',
+                    "Set-Cookie '^gw[.]session=.*$'",
+                    'use-server sample_member_id_1 if',
+                    'set-header "x-cookie-fixture" "kept"'):
+                self.assertIn(expected, config_for_assertions)
+            self.assertNotIn('gw.session=from-filter', config_for_assertions)
+            server_lines = '\n'.join(
+                line for line in rendered.splitlines()
+                if line.startswith('    server '))
+            self.assertNotIn(' cookie ', server_lines)
+
+        old_amphora = self.jinja_cfg.render_loadbalancer_obj(
+            amphora, [listener], amp_details={})
+        self.assertNotIn('octavia_cookie_signing_key', old_amphora)
+        self.assertNotRegex(old_amphora, r'(?m)^    server .* cookie ')
 
     def test_transform_health_monitor(self):
         in_persistence = sample_configs_combined.sample_health_monitor_tuple()
