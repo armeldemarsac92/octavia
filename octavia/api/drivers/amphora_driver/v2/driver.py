@@ -91,6 +91,7 @@ class AmphoraProviderDriver(driver_base.ProviderDriver):
     supports_http_header_exact = True
     supports_http_query_param_exact = True
     supports_grpc_content_type = True
+    supports_grpc_binary_response_metadata = True
     supports_http_method_match = True
     supports_backend_h2c = True
     supports_backend_tls_hostname = True

@@ -202,6 +202,18 @@ listener. Operations on ``Connection``, ``Content-Length``, ``Keep-Alive``,
 return HTTP 400. A policy update preserves omitted fields. Send an empty
 list to clear the response operations.
 
+``grpc_binary_response_metadata_v1`` allows a selected policy with an
+active ``GRPC_CONTENT_TYPE`` rule to send comma-separated base64 values
+for a ``-bin`` response header as separate fields. ``SET`` replaces the
+existing fields and adds each remaining value. ``ADD`` appends one field
+for each value. A policy may set or add up to 48 fields in total after
+expansion. Removal creates no fields. The API rejects writes that would
+exceed the limit. The renderer omits the response operations of a stored
+gRPC policy over the limit and continues routing traffic. Policies without
+the native gRPC rule keep the value as one field. Amphora advertises this
+capability when both response header operations and native gRPC Content-Type
+matching are enabled.
+
 ``l7policy_initial_rules_v1`` allows creating a disabled L7 policy and its
 initial rules in one POST to ``/v2/lbaas/l7policies`` on an existing HTTP or
 terminated HTTPS listener. Providers with weighted TLS SNI support can
