@@ -30,6 +30,9 @@ ln -s $AMP_VENV/bin/amphora-health-checker /usr/local/bin/amphora-health-checker
 # Link amphora interface script
 ln -s $AMP_VENV/bin/amphora-interface /usr/local/bin/amphora-interface || true
 
+# Link the UDP guard helper for the LVS service units
+ln -s $AMP_VENV/bin/amphora-udp-guard /usr/local/bin/amphora-udp-guard
+
 # Link the prometheus proxy
 ln -s $AMP_VENV/bin/prometheus-proxy /usr/local/bin/prometheus-proxy || true
 

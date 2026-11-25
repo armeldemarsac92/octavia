@@ -196,7 +196,7 @@ def is_lvs_listener_running(listener_id):
         os.path.join('/proc', get_keepalivedlvs_pid(listener_id)))
 
 
-def install_netns_systemd_service():
+def install_netns_systemd_service(guard_boot=None):
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
     # mode 00644
     mode = stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH
@@ -211,7 +211,15 @@ def install_netns_systemd_service():
             os.path.realpath(__file__)
         ) + consts.AGENT_API_TEMPLATES))
 
-    if not os.path.exists(netns_path):
+    if guard_boot:
+        # Upgrade an existing image's generated unit as well as new units.
+        from octavia.amphorae.backends.agent.api_server import udp_guard
+
+        text = jinja_env.get_template(
+            consts.AMP_NETNS_SVC_PREFIX + '.systemd.j2').render(
+                amphora_nsname=consts.AMPHORA_NAMESPACE, guard_boot=guard_boot)
+        udp_guard.write_file(netns_path, text.encode('utf-8'), mode=mode)
+    elif not os.path.exists(netns_path):
         with os.fdopen(os.open(netns_path, flags, mode), 'w') as text_file:
             text = jinja_env.get_template(
                 consts.AMP_NETNS_SVC_PREFIX + '.systemd.j2').render(
