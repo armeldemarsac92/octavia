@@ -91,6 +91,12 @@ class TestInitialL7Rules(base.BaseAPITest):
         legacy = self._post_policy()['l7policy']
         legacy_path = self.L7POLICY_PATH.format(l7policy_id=legacy['id'])
         self.assertNotIn(field, legacy)
+
+        def listed_legacy():
+            policies = self.get(self.L7POLICIES_PATH).json['l7policies']
+            return next(row for row in policies if row['id'] == legacy['id'])
+
+        self.assertNotIn(field, listed_legacy())
         self.set_lb_status(self.lb_id)
         auth_pool = self.create_pool(
             self.lb_id, 'HTTP', 'ROUND_ROBIN',
@@ -119,6 +125,7 @@ class TestInitialL7Rules(base.BaseAPITest):
                              'amphora'])
         self.assertIn(cap, self.get(caps_path).json['gateway_capabilities'])
         self.assertIsNone(self.get(legacy_path).json['l7policy'][field])
+        self.assertIsNone(listed_legacy()[field])
         self._post_policy(status=400, **{
             **payload, 'redirect_pool_id': auth_pool['id']})
         self._post_policy(status=400, **{
