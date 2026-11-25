@@ -344,6 +344,15 @@ class TestHaproxyAmphoraLoadBalancerDriverTest(base.TestCase):
                       exporter)
         self.assertIn('verifyhost-strict collector.example.test', exporter)
         self.assertIn('alpn http/1.1', exporter)
+        collector.alpn_protocols = None
+        self.driver.update(lb)
+        attached = client.upload_config.call_args.args[2]
+        exporter = attached[attached.index('listen octavia-otlp-'):]
+        self.assertIn('server collector-member 192.0.2.30:4318', exporter)
+        self.assertIn(f'backend-system-ca/{digest}.pem verify required',
+                      exporter)
+        self.assertIn('verifyhost-strict collector.example.test', exporter)
+        self.assertNotIn(' alpn ', exporter)
         self.assertEqual({collector.id: digest}, proof.call_args.args[2])
         self.assertEqual(constants.ACTIVE,
                          tracing_status.call_args.args[1][listener.id][-1])

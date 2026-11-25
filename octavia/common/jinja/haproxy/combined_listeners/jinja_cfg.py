@@ -1296,6 +1296,7 @@ class JinjaTemplater:
             if not rendered['enabled']:
                 return tracing
             if (rendered.get('backend_tls_system_ca_sha256') and
+                    pool.alpn_protocols is not None and
                     'alpn_protocols' not in rendered):
                 return tracing
             if 'alpn_protocols' in rendered:
