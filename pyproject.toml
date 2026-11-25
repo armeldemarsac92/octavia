@@ -52,6 +52,7 @@ haproxy-vrrp-check = "octavia.cmd.haproxy_vrrp_check:main"
 octavia-status = "octavia.cmd.status:main"
 amphora-health-checker = "octavia.cmd.health_checker:main"
 amphora-interface = "octavia.cmd.interface:main"
+amphora-udp-guard = "octavia.amphorae.backends.agent.api_server.udp_guard:main"
 prometheus-proxy = "octavia.cmd.prometheus_proxy:main"
 
 [project.entry-points."octavia.amphora.drivers"]

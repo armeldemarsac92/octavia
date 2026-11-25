@@ -74,6 +74,7 @@ Response Parameters
    - tls_container_ref: tls_container_ref
    - tls_enabled: tls_enabled
    - tls_versions: tls_versions
+   - udp_packet_drop: udp-packet-drop
    - updated_at: updated_at
 
 Response Example
@@ -385,6 +386,7 @@ Response Parameters
    - tls_ciphers: tls_ciphers
    - tls_container_ref: tls_container_ref
    - tls_versions: tls_versions
+   - udp_packet_drop: udp-packet-drop
    - updated_at: updated_at
 
 Response Example

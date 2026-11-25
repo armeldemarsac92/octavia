@@ -59,6 +59,12 @@ class MemberFlows:
         return linear_flow.Flow('apply_tcp_member_batch').add(
             amphora_driver_tasks.ApplyTCPMemberBatch(network_flow))
 
+    def get_apply_udp_member_batch_flow(self):
+        network_flow = linear_flow.Flow('prepare_udp_member_networks')
+        network_flow.add(*_member_network_tasks(additions_only=True))
+        return linear_flow.Flow('apply_udp_member_batch').add(
+            amphora_driver_tasks.ApplyUDPMemberBatch(network_flow))
+
     def get_create_member_flow(self):
         """Create a flow to create a member
 

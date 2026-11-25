@@ -69,6 +69,18 @@ class TCPConnectionRejection(wtypes.UserType):
             raise ValueError(str(error)) from error
 
 
+class UDPPacketDrop(wtypes.UserType):
+    basetype = object
+    name = 'udp_packet_drop'
+
+    @staticmethod
+    def validate(value):
+        try:
+            return validate.udp_packet_drop(value)
+        except exceptions.ValidationException as error:
+            raise ValueError(str(error)) from error
+
+
 class AlpnProtocolType(wtypes.UserType):
     basetype = str
     name = 'alpn_protocol'

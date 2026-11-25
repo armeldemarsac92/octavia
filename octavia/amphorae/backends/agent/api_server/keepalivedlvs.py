@@ -12,8 +12,10 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import io
 import os
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -27,8 +29,10 @@ from werkzeug import exceptions
 
 from octavia.amphorae.backends.agent.api_server import loadbalancer
 from octavia.amphorae.backends.agent.api_server import lvs_listener_base
+from octavia.amphorae.backends.agent.api_server import udp_guard
 from octavia.amphorae.backends.agent.api_server import util
 from octavia.common import constants as consts
+from octavia.i18n import _
 
 BUFFER = 100
 CHECK_SCRIPT_NAME = 'udp_check.sh'
@@ -47,8 +51,68 @@ class KeepalivedLvs(lvs_listener_base.LvsListenerApiServerBase):
 
     _SUBSCRIBED_AMP_COMPILE = ['keepalived', 'ipvsadm']
 
+    @staticmethod
+    def _guard(listener_id):
+        try:
+            return udp_guard.Guard(listener_id)
+        except ValueError:
+            return None
+
+    def has_guard(self, listener_id):
+        guard = self._guard(listener_id)
+        return guard is not None and guard.path.is_file()
+
+    @staticmethod
+    def _guard_command():
+        command = shutil.which('amphora-udp-guard')
+        if not command:
+            raise exceptions.ServiceUnavailable(
+                description='UDP guard service helper is unavailable')
+        return shlex.quote(command)
+
+    def check_udp_guard(self):
+        self._guard_command()
+        udp_guard.check_support()
+        return webob.Response(json={'udp_packet_drop_v1': True})
+
+    def stage_udp_guard(self, listener_id):
+        try:
+            guard = udp_guard.Guard(listener_id)
+            payload = flask.request.get_json()
+            if set(payload) != {'configuration', 'guard'}:
+                raise ValueError(_('Invalid UDP guard payload'))
+            cfg = payload['configuration'].encode('utf-8')
+            spec = dict(payload['guard'])
+            retiring = spec.pop('retiring')
+            spec = udp_guard.validate_spec(spec)
+            if (type(retiring) is not bool or
+                    (retiring and spec['has_service'])):
+                raise ValueError(_('Invalid UDP guard withdrawal'))
+        except (AttributeError, KeyError, ValueError, TypeError) as error:
+            raise exceptions.BadRequest(
+                description='Invalid UDP guard request') from error
+        command = self._guard_command()
+        with guard.lock():
+            # Install durable boot hooks before changing data served by IPVS.
+            state_path = shlex.quote(str(guard.directory))
+            util.install_netns_systemd_service(
+                guard_boot=f'{command} boot {state_path}')
+            guard.install_service_hooks(command)
+            with guard.lock(kernel=True):
+                guard.prepare(spec, cfg, retiring=retiring)
+            return self._upload_lvs_listener_config(
+                guard.listener_id, loadbalancer.Wrapped(io.BytesIO(cfg)),
+                guarded=True)
+
     def upload_lvs_listener_config(self, listener_id):
-        stream = loadbalancer.Wrapped(flask.request.stream)
+        if self.has_guard(listener_id):
+            raise exceptions.Conflict(
+                description='UDP guard requires the guarded configuration API')
+        return self._upload_lvs_listener_config(
+            listener_id, loadbalancer.Wrapped(flask.request.stream))
+
+    def _upload_lvs_listener_config(self, listener_id, stream,
+                                    guarded=False):
         NEED_CHECK = True
 
         if not os.path.exists(util.keepalived_lvs_dir()):
@@ -84,11 +148,14 @@ class KeepalivedLvs(lvs_listener_base.LvsListenerApiServerBase):
         flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
         # mode 00644
         mode = stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH
-        with os.fdopen(os.open(conf_file, flags, mode), 'wb') as f:
-            b = stream.read(BUFFER)
-            while b:
-                f.write(b)
+        if guarded:
+            udp_guard.write_file(conf_file, stream.read(-1), mode=mode)
+        else:
+            with os.fdopen(os.open(conf_file, flags, mode), 'wb') as f:
                 b = stream.read(BUFFER)
+                while b:
+                    f.write(b)
+                    b = stream.read(BUFFER)
 
         file_path = util.keepalived_lvs_init_path(listener_id)
 
@@ -172,6 +239,26 @@ class KeepalivedLvs(lvs_listener_base.LvsListenerApiServerBase):
             return resp
 
     def manage_lvs_listener(self, listener_id, action):
+        if self.has_guard(listener_id):
+            guard = self._guard(listener_id)
+            with guard.lock():
+                state = guard.read()
+                if state:
+                    with guard.lock(kernel=True):
+                        guard.close(state)
+                    if action.lower() in (consts.AMP_ACTION_START,
+                                          consts.AMP_ACTION_RELOAD):
+                        guard.check_config(state)
+                    response = self._manage_lvs_listener(listener_id, action)
+                    if (response.status_code == 202 and
+                            action.lower() != consts.AMP_ACTION_STOP):
+                        with guard.lock(kernel=True):
+                            guard.finish(state)
+                        response.headers[udp_guard.CONFIRMATION_HEADER] = '1'
+                    return response
+        return self._manage_lvs_listener(listener_id, action)
+
+    def _manage_lvs_listener(self, listener_id, action):
         action = action.lower()
         if action not in [consts.AMP_ACTION_START,
                           consts.AMP_ACTION_STOP,
@@ -254,6 +341,22 @@ class KeepalivedLvs(lvs_listener_base.LvsListenerApiServerBase):
         return listeners
 
     def delete_lvs_listener(self, listener_id):
+        if self.has_guard(listener_id):
+            guard = self._guard(listener_id)
+            with guard.lock():
+                state = guard.read()
+                if state:
+                    with guard.lock(kernel=True):
+                        guard.close(state)
+                    response = self._delete_lvs_listener(listener_id)
+                    if response.status_code == 200:
+                        with guard.lock(kernel=True):
+                            guard.finish_delete(state)
+                        response.headers[udp_guard.CONFIRMATION_HEADER] = '1'
+                    return response
+        return self._delete_lvs_listener(listener_id)
+
+    def _delete_lvs_listener(self, listener_id):
         try:
             self._check_lvs_listener_exists(listener_id)
         except exceptions.HTTPException:
@@ -279,9 +382,8 @@ class KeepalivedLvs(lvs_listener_base.LvsListenerApiServerBase):
         # checking whether it is alived. So here, we had stop the keepalived
         # process by the previous step, must make sure the pid files are not
         # exist.
-        if (os.path.exists(keepalived_pid) or
-                os.path.exists(vrrp_pid) or os.path.exists(check_pid)):
-            for pid in [keepalived_pid, vrrp_pid, check_pid]:
+        for pid in [keepalived_pid, vrrp_pid, check_pid]:
+            if os.path.exists(pid):
                 os.remove(pid)
 
         # disable the service

@@ -279,6 +279,23 @@ tcp-connection-rejection-request:
   in: body
   required: false
   type: object
+udp-packet-drop:
+  description: |
+    The managed UDP pool's requested fraction of datagrams to drop.
+    The pool exposes this value while provisioning. The field is absent
+    for pools without a configured fraction.
+  in: body
+  required: false
+  type: object
+udp-packet-drop-request:
+  description: |
+    Set the Amphora UDP drop fraction with a full member batch.
+    The two required integers satisfy 0 <= numerator <= denominator
+    and 1 <= denominator <= 16000000. Use 0/1 to forward without
+    proportional drops while keeping the listener managed.
+  in: body
+  required: false
+  type: object
 backend-retry-budget:
   description: |
     The Service retry budget for this HTTP pool. Provide the five fields

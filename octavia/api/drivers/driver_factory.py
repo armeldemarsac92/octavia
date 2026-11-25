@@ -69,6 +69,19 @@ def provider_supports_tcp_connection_rejection(provider):
     return supports_tcp_connection_rejection(driver)
 
 
+def supports_udp_packet_drop(driver):
+    if getattr(type(driver), 'supports_udp_packet_drop', False) is not True:
+        return False
+    try:
+        amphora_driver = stevedore_driver.DriverManager(
+            namespace='octavia.amphora.drivers',
+            name=CONF.controller_worker.amphora_driver,
+            invoke_on_load=False).driver
+    except RuntimeError:
+        return False
+    return callable(getattr(amphora_driver, 'apply_udp_member_batch', None))
+
+
 def remove_providers(providers):
     # Presumably these provider drivers failed to load, remove so they do not
     # show up in the available list

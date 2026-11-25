@@ -537,6 +537,19 @@ class ListenersController(base.BaseController):
             self._auth_validate_action(context, listener.project_id,
                                        constants.RBAC_POST)
 
+            if (listener.protocol == constants.PROTOCOL_UDP and
+                    listener.default_pool_id):
+                self.repositories.load_balancer.lock(
+                    context.session, load_balancer_id)
+                pool = (
+                    self.repositories.pool.get_on_load_balancer_for_update(
+                        context.session, load_balancer_id,
+                        listener.project_id, listener.default_pool_id))
+                if pool.udp_packet_drop is not None:
+                    raise exceptions.ValidationException(detail=_(
+                        'A managed UDP pool belongs to its existing '
+                        'listener.'))
+
             # Load the driver early as it also provides validation
             driver = driver_factory.get_driver(provider)
 
@@ -991,6 +1004,19 @@ class ListenersController(base.BaseController):
                 context.session, id, show_deleted=False)
 
             listener_dict = listener.to_dict(render_unsets=False)
+            new_pool_id = listener_dict.get('default_pool_id',
+                                            db_listener.default_pool_id)
+            if (db_listener.protocol == constants.PROTOCOL_UDP and
+                    new_pool_id != db_listener.default_pool_id):
+                for pool_id in (db_listener.default_pool_id, new_pool_id):
+                    if pool_id is None:
+                        continue
+                    current = self.repositories.pool.get_transport_for_update(
+                        context.session, pool_id)
+                    if current.udp_packet_drop is not None:
+                        raise exceptions.ValidationException(detail=_(
+                            'A managed UDP pool belongs to its existing '
+                            'listener.'))
             self._validate_https_listener_update(
                 context.session, driver, db_listener, listener_dict)
             default_http_response = listener_dict.get(
