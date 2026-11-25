@@ -2407,6 +2407,85 @@ class TestPool(base.BaseAPITest):
         self.assertIsNone(removed[persistence])
 
     @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
+    def test_http_header_persistence_round_trip(self, rpc):
+        self.assertEqual(('SOURCE_IP', 'HTTP_COOKIE', 'APP_COOKIE'),
+                         lib_constants.SUPPORTED_SP_TYPES)
+        lb = self.create_load_balancer(
+            uuidutils.generate_uuid(), provider='amphora')['loadbalancer']
+        lb_id = lb['id']
+        self.set_lb_status(lb_id)
+        key = 'session_persistence'
+        header = {'type': 'HTTP_HEADER', 'header_name': 'X-Session'}
+        canonical = dict(header, header_name='x-session')
+        self.create_pool(lb_id, 'HTTP', 'ROUND_ROBIN', status=501,
+                         session_persistence=header)
+        option = 'enabled_http_header_persistence_providers'
+        self.conf.config(group='api_settings', **{option: ['amphora']})
+        cap = constants.GATEWAY_CAPABILITY_HTTP_HEADER_PERSISTENCE
+        caps = self.get(self.PROVIDERS_PATH + '/amphora/gateway_capabilities')
+        self.assertIn(cap, caps.json['gateway_capabilities'])
+        self.create_pool(lb_id, 'TCP', 'ROUND_ROBIN', status=400,
+                         session_persistence=header)
+        for invalid in ({'type': 'HTTP_HEADER'},
+                        dict(header, header_name='Authorization'),
+                        dict(header, header_name='Content-Length'),
+                        dict(header, header_absolute_timeout_ms=False),
+                        dict(header, cookie_name='foo')):
+            self.create_pool(lb_id, 'HTTP', 'ROUND_ROBIN', status=400,
+                             session_persistence=invalid)
+
+        created = self.create_pool(lb_id, 'HTTP', 'ROUND_ROBIN',
+                                   session_persistence=header).get('pool')
+        pool_id = created['id']
+        path = self.POOL_PATH.format(pool_id=pool_id)
+        cast = rpc.return_value.cast
+        self.assertEqual(canonical, created[key])
+        self.assertEqual(canonical, cast.call_args.kwargs['pool'][key])
+        self.assertEqual(canonical, self.get(path).json['pool'][key])
+        self.set_lb_status(lb_id)
+
+        timed = dict(canonical, header_absolute_timeout_ms=0)
+        added = self.put(path, self._build_body({key: timed})).json['pool']
+        self.assertEqual(timed, added[key])
+        self.assertEqual(timed, cast.call_args.kwargs['pool_updates'][key])
+        self.set_lb_status(lb_id)
+        applied = {pool_id: ('x-session', 0)}
+        with db_api.session().begin() as session:
+            repo = repositories.PoolRepository()
+            repo.set_http_header_pool_statuses(
+                session, applied, failed={pool_id}, recovered=set())
+            repo.set_http_header_pool_statuses(
+                session, {pool_id: ('x-other', 0)}, failed=set(),
+                recovered={pool_id})
+        self.assertEqual(constants.ERROR,
+                         self.get(path).json['pool']['provisioning_status'])
+        self.assertEqual([{'id': pool_id}], self.get(
+            self.POOLS_PATH, params={
+                'loadbalancer_id': lb_id, 'fields': 'id',
+                'provisioning_status': constants.ERROR}).json['pools'])
+        with db_api.session().begin() as session:
+            repo.set_http_header_pool_statuses(
+                session, applied, failed=set(), recovered={pool_id})
+        self.assertEqual(constants.ACTIVE,
+                         self.get(path).json['pool']['provisioning_status'])
+
+        untimed = self.put(path, self._build_body({key: header})).json['pool']
+        self.assertEqual(canonical, untimed[key])
+        self.assertIsNone(cast.call_args.kwargs['pool_updates'][key][
+            'header_absolute_timeout_ms'])
+        self.set_lb_status(lb_id)
+        self.conf.config(group='api_settings', **{option: []})
+        self.put(path, self._build_body({key: timed}), status=501)
+        removed = self.put(path, self._build_body({key: None})).json['pool']
+        self.assertIsNone(removed[key])
+        self.assertIsNone(cast.call_args.kwargs['pool_updates'][key])
+        self.set_lb_status(lb_id)
+        self.conf.config(group='api_settings', **{option: ['amphora']})
+        restored = self.put(path, self._build_body({key: header})).json['pool']
+        self.assertEqual(canonical, restored[key])
+        self.assertEqual(canonical, self.get(path).json['pool'][key])
+
+    @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
     def test_http_cookie_path_lifecycle(self, rpc):
         lb = self.create_load_balancer(
             uuidutils.generate_uuid(), provider='amphora')['loadbalancer']

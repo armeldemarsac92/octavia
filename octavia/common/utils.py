@@ -51,6 +51,25 @@ def backend_tls_system_ca_pool_ids(loadbalancer):
                 pool.provisioning_status != constants.DELETED)}
 
 
+def active_listener_pools(loadbalancer):
+    if loadbalancer is None or not loadbalancer.enabled:
+        return
+    removed = (constants.PENDING_DELETE, constants.DELETED)
+    for listener in loadbalancer.listeners:
+        if (not listener.enabled or
+                listener.provisioning_status in removed or
+                listener.protocol in constants.LVS_PROTOCOLS):
+            continue
+        yield from (pool for pool in listener.pools if
+                    pool.enabled and pool.provisioning_status not in removed)
+
+
+def has_active_http_header_persistence(loadbalancer):
+    return any(pool.session_persistence and pool.session_persistence.type ==
+               constants.SESSION_PERSISTENCE_HTTP_HEADER
+               for pool in active_listener_pools(loadbalancer))
+
+
 def amphora_roles_match_topology(topology, roles):
     expected = {
         constants.TOPOLOGY_SINGLE: {constants.ROLE_STANDALONE},

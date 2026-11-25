@@ -965,6 +965,50 @@ class TestHaproxyCfg(base.TestCase):
         self.assertNotIn('ca-file', config)
         self.assertEqual({}, result)
 
+    @mock.patch.object(jinja_cfg, '_read_http_cookie_signing_key')
+    def test_system_ca_loads_when_http_header_affinity_closes(self, read_key):
+        digest = 'a' * 64
+        snapshot = f'/var/lib/octavia/lb/backend-system-ca/{digest}.pem'
+        listener = sample_configs_combined.sample_listener_tuple()
+        pool = SimpleNamespace(**dict(
+            listener.default_pool._asdict(), project_id=listener.project_id,
+            tls_enabled=True, backend_tls_hostname='backend.example.test',
+            backend_tls_system_ca=True,
+            session_persistence=data_models.SessionPersistence(
+                type=constants.SESSION_PERSISTENCE_HTTP_HEADER,
+                header_name='X-Session')))
+        listener = listener._replace(default_pool=pool, pools=[pool])
+        material = {pool.id: {'ca_cert': snapshot, 'system_ca_sha256': digest}}
+        capabilities = {
+            constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME: True,
+            constants.GATEWAY_CAPABILITY_BACKEND_TLS_SYSTEM_CA: True,
+            constants.GATEWAY_CAPABILITY_HTTP_HEADER_PERSISTENCE: True,
+        }
+        for key in (b'x' * 32, None):
+            with self.subTest(key_available=key is not None):
+                read_key.return_value = key
+                system_ca_results = {}
+                persistence_results = {}
+                config = self.jinja_cfg.render_loadbalancer_obj(
+                    sample_configs_combined.sample_amphora_tuple(),
+                    [listener], tls_certs=material, amp_details=capabilities,
+                    system_ca_results=system_ca_results,
+                    http_persistence_results=persistence_results)
+                self.assertIn(f'default_backend {pool.id}:{listener.id}',
+                              config)
+                self.assertIn(f'default-server ca-file {snapshot}', config)
+                self.assertEqual({pool.id: digest}, system_ca_results)
+                if key is None:
+                    self.assertNotIn('\n    server ', config)
+                    self.assertEqual({pool.id: constants.ERROR},
+                                     persistence_results)
+                else:
+                    self.assertIn('use-server sample_member_id_1', config)
+                    self.assertIn('http-after-response set-header "x-session"',
+                                  config)
+                    self.assertEqual({pool.id: constants.ACTIVE},
+                                     persistence_results)
+
     def test_otlp_tracing_uses_private_collector_backend(self):
         pool_id = 'e7b5c88c-ac10-4ec1-8935-aba43987cf01'
         fixture = sample_configs_combined.sample_listener_tuple()
@@ -3134,6 +3178,80 @@ class TestHaproxyCfg(base.TestCase):
             'other-project', 'gateway_pool', '2001:db8::10', 8080)
         self.assertNotEqual(token, other_project)
 
+    @mock.patch.object(jinja_cfg, '_read_http_cookie_signing_key')
+    def test_render_http_header_persistence_requires_binary_and_key(self,
+                                                                    read_key):
+        listener = sample_configs_combined.sample_listener_tuple(monitor=False)
+        persistence = data_models.SessionPersistence(
+            type=constants.SESSION_PERSISTENCE_HTTP_HEADER,
+            header_name="x-session!#$%&'*+.-^_`|~",
+            header_absolute_timeout_ms=0)
+        pool = SimpleNamespace(**dict(
+            listener.default_pool._asdict(), project_id=listener.project_id,
+            session_persistence=persistence))
+        listener = listener._replace(default_pool=pool, pools=[pool])
+        amp = sample_configs_combined.sample_amphora_tuple()
+        capability = constants.GATEWAY_CAPABILITY_HTTP_HEADER_PERSISTENCE
+        for confirmed, key in ((False, None), (True, None), (True, b'x' * 32)):
+            with self.subTest(confirmed=confirmed, key_present=bool(key)):
+                read_key.return_value = key
+                votes = {}
+                rendered = self.jinja_cfg.render_loadbalancer_obj(
+                    amp, [listener], amp_details={capability: confirmed},
+                    http_persistence_results=votes)
+                if key is None:
+                    self.assertEqual({pool.id: constants.ERROR}, votes)
+                    self.assertIn('default_backend sample_pool_id_1:',
+                                  rendered)
+                    self.assertNotIn('server sample_member_id_1 ', rendered)
+                else:
+                    self.assertEqual({pool.id: constants.ACTIVE}, votes)
+                    self.assertIn('use-server sample_member_id_1', rendered)
+                    self.assertIn('http-after-response set-header "x-session',
+                                  rendered)
+                    self.assertIn('octavia_header_age) -m int lt 0', rendered)
+
+    @mock.patch.object(jinja_cfg, '_read_http_cookie_signing_key')
+    def test_closed_header_pool_is_excluded_from_request_mirroring(
+            self, read_key):
+        listener = sample_configs_combined.sample_listener_tuple(l7=True)
+        primary, mirror = listener.pools
+        mirror = SimpleNamespace(**dict(
+            mirror._asdict(), id='8f388635-d55a-4f89-9937-a7550b72e710',
+            project_id=listener.project_id,
+            session_persistence=data_models.SessionPersistence(
+                type=constants.SESSION_PERSISTENCE_HTTP_HEADER,
+                header_name='x-session')))
+        policy = SimpleNamespace(**dict(
+            listener.l7policies[0]._asdict(), redirect_pool=primary,
+            request_mirrors=[
+                dict(pool_id=mirror.id, numerator=1, denominator=1)]))
+        listener = listener._replace(pools=[primary, mirror],
+                                     l7policies=[policy])
+        amp = sample_configs_combined.sample_amphora_tuple()
+        details = {constants.GATEWAY_CAPABILITY_HTTP_REQUEST_MIRROR: True,
+                   constants.GATEWAY_CAPABILITY_HTTP_HEADER_PERSISTENCE: True}
+
+        for key in (None, b'x' * 32):
+            with self.subTest(key_present=bool(key)):
+                read_key.return_value = key
+                votes = {}
+                rendered = self.jinja_cfg.build_config(
+                    amp, [listener], None, haproxy_versions=['3', '0', '19'],
+                    amp_details=details, http_persistence_results=votes)
+                self.assertIn(f'backend {primary.id}:{listener.id}', rendered)
+                self.assertIn(f'server {primary.members[0].id} ', rendered)
+                action = f'http-request octavia-mirror {mirror.id} 1 1'
+                delivery = f'listen octavia-mirror-{mirror.id}'
+                if key is None:
+                    self.assertNotIn(action, rendered)
+                    self.assertNotIn(delivery, rendered)
+                    self.assertEqual({mirror.id: constants.ERROR}, votes)
+                else:
+                    self.assertIn(action, rendered)
+                    self.assertIn(delivery, rendered)
+                    self.assertEqual({mirror.id: constants.ACTIVE}, votes)
+
     def test_render_native_http_cookie_path(self):
         listener = sample_configs_combined.sample_listener_tuple(monitor=False)
         persistence = data_models.SessionPersistence(
@@ -3160,7 +3278,7 @@ class TestHaproxyCfg(base.TestCase):
         results = {}
         rendered = self.jinja_cfg.render_loadbalancer_obj(
             amphora, [listener], amp_details=amp_details,
-            haproxy_version='2.0.0', http_cookie_results=results)
+            haproxy_version='2.0.0', http_persistence_results=results)
         self.assertEqual({pool.id: constants.ACTIVE}, results)
         self.assertIn(rule + rf"'\1%[str({encoded.decode()}),b64dec]\2'",
                       rendered)
@@ -3168,7 +3286,7 @@ class TestHaproxyCfg(base.TestCase):
 
         unsupported = self.jinja_cfg.render_loadbalancer_obj(
             amphora, [listener], haproxy_version='3.0.19',
-            http_cookie_results=results)
+            http_persistence_results=results)
         self.assertEqual({pool.id: constants.ERROR}, results)
         self.assertNotIn('cookie SRV', unsupported)
         self.assertNotRegex(unsupported, r'(?m)^    server .* cookie ')
@@ -3213,7 +3331,7 @@ class TestHaproxyCfg(base.TestCase):
             results = {}
             degraded = self.jinja_cfg.render_loadbalancer_obj(
                 amphora, [listener], amp_details={capability: True},
-                http_cookie_results=results)
+                http_persistence_results=results)
             self.assertEqual({pool.id: constants.ERROR}, results)
             self.assertIn('cookie gw.session insert indirect nocache',
                           degraded)
@@ -3223,7 +3341,7 @@ class TestHaproxyCfg(base.TestCase):
             key_file.chmod(0o600)
             rendered = self.jinja_cfg.render_loadbalancer_obj(
                 amphora, [listener], amp_details={capability: True},
-                http_cookie_results=results)
+                http_persistence_results=results)
             self.assertEqual({pool.id: constants.ACTIVE}, results)
             # Keep the signing material out of assertion failure messages.
             encoded_key = base64.b64encode(key).decode('ascii')
@@ -3248,7 +3366,7 @@ class TestHaproxyCfg(base.TestCase):
             amp_details = {capability: True, permanent: True}
             incompatible = self.jinja_cfg.render_loadbalancer_obj(
                 amphora, [listener], amp_details={capability: True},
-                http_cookie_results=results)
+                http_persistence_results=results)
             self.assertEqual({pool.id: constants.ERROR}, results)
             self.assertNotIn('octavia_cookie_signing_key', incompatible)
             self.assertNotRegex(incompatible, r'(?m)^    server .* cookie ')
@@ -3259,7 +3377,7 @@ class TestHaproxyCfg(base.TestCase):
                         timeout)
                     persistent_config = self.jinja_cfg.render_loadbalancer_obj(
                         amphora, [listener], amp_details=amp_details,
-                        http_cookie_results=results)
+                        http_persistence_results=results)
                     self.assertEqual({pool.id: constants.ACTIVE}, results)
                     self.assertTrue(
                         f'; Path=/; Max-Age={max_age}"' in persistent_config)
@@ -3282,7 +3400,8 @@ class TestHaproxyCfg(base.TestCase):
                     self.assertGreater(rewrite, issue)
 
         old_amphora = self.jinja_cfg.render_loadbalancer_obj(
-            amphora, [listener], amp_details={}, http_cookie_results=results)
+            amphora, [listener], amp_details={},
+            http_persistence_results=results)
         self.assertEqual({pool.id: constants.ERROR}, results)
         self.assertNotIn('octavia_cookie_signing_key', old_amphora)
         self.assertNotIn('cookie gw.session', old_amphora)

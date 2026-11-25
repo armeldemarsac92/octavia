@@ -214,7 +214,7 @@ requests from a client to the same backend member as the initial request.
 When the pool has no session persistence, the session persistence object is
 ``null``.
 
-Octavia currently support three session persistence methods:
+Octavia supports the following session persistence methods.
 
 +-----------------+----------------------------------------------------------+
 | Method          | Description                                              |
@@ -225,6 +225,9 @@ Octavia currently support three session persistence methods:
 | ``HTTP_COOKIE`` | The load balancer will generate a cookie that is         |
 |                 | inserted into the response.  This cookie will be used to |
 |                 | send future requests to the same member.                 |
++-----------------+----------------------------------------------------------+
+| ``HTTP_HEADER`` | Use a gateway-issued header to select a member of the    |
+|                 | HTTP pool. Requires ``http_header_persistence_v1``.      |
 +-----------------+----------------------------------------------------------+
 | ``SOURCE_IP``   | The source IP address on the request will be hashed to   |
 |                 | send future requests to the same member.                 |
@@ -292,6 +295,16 @@ provider to advertise permanent cookie support.
 Clearing the timeout or removing session persistence clears this setting.
 Pool GET includes ``cookie_permanent`` only when it is ``true``.
 
+A provider advertising ``http_header_persistence_v1`` accepts
+``HTTP_HEADER`` on HTTP pools. Supply ``header_name``, an HTTP field name of
+1 to 256 characters. Authentication, forwarding, framing and other
+protocol-managed fields are reserved. The header name is case-insensitive.
+``header_absolute_timeout_ms`` optionally limits the lifetime from issuance.
+Sending a full ``HTTP_HEADER`` policy without a timeout clears any old limit.
+Pool GET includes the type, the lowercase name and the timeout if set.
+Set ``session_persistence`` to ``null`` to withdraw it, including after
+regional opt-out.
+
 Pool Session Persistence Object
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -303,6 +316,8 @@ Pool Session Persistence Object
    - cookie_absolute_timeout_ms: session_persistence_cookie_absolute_timeout_ms
    - cookie_scope: session_persistence_cookie_scope
    - cookie_permanent: session_persistence_cookie_permanent
+   - header_name: session_persistence_header_name
+   - header_absolute_timeout_ms: session_persistence_header_absolute_timeout_ms
    - persistence_timeout: session_persistence_timeout
    - persistence_granularity: session_persistence_granularity
 

@@ -144,6 +144,11 @@ def _validate_session_persistence(persistence, protocol, *, for_update=False):
                        'is only for UDP and SCTP protocol pools.')
         raise exceptions.ValidationException(detail=detail)
     validate.check_session_persistence(persistence)
+    if persistence.get('type') == constants.SESSION_PERSISTENCE_HTTP_HEADER:
+        if protocol != constants.PROTOCOL_HTTP:
+            raise exceptions.ValidationException(detail=_(
+                'HTTP_HEADER session persistence requires an HTTP pool.'))
+        persistence['header_name'] = persistence['header_name'].lower()
 
 
 def _validate_http_cookie_path(persistence, protocol):
@@ -287,6 +292,13 @@ class PoolsController(base.BaseController):
         budget = pool_dict.get('backend_retry_budget')
         persistence = pool_dict.get('session_persistence')
         named_http_cookie = _has_named_http_cookie(persistence)
+        http_header_persistence = persistence and (
+            persistence.get('type') ==
+            constants.SESSION_PERSISTENCE_HTTP_HEADER)
+        if persistence and (http_header_persistence or any(
+                persistence.get(field) is not None for field in (
+                    'header_name', 'header_absolute_timeout_ms'))):
+            _validate_session_persistence(persistence, pool_dict['protocol'])
         custom_cookie_path = (
             persistence and _validate_http_cookie_path(
                 persistence, pool_dict['protocol']))
@@ -295,7 +307,8 @@ class PoolsController(base.BaseController):
                 persistence, pool_dict['protocol']))
         if (pool_dict.get('backend_h2c') or hostname is not None or
                 system_ca or require_h2 or sans or budget is not None or
-                named_http_cookie or custom_cookie_path):
+                named_http_cookie or custom_cookie_path or
+                http_header_persistence):
             if driver is None:
                 # Fully populated load balancer creation uses this path too.
                 provider = self._get_db_lb(
@@ -322,6 +335,8 @@ class PoolsController(base.BaseController):
         if budget is not None:
             driver_utils.require_backend_retry_budget(
                 driver, pool_dict['protocol'])
+        if http_header_persistence:
+            driver_utils.require_http_header_persistence(driver)
         if named_http_cookie:
             # Fully populated load balancer creation also reaches this path.
             _validate_session_persistence(persistence, pool_dict['protocol'])
@@ -500,7 +515,8 @@ class PoolsController(base.BaseController):
                               lib_consts.PROTOCOL_SCTP)))
             if request.session_persistence.type in [
                 constants.SESSION_PERSISTENCE_HTTP_COOKIE,
-                    constants.SESSION_PERSISTENCE_APP_COOKIE]:
+                    constants.SESSION_PERSISTENCE_APP_COOKIE,
+                    constants.SESSION_PERSISTENCE_HTTP_HEADER]:
                 raise exceptions.ValidationException(detail=_(
                     "Session persistence of type %(type)s is not supported "
                     "for %(protocol)s protocol pools.") % {
@@ -809,8 +825,13 @@ class PoolsController(base.BaseController):
                 old.cookie_scope is not None)
             path_update = (changes.type is wtypes.Unset and
                            changes.cookie_path is not wtypes.Unset)
+            replacing_policy = changes.type is not wtypes.Unset
             if not changes.type and old is not None:
                 changes.type = old.type
+            if changes.type == constants.SESSION_PERSISTENCE_HTTP_HEADER:
+                self._validate_http_header_persistence_update(
+                    changes, old, current.protocol, driver, replacing_policy)
+                return
             if changes.cookie_name is wtypes.Unset:
                 setting_timeout = changes.cookie_absolute_timeout_ms not in (
                     wtypes.Unset, None)
@@ -830,6 +851,10 @@ class PoolsController(base.BaseController):
         persistence = changes.to_dict(render_unsets=False)
         _validate_session_persistence(persistence, current.protocol,
                                       for_update=True)
+        if old is not None and (
+                old.type == constants.SESSION_PERSISTENCE_HTTP_HEADER):
+            changes.header_name = None
+            changes.header_absolute_timeout_ms = None
         old_path = old.cookie_path if old is not None else None
         if _validate_http_cookie_path(persistence, current.protocol):
             if changes.cookie_path != old_path:
@@ -874,6 +899,35 @@ class PoolsController(base.BaseController):
                  validate.is_valid_http_cookie_scope(old.cookie_scope)))
         elif (old is not None and old.cookie_permanent and
                 changes.cookie_absolute_timeout_ms is None):
+            changes.cookie_permanent = False
+
+    @staticmethod
+    def _validate_http_header_persistence_update(
+            changes, old, protocol, driver, replacing_policy):
+        had_header = old is not None and (
+            old.type == constants.SESSION_PERSISTENCE_HTTP_HEADER)
+        if had_header and not replacing_policy:
+            if changes.header_name is wtypes.Unset:
+                changes.header_name = old.header_name
+            if changes.header_absolute_timeout_ms is wtypes.Unset:
+                changes.header_absolute_timeout_ms = (
+                    old.header_absolute_timeout_ms)
+        persistence = changes.to_dict(render_unsets=False)
+        _validate_session_persistence(persistence, protocol, for_update=True)
+        changes.header_name = persistence['header_name']
+        if changes.header_absolute_timeout_ms is wtypes.Unset:
+            changes.header_absolute_timeout_ms = None
+        if (not had_header or old.header_name != changes.header_name or
+                old.header_absolute_timeout_ms !=
+                changes.header_absolute_timeout_ms):
+            driver_utils.require_http_header_persistence(driver)
+        if old is not None and old.type in (
+                constants.SESSION_PERSISTENCE_APP_COOKIE,
+                constants.SESSION_PERSISTENCE_HTTP_COOKIE):
+            changes.cookie_name = None
+            changes.cookie_path = None
+            changes.cookie_scope = None
+            changes.cookie_absolute_timeout_ms = None
             changes.cookie_permanent = False
 
     def _validate_pool_PUT(self, pool, current):

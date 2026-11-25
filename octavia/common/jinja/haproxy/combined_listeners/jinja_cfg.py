@@ -91,7 +91,7 @@ def _read_http_cookie_signing_key():
                         return key
         except OSError:
             pass
-    LOG.warning('Absolute HTTP cookie affinity is disabled for this '
+    LOG.warning('Signed HTTP session persistence is unavailable for this '
                 'render because the worker signing key is unavailable.')
     return None
 
@@ -106,6 +106,12 @@ def _derive_http_cookie_signing_key(key, project_id, scope, name, timeout, *,
     context = json.dumps(context, separators=(',', ':')).encode('ascii')
     digest = hmac.digest(key, context, 'sha256')
     return base64.b64encode(digest).decode('ascii')
+
+
+def _derive_http_header_signing_key(key, project_id, pool_id, name, timeout):
+    context = ["octavia-http-header-v1", project_id, pool_id, name, timeout]
+    context = json.dumps(context, separators=(',', ':')).encode('ascii')
+    return hmac.digest(key, context, 'sha256')
 
 
 def _quote_config_arg(value):
@@ -212,10 +218,11 @@ class JinjaTemplater:
 
     def build_config(self, host_amphora, listeners, tls_certs,
                      haproxy_versions, amp_details, socket_path=None,
-                     otlp_tls_certs=None, http_cookie_results=None,
+                     otlp_tls_certs=None, http_persistence_results=None,
                      otlp_publication=None, http_retry_backoff_results=None,
                      weighted_passthrough_degraded=False,
-                     config_publication=None, system_ca_results=None):
+                     config_publication=None, system_ca_results=None,
+                     read_http_header_key=None):
         """Convert a logical configuration to the HAProxy version
 
         :param host_amphora: The Amphora this configuration is hosted on
@@ -258,8 +265,10 @@ class JinjaTemplater:
                if system_ca_results is not None else {}),
             **({'http_retry_backoff_results': http_retry_backoff_results}
                if http_retry_backoff_results is not None else {}),
-            **({'http_cookie_results': http_cookie_results}
-               if http_cookie_results is not None else {}))
+            **({'http_persistence_results': http_persistence_results}
+               if http_persistence_results is not None else {}),
+            **({'read_http_header_key': read_http_header_key}
+               if read_http_header_key is not None else {}))
 
     def _get_template(self):
         """Returns the specified Jinja configuration template."""
@@ -299,12 +308,13 @@ class JinjaTemplater:
                                 feature_compatibility=None,
                                 amp_details: tp.Optional[dict] = None,
                                 haproxy_version=None, otlp_tls_certs=None,
-                                http_cookie_results=None,
+                                http_persistence_results=None,
                                 otlp_publication=None,
                                 http_retry_backoff_results=None,
                                 weighted_passthrough_degraded=False,
                                 config_publication=None,
-                                system_ca_results=None):
+                                system_ca_results=None,
+                                read_http_header_key=None):
         """Renders a templated configuration from a load balancer object
 
         :param host_amphora: The Amphora this configuration is hosted on
@@ -327,9 +337,14 @@ class JinjaTemplater:
         path_capability = constants.GATEWAY_CAPABILITY_HTTP_COOKIE_PATH
         feature_compatibility[path_capability] = (
             (amp_details or {}).get(path_capability) is True)
+        read_key = functools.cache(_read_http_cookie_signing_key)
+        header_capability = (
+            constants.GATEWAY_CAPABILITY_HTTP_HEADER_PERSISTENCE)
+        if (amp_details or {}).get(header_capability) is True:
+            feature_compatibility[header_capability] = (
+                read_http_header_key or read_key)
         if (amp_details or {}).get(cookie_capability) is True:
-            feature_compatibility[cookie_capability] = functools.cache(
-                _read_http_cookie_signing_key)
+            feature_compatibility[cookie_capability] = read_key
             permanent_capability = (
                 constants.GATEWAY_CAPABILITY_HTTP_COOKIE_PERMANENT)
             if (amp_details or {}).get(permanent_capability) is True:
@@ -356,7 +371,7 @@ class JinjaTemplater:
             tls_certs,
             feature_compatibility, otlp_tls_certs=otlp_tls_certs,
             amp_details=amp_details)
-        if http_cookie_results is not None and loadbalancer['enabled']:
+        if http_persistence_results is not None and loadbalancer['enabled']:
             for listener in loadbalancer['listeners']:
                 if listener['enabled']:
                     for pool in listener['pools']:
@@ -364,13 +379,19 @@ class JinjaTemplater:
                         if not pool['enabled']:
                             continue
                         if pool.get('cookie_path_unavailable'):
-                            http_cookie_results[pool['id']] = constants.ERROR
+                            status = constants.ERROR
                         elif 'absolute_timeout_us' in persistence:
-                            http_cookie_results[pool['id']] = (
-                                constants.ACTIVE if persistence.get(
-                                    'signing_key') else constants.ERROR)
+                            status = (constants.ACTIVE if persistence.get(
+                                'signing_key') else constants.ERROR)
                         elif 'cookie_path_token' in persistence:
-                            http_cookie_results[pool['id']] = constants.ACTIVE
+                            status = constants.ACTIVE
+                        elif (persistence and persistence['type'] ==
+                              constants.SESSION_PERSISTENCE_HTTP_HEADER):
+                            status = (constants.ACTIVE if persistence.get(
+                                'header_signing_key') else constants.ERROR)
+                        else:
+                            continue
+                        http_persistence_results[pool['id']] = status
         if (haproxy_version and loadbalancer['enabled'] and
                 not versionutils.is_compatible("2.2.0", haproxy_version,
                                                same_major=False)):
@@ -566,15 +587,16 @@ class JinjaTemplater:
                 for policies in listener.get('cors_by_backend', {}).values()
                 for _, cors in policies
             ), default=0)
-            cookie_reserve = max((
-                (pool['session_persistence'] or {}).get(
-                    'cookie_response_headroom', 0)
+            persistence_reserve = max((
+                max((pool['session_persistence'] or {}).get(field, 0)
+                    for field in ('cookie_response_headroom',
+                                  'header_response_headroom'))
                 for listener in loadbalancer['listeners']
                 if listener['enabled']
                 for pool in listener['pools'] if pool['enabled']
             ), default=0)
             headroom = max(cors_reserve, _HAPROXY_REWRITE_RESERVE)
-            headroom += cookie_reserve
+            headroom += persistence_reserve
             if headroom > _HAPROXY_REWRITE_RESERVE:
                 # HAProxy clamps maxrewrite to half of bufsize. Round up
                 # to the 64-bit HAProxy buffer alignment before calculating.
@@ -939,6 +961,7 @@ class JinjaTemplater:
         available_mirror_pool_ids = {
             pool['id'] for pool in pools
             if pool['enabled'] and pool['protocol'] == 'http' and
+            not pool.get('header_persistence_unavailable') and
             listener.protocol in (constants.PROTOCOL_HTTP,
                                   constants.PROTOCOL_TERMINATED_HTTPS)
         }
@@ -1344,6 +1367,12 @@ class JinjaTemplater:
                 self._configure_absolute_http_cookie(
                     pool, persistence, timeout, scope, permanent,
                     feature_compatibility)
+            if (persistence['type'] ==
+                    constants.SESSION_PERSISTENCE_HTTP_HEADER):
+                self._configure_http_header_persistence(
+                    pool, persistence, members, feature_compatibility)
+                ret_value['header_persistence_unavailable'] = (
+                    'header_signing_key' not in persistence)
         if (pool.tls_certificate_id and pool_tls_certs and
                 pool_tls_certs.get('client_cert')):
             ret_value['client_cert'] = pool_tls_certs.get('client_cert')
@@ -1414,6 +1443,40 @@ class JinjaTemplater:
                     key, pool.project_id, scope, name, timeout,
                     permanent=permanent,
                     path_token=persistence.get('cookie_path_token'))
+
+    @staticmethod
+    def _configure_http_header_persistence(pool, persistence, members,
+                                           feature_compatibility):
+        capability = constants.GATEWAY_CAPABILITY_HTTP_HEADER_PERSISTENCE
+        read_key = feature_compatibility.get(capability)
+        name = pool.session_persistence.header_name
+        timeout = pool.session_persistence.header_absolute_timeout_ms
+        if (pool.protocol != constants.PROTOCOL_HTTP or
+                not validate.is_valid_http_header_persistence_name(name) or
+                (timeout is not None and
+                 not validate.is_valid_http_header_absolute_timeout(timeout))):
+            LOG.warning('Ignoring invalid persisted HTTP_HEADER policy on '
+                        'pool %s.', pool.id)
+            return
+        key = read_key() if read_key else None
+        if key is None:
+            return
+        name = name.lower()
+        signing_key = _derive_http_header_signing_key(
+            key, pool.project_id, pool.id, name, timeout)
+        persistence.update({
+            'header_config_name': _quote_config_arg(name),
+            # Quote once for the sample expression and once for the line.
+            'header_fetch': _quote_config_arg(f'req.fhdr("{name}")'),
+            'header_count': _quote_config_arg(f'req.fhdr_cnt("{name}")'),
+            'header_signing_key': base64.b64encode(signing_key).decode(),
+            'header_response_headroom': len(name) + 256,
+        })
+        if timeout is not None:
+            persistence['header_absolute_timeout_us'] = timeout * 1000
+        for member in members:
+            member['header_persistence_token'] = hmac.digest(
+                signing_key, member['id'].encode('ascii'), 'sha256').hex()[:32]
 
     @staticmethod
     def _transform_session_persistence(persistence, feature_compatibility):

@@ -1197,6 +1197,22 @@ class PoolRepository(BaseRepository):
             if current == policies[pool_id]:
                 row.cookie_absolute_timeout_error = pool_id in failed
 
+    def set_http_header_pool_statuses(self, session, policies, *,
+                                      failed, recovered):
+        persistence = models.SessionPersistence
+        for pool_id in sorted(failed | recovered):
+            query = session.query(persistence).filter(
+                persistence.pool_id == pool_id,
+                persistence.type == consts.SESSION_PERSISTENCE_HTTP_HEADER,
+                persistence.pool.has(and_(
+                    self.model_class.enabled.is_(True),
+                    self.model_class.provisioning_status.notin_(
+                        (consts.PENDING_DELETE, consts.DELETED)))))
+            row = query.populate_existing().with_for_update().one_or_none()
+            if row and (row.header_name, row.header_absolute_timeout_ms) == (
+                    policies[pool_id]):
+                row.header_persistence_error = pool_id in failed
+
     def mark_active(self, session, id):
         if self.batch_owns_graph(session, id):
             return

@@ -786,6 +786,28 @@ _RESPONSE_TRANSPORT_HEADERS = frozenset({
 })
 
 
+_SESSION_PERSISTENCE_RESERVED_HEADERS = _RESPONSE_TRANSPORT_HEADERS | {
+    'authorization', 'cache-control', 'content-encoding', 'content-location',
+    'content-range', 'content-type', 'cookie', 'expect', 'forwarded', 'host',
+    'location', 'proxy-authenticate', 'proxy-authorization', 'set-cookie',
+    'strict-transport-security', 'www-authenticate', 'x-real-ip',
+} | {name.lower() for name in lib_consts.SUPPORTED_HTTP_HEADERS}
+
+
+def is_valid_http_header_persistence_name(value):
+    if not isinstance(value, str) or not _HEADER_NAME_RE.fullmatch(value):
+        return False
+    name = value.lower()
+    return (name not in _SESSION_PERSISTENCE_RESERVED_HEADERS and
+            not name.startswith(('access-control-', 'grpc-', 'sec-',
+                                 'x-forwarded-', 'x-ssl-')))
+
+
+def is_valid_http_header_absolute_timeout(value):
+    return (type(value) is int and
+            0 <= value <= constants.HTTP_HEADER_ABSOLUTE_TIMEOUT_MAX_MS)
+
+
 def header_operations(operations, field):
     if not isinstance(operations, list) or len(operations) > 48:
         raise exceptions.InvalidL7PolicyArgs(
@@ -1525,6 +1547,24 @@ def is_valid_http_cookie_scope(value):
 
 def check_session_persistence(SP_dict):
     try:
+        if SP_dict['type'] == constants.SESSION_PERSISTENCE_HTTP_HEADER:
+            if not is_valid_http_header_persistence_name(
+                    SP_dict.get('header_name')):
+                raise exceptions.ValidationException(detail=_(
+                    'HTTP_HEADER requires a valid, non-reserved header_name.')
+                )
+            if any(SP_dict.get(field) is not None for field in (
+                    'cookie_name', 'cookie_path', 'cookie_scope',
+                    'cookie_absolute_timeout_ms', 'cookie_permanent')):
+                raise exceptions.ValidationException(detail=_(
+                    'Cookie fields cannot be used with HTTP_HEADER session '
+                    'persistence.'))
+            return
+        if (SP_dict.get('header_name') is not None or
+                SP_dict.get('header_absolute_timeout_ms') is not None):
+            raise exceptions.ValidationException(detail=_(
+                'header_name and header_absolute_timeout_ms require '
+                'HTTP_HEADER session persistence.'))
         if SP_dict['type'] == constants.SESSION_PERSISTENCE_HTTP_COOKIE:
             name = SP_dict['cookie_name']
             if name is not None and not is_valid_http_cookie_name(name):

@@ -672,8 +672,9 @@ class TestHaproxyAmphoraLoadBalancerDriverTest(base.TestCase):
         rendered_states = {primary.id: constants.ERROR,
                            secondary.id: constants.ACTIVE}
 
-        def build_config(host_amphora, http_cookie_results, **kwargs):
-            http_cookie_results[pool.id] = rendered_states[host_amphora.id]
+        def build_config(host_amphora, http_persistence_results, **kwargs):
+            state = rendered_states[host_amphora.id]
+            http_persistence_results[pool.id] = state
             return 'config'
 
         self.driver.jinja_combo.build_config.side_effect = build_config
@@ -739,10 +740,10 @@ class TestHaproxyAmphoraLoadBalancerDriverTest(base.TestCase):
         policy = {pool.id: (None, None, None, False, '')}
         render = self.driver.jinja_combo.build_config
 
-        def build_config(amp_details, http_cookie_results=None, **kwargs):
-            if http_cookie_results is not None:
+        def build_config(amp_details, http_persistence_results=None, **kwargs):
+            if http_persistence_results is not None:
                 self.assertEqual(2, client.get_details.call_count)
-                http_cookie_results[pool.id] = (
+                http_persistence_results[pool.id] = (
                     constants.ACTIVE if amp_details.get(capability) is True
                     else constants.ERROR)
             return 'config'
@@ -778,6 +779,137 @@ class TestHaproxyAmphoraLoadBalancerDriverTest(base.TestCase):
         persistence.cookie_path = None
         self.driver.update(lb)
         status.assert_not_called()
+
+    @mock.patch('octavia.db.api.session')
+    @mock.patch('octavia.db.repositories.PoolRepository.'
+                'set_http_header_pool_statuses')
+    @mock.patch.object(driver.jinja_combo, '_read_http_cookie_signing_key',
+                       return_value=None)
+    def test_standby_header_withdrawal_reaches_master_after_upload_failure(
+            self, read_key, status, session):
+        lb, pool, peers, client = self._header_persistence_pair()
+        master, standby = peers
+        capability = constants.GATEWAY_CAPABILITY_HTTP_HEADER_PERSISTENCE
+
+        def render(*, amp_details, http_persistence_results, **kwargs):
+            self.assertFalse(amp_details[capability])
+            http_persistence_results[pool.id] = constants.ERROR
+            return 'closed'
+
+        def upload(peer, lb_id, config, **kwargs):
+            if peer.id == standby.id:
+                raise exc.Conflict()
+
+        client.upload_config.side_effect = upload
+        client.reload_listener.side_effect = self._ack_haproxy_publication
+        self.driver.jinja_combo.build_config.side_effect = render
+
+        for standby_has_probe in (False, True):
+            with self.subTest(standby_has_probe=standby_has_probe):
+                client.reset_mock()
+                read_key.reset_mock()
+                status.reset_mock()
+                client.get_details.side_effect = [
+                    {capability: standby_has_probe}, {capability: True}]
+                self.assertRaises(
+                    exc.Conflict, self.driver.update_amphora_listeners,
+                    lb, standby)
+                self.assertEqual([(standby, lb.id, 'closed'),
+                                  (master, lb.id, 'closed')],
+                                 [call.args for call in
+                                  client.upload_config.call_args_list])
+                reloads = client.reload_listener.call_args_list
+                self.assertEqual([master], [call.args[0] for call in reloads])
+                self.assertEqual(int(standby_has_probe), read_key.call_count)
+                status.assert_called_once_with(
+                    session().begin().__enter__(),
+                    {pool.id: ('x-session', None)},
+                    failed={pool.id}, recovered=set())
+
+    @mock.patch('octavia.db.api.session')
+    @mock.patch('octavia.db.repositories.PoolRepository.'
+                'set_http_header_pool_statuses')
+    @mock.patch.object(driver.jinja_combo, '_read_http_cookie_signing_key',
+                       return_value=b'x' * 32)
+    def test_header_recovery_requires_active_generation_on_both_peers(
+            self, read_key, status, session):
+        lb, pool, peers, client = self._header_persistence_pair()
+        master, standby = peers
+        capability = constants.GATEWAY_CAPABILITY_HTTP_HEADER_PERSISTENCE
+        client.get_details.return_value = {capability: True}
+        uploaded = {}
+        active = {}
+
+        def render(*, amp_details, http_persistence_results, **kwargs):
+            opened = amp_details[capability] is True
+            http_persistence_results[pool.id] = (
+                constants.ACTIVE if opened else constants.ERROR)
+            return 'open' if opened else 'closed'
+
+        def upload(peer, lb_id, config, **kwargs):
+            uploaded[peer.id] = config
+
+        def reload(peer, lb_id, **kwargs):
+            if peer.id == standby.id and uploaded[peer.id] == 'open':
+                return mock.Mock(status_code=202, headers={
+                    constants.HAPROXY_OTLP_PUBLICATION_HEADER: 'stale'})
+            active[peer.id] = uploaded[peer.id]
+            return self._ack_haproxy_publication(peer, lb_id, **kwargs)
+
+        self.driver.jinja_combo.build_config.side_effect = render
+        client.upload_config.side_effect = upload
+        for grouped in (False, True):
+            with self.subTest(grouped=grouped):
+                status.reset_mock()
+                active.clear()
+                client.reload_listener.side_effect = reload
+                self.assertRaises(driver_except.ListenerProvisioningError,
+                                  self.driver.update, lb,
+                                  tcp_member_batch=grouped)
+                self.assertEqual({peer.id: 'closed' for peer in peers}, active)
+                status.assert_called_once_with(
+                    session().begin().__enter__(),
+                    {pool.id: ('x-session', None)},
+                    failed={pool.id}, recovered=set())
+
+                status.reset_mock()
+                client.reload_listener.side_effect = (
+                    self._ack_haproxy_publication)
+                self.driver.update(lb, tcp_member_batch=grouped)
+                status.assert_called_once_with(
+                    session().begin().__enter__(),
+                    {pool.id: ('x-session', None)},
+                    failed=set(), recovered={pool.id})
+
+        status.reset_mock()
+        client.reload_listener.reset_mock()
+        self.driver.update_amphora_listeners(lb, standby)
+        reloads = client.reload_listener.call_args_list
+        self.assertEqual([standby], [call.args[0] for call in reloads])
+        status.assert_not_called()
+
+    def _header_persistence_pair(self):
+        peers = [
+            data_models.Amphora(id=role, role=role,
+                                status=constants.AMPHORA_ALLOCATED)
+            for role in (constants.ROLE_MASTER, constants.ROLE_BACKUP)]
+        persistence = data_models.SessionPersistence(
+            type=constants.SESSION_PERSISTENCE_HTTP_HEADER,
+            header_name='x-session')
+        pool = data_models.Pool(id='pool', protocol=constants.PROTOCOL_HTTP,
+                                enabled=True, session_persistence=persistence)
+        listener = data_models.Listener(id='http', enabled=True, pools=[pool],
+                                        protocol=constants.PROTOCOL_HTTP)
+        lb = data_models.LoadBalancer(
+            id='lb', enabled=True, topology=constants.TOPOLOGY_ACTIVE_STANDBY,
+            listeners=[listener], amphorae=peers)
+        return lb, pool, peers, self.driver.clients[API_VERSION]
+
+    @staticmethod
+    def _ack_haproxy_publication(peer, lb_id, *, otlp_publication=None,
+                                 **kwargs):
+        return mock.Mock(status_code=202, headers={
+            constants.HAPROXY_OTLP_PUBLICATION_HEADER: otlp_publication})
 
     @mock.patch('octavia.db.api.session')
     @mock.patch('octavia.db.repositories.PoolRepository.'

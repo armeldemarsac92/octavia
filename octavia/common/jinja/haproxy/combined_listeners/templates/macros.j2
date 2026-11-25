@@ -178,7 +178,7 @@ bind {% if local_socket %}{{ local_socket }} accept-proxy{% else %}{{ lb_vip_add
 {%- endmacro %}
 
 
-{% macro policy_response_headers(listener, backend_kind, backend_id, reserved_cookie=None) %}
+{% macro policy_response_headers(listener, backend_kind, backend_id, reserved_cookie=None, reserved_header=None) %}
     {% for policy_id, operations in listener.get('response_header_operations_by_backend', {}).get((backend_kind, backend_id), []) %}
         {% for operation in operations %}
             {% set parts = operation.split(' ', 2) %}
@@ -186,7 +186,7 @@ bind {% if local_socket %}{{ local_socket }} accept-proxy{% else %}{{ lb_vip_add
                modifiers targeting the reserved cookie, including SET
                which would otherwise delete unrelated cookies. #}
             {% set targets_reserved = reserved_cookie and parts|length == 3 and parts[1]|lower == '"set-cookie"' and parts[2].split('=', 1)[0][1:].strip() == reserved_cookie %}
-            {% if not targets_reserved %}
+            {% if not targets_reserved and parts[1] != reserved_header %}
     http-after-response {{ operation|safe }} if {{ selected_policy_match_macro(policy_id) }}
             {% endif %}
         {% endfor %}
@@ -335,11 +335,15 @@ backend {{ pool.id }}:{{ listener.id }}
     mode {{ listener.protocol_mode }}
     timeout connect {{ listener.timeout_member_connect }}
     timeout server {{ listener.timeout_member_data }}
-    {% set cors = listener.get('cors_by_backend', {}).get(('pool', pool.id), []) %}
+    {% if pool.header_persistence_unavailable %}
+{{ system_ca_file(pool) -}}
+    {% else %}
+        {% set cors = listener.get('cors_by_backend', {}).get(('pool', pool.id), []) %}
 {{ cors_request(cors) -}}
 {{ mirrored_rule_requests(listener, 'pool', pool.id) -}}
 {{ policy_response_headers(listener, 'pool', pool.id) -}}
 {{ cors_response(cors) -}}
+    {% endif %}
 
 {% endmacro %}
 
@@ -1061,6 +1065,48 @@ listen octavia-mirror-{{ pool.id }}
 {% endmacro %}
 
 
+{% macro http_header_persistence_request(pool) %}
+    {% set persistence = pool.session_persistence %}
+    acl octavia_header_unique {{ persistence.header_count|safe }} eq 1
+    acl octavia_header_format var(txn.octavia_header_in) -m reg '^v1[.][0-9a-f]{32}[.][1-9][0-9]{0,17}[.][A-Za-z0-9_-]{43}$'
+    acl octavia_header_age_valid var(txn.octavia_header_age) -m int ge 0
+    {% set valid_age = 'octavia_header_age_valid' %}
+    {% if persistence.header_absolute_timeout_us is defined %}
+    acl octavia_header_age_below_limit var(txn.octavia_header_age) -m int lt {{ persistence.header_absolute_timeout_us }}
+    {% set valid_age = valid_age ~ ' octavia_header_age_below_limit' %}
+    {% endif %}
+    acl octavia_header_authenticated var(txn.octavia_header_payload),hmac(sha256,txn.octavia_header_signing_key),ub64enc,secure_memcmp(txn.octavia_header_tag) -m bool
+    http-request set-var(txn.octavia_header_signing_key) str({{ persistence.header_signing_key }})
+    http-request set-var(txn.octavia_header_in) {{ persistence.header_fetch|safe }} if octavia_header_unique
+    http-request set-var(txn.octavia_header_issued) var(txn.octavia_header_in),word(3,.) if octavia_header_format
+    http-request set-var(txn.octavia_header_age) date(0,us),sub(txn.octavia_header_issued) if octavia_header_format
+    http-request set-var(txn.octavia_header_tag) var(txn.octavia_header_in),word(4,.) if {{ valid_age }}
+    http-request set-var-fmt(txn.octavia_header_payload) "v1.%[var(txn.octavia_header_in),word(2,.)].%[var(txn.octavia_header_issued)]" if {{ valid_age }}
+    http-request set-var(txn.octavia_header_member) var(txn.octavia_header_in),word(2,.) if {{ valid_age }} octavia_header_authenticated
+{% endmacro %}
+
+
+{% macro http_header_persistence_response(pool) %}
+    {% set persistence = pool.session_persistence %}
+    {% for member in pool.members if member.enabled and member.weight > 0 %}
+    use-server {{ member.id }} if { var(txn.octavia_header_member) -m str {{ member.header_persistence_token }} } { srv_is_up({{ member.id }}) }
+    {% endfor %}
+    {# Capture only upstream responses and use the server which actually
+       responded, including any fallback selected by HAProxy. #}
+    http-response set-var(txn.octavia_header_served_by) srv_name
+    {% for member in pool.members %}
+    {% set served = '{ var(txn.octavia_header_served_by) -m str ' ~ member.id ~ ' }' %}
+    {% set same = '{ var(txn.octavia_header_member) -m str ' ~ member.header_persistence_token ~ ' }' %}
+    http-after-response set-var(txn.octavia_header_out) var(txn.octavia_header_in) if {{ served }} {{ same }}
+    http-after-response set-var-fmt(txn.octavia_header_issue) "v1.{{ member.header_persistence_token }}.%[date(0,us)]" if {{ served }} !{{ same }}
+    {% endfor %}
+    http-after-response set-var(txn.octavia_header_signature) var(txn.octavia_header_issue),hmac(sha256,txn.octavia_header_signing_key),ub64enc if { var(txn.octavia_header_issue) -m found }
+    http-after-response set-var-fmt(txn.octavia_header_out) "%[var(txn.octavia_header_issue)].%[var(txn.octavia_header_signature)]" if { var(txn.octavia_header_signature) -m found }
+    http-after-response add-header Cache-Control private if { var(txn.octavia_header_out) -m found }
+    http-after-response set-header {{ persistence.header_config_name|safe }} "%[var(txn.octavia_header_out)]" if { var(txn.octavia_header_out) -m found }
+{% endmacro %}
+
+
 {% macro http_cookie_path(cookie) %}
     {% set name = (cookie.cookie_name or 'SRV')|replace('.', '[.]') %}
     {% set replacement = cookie.cookie_path_replacement %}
@@ -1105,11 +1151,16 @@ backend {{ pool.id }}:{{ listener.id }}
     {% set cors = listener.get('cors_by_backend', {}).get(('pool', pool.id), []) %}
 {{ cors_request(cors) -}}
     {% set cookie = pool.session_persistence %}
+    {% set header_persistence = cookie.header_signing_key and pool.members %}
+    {% if header_persistence %}
+{{ http_header_persistence_request(pool) -}}
+    {% endif %}
     {% set reserved_cookie = cookie.cookie_name if cookie.absolute_timeout_us is defined else none %}
     {% if cookie.cookie_path_replacement is defined %}
         {% set reserved_cookie = cookie.cookie_name or 'SRV' %}
     {% endif %}
-{{ policy_response_headers(listener, 'pool', pool.id, reserved_cookie) -}}
+{{ policy_response_headers(listener, 'pool', pool.id, reserved_cookie,
+                           cookie.header_config_name if header_persistence else none) -}}
 {{ cors_response(cors) -}}
     {% for policy_id, args in listener.get('http_request_policies_by_pool', {}).get(pool.id, []) %}
     http-request octavia-http-policy {{ args|join(' ') }} if {{ selected_policy_match_macro(policy_id) }}
@@ -1224,6 +1275,9 @@ backend {{ pool.id }}:{{ listener.id }}
 {{ http_cookie_path(cookie) -}}
     {% endif %}
 {{ system_ca_file(pool) -}}
+    {% if header_persistence %}
+{{ http_header_persistence_response(pool) -}}
+    {% endif %}
     {% for member in pool.members %}
         {{- member_macro(constants, lib_consts, pool, member) -}}
     {% endfor %}

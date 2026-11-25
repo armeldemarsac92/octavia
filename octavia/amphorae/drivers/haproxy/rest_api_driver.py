@@ -146,8 +146,8 @@ class HaproxyAmphoraLoadBalancerDriver(
         fallback, withdrawn = self._frontend_fallback_listeners(loadbalancer)
         with (
             self._otlp_render_results(loadbalancer) as tracing_options,
-            self._http_cookie_render_results(
-                loadbalancer, target_id=amphora.id) as cookie_options,
+            self._observe_http_persistence(
+                loadbalancer, target_id=amphora.id) as persistence_options,
             self._system_ca_render_results(
                 loadbalancer, failover=finalizing_failover) as system_options
         ):
@@ -155,7 +155,7 @@ class HaproxyAmphoraLoadBalancerDriver(
                     utils.active_http_retry_backoff_policies(loadbalancer) or
                     utils.has_tls_sni_passthrough_weighted_policies(
                         loadbalancer, active=False) or
-                    self._has_active_http_cookie_path(loadbalancer)):
+                    self._http_persistence_capabilities(loadbalancer)):
                 peers = {amp.id: amp for amp in loadbalancer.amphorae
                          if amp.status != consts.DELETED}
                 peers[amphora.id] = amphora
@@ -166,11 +166,12 @@ class HaproxyAmphoraLoadBalancerDriver(
                     **({'require_http_retry_backoff': True,
                         'require_weighted_passthrough_topology': True}
                        if finalizing_failover else {}),
-                    **tracing_options, **cookie_options, **system_options)
+                    **tracing_options, **persistence_options,
+                    **system_options)
             else:
                 self._update_amphora_listeners(
                     loadbalancer, amphora, timeout_dict=timeout_dict,
-                    **tracing_options, **cookie_options)
+                    **tracing_options, **persistence_options)
 
     @staticmethod
     def _otlp_render_targets(loadbalancer):
@@ -202,10 +203,17 @@ class HaproxyAmphoraLoadBalancerDriver(
                 response.headers.get(header) == publication)
 
     @contextlib.contextmanager
-    def _http_cookie_render_results(self, loadbalancer, *, target_id=None):
+    def _observe_http_persistence(self, loadbalancer, *, target_id=None):
         policies = {}
-        for pool in self._active_listener_pools(loadbalancer):
+        header_policies = {}
+        for pool in utils.active_listener_pools(loadbalancer):
             persistence = pool.session_persistence
+            if (persistence is not None and persistence.type ==
+                    consts.SESSION_PERSISTENCE_HTTP_HEADER):
+                header_policies[pool.id] = (
+                    persistence.header_name,
+                    persistence.header_absolute_timeout_ms)
+                continue
             timeout = getattr(persistence, 'cookie_absolute_timeout_ms', None)
             if type(timeout) is int or self._has_custom_cookie_path(pool):
                 policies[pool.id] = (
@@ -213,21 +221,23 @@ class HaproxyAmphoraLoadBalancerDriver(
                     persistence.cookie_scope,
                     getattr(persistence, 'cookie_permanent', False) is True,
                     getattr(persistence, 'cookie_path', None))
-        if not policies:
+        if not policies and not header_policies:
             yield {}
             return
 
         votes = {}
         completed = False
         try:
-            yield {'http_cookie_observed': votes}
+            yield {'http_persistence_observed': votes}
             completed = True
         finally:
-            self._publish_http_cookie_results(
-                loadbalancer, policies, votes, completed, target_id)
+            self._publish_http_persistence_results(
+                loadbalancer, policies, header_policies, votes, completed,
+                target_id)
 
-    def _publish_http_cookie_results(self, loadbalancer, policies, votes,
-                                     completed, target_id):
+    def _publish_http_persistence_results(
+            self, loadbalancer, policies, header_policies, votes, completed,
+            target_id):
         # An acknowledged degradation is observable even if a subsequent
         # peer fails. Recovery requires every member of the allocated topology.
         expected = set()
@@ -239,27 +249,39 @@ class HaproxyAmphoraLoadBalancerDriver(
                 pass
         allocated = {amp.id for amp in loadbalancer.amphorae
                      if amp.status == consts.AMPHORA_ALLOCATED}
-        failed = {pool_id for pool_id in policies
+        all_policies = policies.keys() | header_policies.keys()
+        failed = {pool_id for pool_id in all_policies
                   if any(votes.get(amp_id, {}).get(pool_id) == consts.ERROR
                          for amp_id in allocated)}
         recovered = {
-            pool_id for pool_id in policies.keys() - failed
+            pool_id for pool_id in all_policies - failed
             if expected and all(votes.get(amp_id, {}).get(pool_id) ==
                                 consts.ACTIVE for amp_id in expected)}
-        # A full render needs every peer to acknowledge the scoped cookie.
+        # A full render needs a vote from every peer for these policies.
         # A single-peer maintenance render preflights the entire topology
         # but can only confirm its own reload and cannot recover both peers.
         requested = {target_id} if target_id else expected
-        failed.update(
+        coordinated = header_policies.keys() | {
             pool_id for pool_id, policy in policies.items()
-            if policy[-1] not in (None, consts.HTTP_COOKIE_DEFAULT_PATH) and
-            (not completed or not requested or
-             any(votes.get(amp_id, {}).get(pool_id) != consts.ACTIVE
-                 for amp_id in requested)))
+            if policy[-1] not in (None, consts.HTTP_COOKIE_DEFAULT_PATH)}
+        failed.update(
+            pool_id for pool_id in coordinated
+            if (not completed or not requested or
+                any(votes.get(amp_id, {}).get(pool_id) != consts.ACTIVE
+                    for amp_id in requested)))
+        recovered -= failed
         if failed or recovered:
             with db_api.session().begin() as session:
-                repo.PoolRepository().set_http_cookie_pool_statuses(
-                    session, policies, failed=failed, recovered=recovered)
+                pool_repo = repo.PoolRepository()
+                if (failed | recovered) & policies.keys():
+                    pool_repo.set_http_cookie_pool_statuses(
+                        session, policies, failed=failed & policies.keys(),
+                        recovered=recovered & policies.keys())
+                if (failed | recovered) & header_policies.keys():
+                    pool_repo.set_http_header_pool_statuses(
+                        session, header_policies,
+                        failed=failed & header_policies.keys(),
+                        recovered=recovered & header_policies.keys())
 
     @contextlib.contextmanager
     def _otlp_render_results(self, loadbalancer):
@@ -339,10 +361,11 @@ class HaproxyAmphoraLoadBalancerDriver(
             amp_details=None, backend_tls_certs=None,
             frontend_tls_certs=None, closed_frontend=(),
             l7policy_activation=False, otlp_observed=None,
-            tcp_batch_configs=None, http_cookie_observed=None,
+            tcp_batch_configs=None, http_persistence_observed=None,
             http_retry_backoff_observed=None, required_backoff_policies=(),
             verify_publication=False, weighted_passthrough_degraded=False,
-            system_ca_observed=None):
+            system_ca_observed=None, read_http_header_key=None,
+            tcp_only=False):
         if not loadbalancer.listeners:
             LOG.debug('No listeners found to update.')
             return set()
@@ -364,7 +387,8 @@ class HaproxyAmphoraLoadBalancerDriver(
             LOG.debug("%s updating listener %s on amphora %s",
                       self.__class__.__name__, listener.id, amphora.id)
             if listener.protocol in consts.LVS_PROTOCOLS:
-                if l7policy_activation or tcp_batch_configs is not None:
+                if (l7policy_activation or tcp_only or
+                        tcp_batch_configs is not None):
                     continue
                 self._update_udp_amphora(
                     listener, amphora, timeout_dict=timeout_dict)
@@ -466,10 +490,10 @@ class HaproxyAmphoraLoadBalancerDriver(
                 system_ca_options = (
                     {'system_ca_results': system_ca_results}
                     if system_ca_results is not None else {})
-                cookie_results = {}
-                cookie_options = (
-                    {'http_cookie_results': cookie_results}
-                    if http_cookie_observed is not None else {})
+                persistence_results = {}
+                persistence_options = (
+                    {'http_persistence_results': persistence_results}
+                    if http_persistence_observed is not None else {})
                 backoff_results = {}
                 backoff_options = (
                     {'http_retry_backoff_results': backoff_results}
@@ -479,8 +503,10 @@ class HaproxyAmphoraLoadBalancerDriver(
                     tls_certs=certs,
                     haproxy_versions=haproxy_versions,
                     amp_details=amp_details, **tracing_options,
-                    **cookie_options, **publication_options, **backoff_options,
-                    **system_ca_options,
+                    **persistence_options, **publication_options,
+                    **backoff_options, **system_ca_options,
+                    **({'read_http_header_key': read_http_header_key}
+                       if read_http_header_key is not None else {}),
                     **({'weighted_passthrough_degraded': True}
                        if weighted_passthrough_degraded else {}))
                 if any(backoff_results.get(policy_id) == consts.ERROR
@@ -488,11 +514,10 @@ class HaproxyAmphoraLoadBalancerDriver(
                     http_retry_backoff_observed[amphora.id] = backoff_results
                     raise driver_except.HttpRetryBackoffUnsupported()
                 if tcp_batch_configs is not None:
-                    tcp_batch_configs.append((amphora, config, cookie_results,
-                                              tracing_results,
-                                              publication_options,
-                                              backoff_results,
-                                              system_ca_results))
+                    tcp_batch_configs.append((
+                        amphora, config, persistence_results, tracing_results,
+                        publication_options, backoff_results,
+                        system_ca_results))
                     return configured
                 self.clients[amphora.api_version].upload_config(
                     amphora, loadbalancer.id, config,
@@ -505,8 +530,8 @@ class HaproxyAmphoraLoadBalancerDriver(
                 if not acknowledged and (
                         system_ca_results is not None or verify_publication):
                     raise driver_except.ListenerProvisioningError()
-                if http_cookie_observed is not None:
-                    http_cookie_observed[amphora.id] = cookie_results
+                if http_persistence_observed is not None:
+                    http_persistence_observed[amphora.id] = persistence_results
                 if http_retry_backoff_observed is not None:
                     http_retry_backoff_observed[amphora.id] = backoff_results
                 if otlp_observed is not None and acknowledged:
@@ -696,40 +721,41 @@ class HaproxyAmphoraLoadBalancerDriver(
         fallback, withdrawn = self._frontend_fallback_listeners(loadbalancer)
         with (
             self._otlp_render_results(loadbalancer) as tracing_options,
-            self._http_cookie_render_results(loadbalancer) as cookie_options,
+            self._observe_http_persistence(
+                loadbalancer) as persistence_options,
             self._system_ca_render_results(loadbalancer) as system_options
         ):
             if (amphorae and
                     (opted_in or fallback or withdrawn or
                      backoff_policies or weighted_passthrough or
-                     self._has_active_http_cookie_path(loadbalancer))):
+                     self._http_persistence_capabilities(loadbalancer))):
                 return self._update_protected_tls_listeners(
                     loadbalancer, amphorae, amphorae, protected, fallback,
                     withdrawn, l7policy_activation=l7policy_activation,
                     l7policy_restoration=l7policy_restoration,
                     **({'require_weighted_passthrough_topology': True}
                        if weighted_passthrough else {}),
-                    **tracing_options, **batch_options, **cookie_options,
+                    **tracing_options, **batch_options, **persistence_options,
                     **system_options)
             for amphora in amphorae:
                 self._update_amphora_listeners(
                     loadbalancer, amphora,
                     l7policy_activation=l7policy_activation,
-                    **tracing_options, **batch_options, **cookie_options,
+                    **tracing_options, **batch_options, **persistence_options,
                     **system_options)
             if tcp_member_batch:
                 self._reload_tcp_batch_configs(
                     loadbalancer, tcp_batch_configs, backoff_policies,
-                    cookie_options.get('http_cookie_observed'),
+                    persistence_options.get('http_persistence_observed'),
                     tracing_options.get('otlp_observed'),
                     system_options.get('system_ca_observed'))
 
     def _reload_tcp_batch_configs(self, loadbalancer, configs,
-                                  backoff_policies, cookie_votes,
+                                  backoff_policies, persistence_votes,
                                   tracing_votes, system_ca_votes, *,
-                                  closing_system_ca=False):
+                                  closing=False, verify_publication=False):
         # Ordinarily every peer must validate the batch before a reload.
-        # If all System pools are closing, apply that withdrawal wherever
+        # When closing protected pools, apply the withdrawal wherever
         # publication is possible and report every failed batch as failed.
         uploaded = []
         errors = []
@@ -739,17 +765,18 @@ class HaproxyAmphoraLoadBalancerDriver(
                 self.clients[amphora.api_version].upload_config(
                     amphora, loadbalancer.id, config)
             except Exception as error:
-                if not closing_system_ca:
+                if not closing:
                     raise
                 errors.append(error)
             else:
                 uploaded.append(entry)
         backoff_votes = {}
-        verify_publication = utils.has_tls_sni_passthrough_weighted_policies(
-            loadbalancer)
+        verify_publication = (verify_publication or
+                              utils.has_tls_sni_passthrough_weighted_policies(
+                                  loadbalancer))
         completed = False
         try:
-            for (amphora, _, cookie_results, tracing_results,
+            for (amphora, _, persistence_results, tracing_results,
                  publication_options, backoff_results,
                  system_ca_results) in uploaded:
                 client = self.clients[amphora.api_version]
@@ -763,12 +790,12 @@ class HaproxyAmphoraLoadBalancerDriver(
                             verify_publication):
                         raise driver_except.ListenerProvisioningError()
                 except Exception as error:
-                    if not closing_system_ca:
+                    if not closing:
                         raise
                     errors.append(error)
                     continue
-                if cookie_votes is not None:
-                    cookie_votes[amphora.id] = cookie_results
+                if persistence_votes is not None:
+                    persistence_votes[amphora.id] = persistence_results
                 backoff_votes[amphora.id] = backoff_results
                 if tracing_votes is not None and acknowledged:
                     tracing_votes[amphora.id] = tracing_results
@@ -797,7 +824,7 @@ class HaproxyAmphoraLoadBalancerDriver(
             loadbalancer, active=False)
         coordinated = (opted_in or bool(fallback or withdrawn) or
                        tracing_pair or retry_backoff or weighted_passthrough or
-                       self._has_active_http_cookie_path(loadbalancer))
+                       self._http_persistence_capabilities(loadbalancer))
         if coordinated and amphora_index == 0:
             system_ca = bool(utils.backend_tls_system_ca_pool_ids(
                 loadbalancer))
@@ -812,7 +839,8 @@ class HaproxyAmphoraLoadBalancerDriver(
             }
             with (
                 self._otlp_render_results(loadbalancer) as tracing_options,
-                self._http_cookie_render_results(loadbalancer) as cookie_state,
+                self._observe_http_persistence(
+                    loadbalancer) as persistence_options,
                 self._system_ca_render_results(
                     loadbalancer, failover=True) as system_options
             ):
@@ -826,22 +854,9 @@ class HaproxyAmphoraLoadBalancerDriver(
                        if retry_backoff else {}),
                     **({'require_weighted_passthrough_topology': True}
                        if weighted_passthrough else {}),
-                    **tracing_options, **cookie_state, **system_options)
+                    **tracing_options, **persistence_options,
+                    **system_options)
         return coordinated
-
-    @staticmethod
-    def _active_listener_pools(loadbalancer):
-        if not loadbalancer.enabled:
-            return
-        removed = (consts.PENDING_DELETE, consts.DELETED)
-        for listener in loadbalancer.listeners:
-            if (not listener.enabled or
-                    listener.provisioning_status in removed or
-                    listener.protocol in consts.LVS_PROTOCOLS):
-                continue
-            yield from (pool for pool in listener.pools if
-                        pool.enabled and
-                        pool.provisioning_status not in removed)
 
     @staticmethod
     def _has_custom_cookie_path(pool):
@@ -852,9 +867,16 @@ class HaproxyAmphoraLoadBalancerDriver(
                 getattr(persistence, 'cookie_path', None) not in
                 (None, consts.HTTP_COOKIE_DEFAULT_PATH))
 
-    def _has_active_http_cookie_path(self, loadbalancer):
-        return any(self._has_custom_cookie_path(pool)
-                   for pool in self._active_listener_pools(loadbalancer))
+    def _http_persistence_capabilities(self, loadbalancer):
+        capabilities = set()
+        header = consts.GATEWAY_CAPABILITY_HTTP_HEADER_PERSISTENCE
+        for pool in utils.active_listener_pools(loadbalancer):
+            if self._has_custom_cookie_path(pool):
+                capabilities.add(consts.GATEWAY_CAPABILITY_HTTP_COOKIE_PATH)
+            if (pool.session_persistence and pool.session_persistence.type ==
+                    consts.SESSION_PERSISTENCE_HTTP_HEADER):
+                capabilities.add(header)
+        return capabilities
 
     @staticmethod
     def _backend_tls_pools(loadbalancer):
@@ -897,21 +919,40 @@ class HaproxyAmphoraLoadBalancerDriver(
             l7policy_activation=False,
             coordinating_failover=False, l7policy_restoration=False,
             otlp_observed=None, tcp_batch_configs=None,
-            http_cookie_observed=None, require_http_retry_backoff=False,
+            http_persistence_observed=None,
+            require_http_retry_backoff=False,
             require_weighted_passthrough_topology=False,
             system_ca_observed=None):
         # Preflight the pair before staging material or reloading either peer.
         probe_targets = {
             amp.id: amp for amp in (peers if protected or fallback
                                     else amphorae)}
-        path_required = self._has_active_http_cookie_path(loadbalancer)
+        persistence_capabilities = (
+            self._http_persistence_capabilities(loadbalancer))
+        header_capability = consts.GATEWAY_CAPABILITY_HTTP_HEADER_PERSISTENCE
+        verify_header_publication = (
+            header_capability in persistence_capabilities)
+        if verify_header_publication and not amphorae:
+            error = driver_except.ListenerProvisioningError()
+            if coordinating_failover and unreachable:
+                raise driver_except.CoordinatedListenerUpdateError(
+                    dict.fromkeys(unreachable, error))
+            raise error
+        requested_amp_ids = {amp.id for amp in amphorae}
+        closure_peers = {amp.id: amp for amp in amphorae}
+        if verify_header_publication:
+            closure_peers.update(
+                (amp.id, amp) for amp in peers
+                if amp.status == consts.AMPHORA_ALLOCATED and
+                amp.id not in closure_peers and amp.id not in unreachable)
+            probe_targets.update(closure_peers)
         backoff_policies = utils.active_http_retry_backoff_policies(
             loadbalancer)
         topology_peers = {}
         complete_topology = False
         weighted_present = utils.has_tls_sni_passthrough_weighted_policies(
             loadbalancer, active=False)
-        if path_required or backoff_policies or weighted_present:
+        if persistence_capabilities or backoff_policies or weighted_present:
             topology_peers = {amp.id: amp for amp in amphorae}
             try:
                 topology_peers.update(
@@ -940,17 +981,27 @@ class HaproxyAmphoraLoadBalancerDriver(
                 probe_failures.add(amphora.id)
                 details[amphora.id] = {}
 
-        if path_required:
-            capability = consts.GATEWAY_CAPABILITY_HTTP_COOKIE_PATH
+        read_http_header_key = None
+        closing_header = False
+        for capability in sorted(persistence_capabilities):
             unsupported = [amp_id for amp_id in topology_peers
                            if details[amp_id].get(capability) is not True]
             if unsupported:
-                LOG.warning('Could not confirm HTTP cookie path support on '
-                            'amphorae %s for load balancer %s.',
-                            unsupported, loadbalancer.id)
+                LOG.warning('Could not confirm %s support on amphorae %s for '
+                            'load balancer %s.', capability, unsupported,
+                            loadbalancer.id)
             supported = complete_topology and not unsupported
+            if capability == header_capability:
+                if supported:
+                    # Use the same key snapshot for every render in the pair.
+                    read_http_header_key = functools.cache(
+                        jinja_combo._read_http_cookie_signing_key)
+                    supported = read_http_header_key() is not None
+                closing_header = not supported
             for detail in details.values():
                 detail[capability] = supported
+        if closing_header:
+            amphorae = list(closure_peers.values())
 
         weighted_capability = (
             consts.GATEWAY_CAPABILITY_TLS_SNI_PASSTHROUGH_WEIGHTED_POOLS)
@@ -1004,13 +1055,13 @@ class HaproxyAmphoraLoadBalancerDriver(
                 raise error
 
         frontend_certs, closed_frontend = self._stage_frontend_client_auth(
-            loadbalancer.id, amphorae, peers, details, fallback)
+            loadbalancer.id, closure_peers.values(), peers, details, fallback)
         if (closed_frontend and not weighted_partial and
                 (tcp_batch_configs is not None or
                  (l7policy_activation and not l7policy_restoration))):
             raise driver_except.ListenerProvisioningError()
 
-        certs = {amphora.id: {} for amphora in amphorae}
+        certs = {amp_id: {} for amp_id in closure_peers}
         closed = set()
         system_ca_pools = set()
         system_ca_material = None
@@ -1058,11 +1109,11 @@ class HaproxyAmphoraLoadBalancerDriver(
                                 'TLS configuration could not be prepared '
                                 '(%s).', pool_id, type(error).__name__)
                 else:
-                    for amphora in amphorae:
+                    for amphora in closure_peers.values():
                         certs[amphora.id][pool_id] = material[amphora.id]
                     continue
             closed.add(pool_id)
-            for amphora in amphorae:
+            for amphora in closure_peers.values():
                 certs[amphora.id][pool_id] = {'closed': True}
 
         if (tcp_batch_configs is not None and not weighted_partial and
@@ -1077,8 +1128,11 @@ class HaproxyAmphoraLoadBalancerDriver(
         render_options = {}
         if otlp_observed is not None:
             render_options['otlp_observed'] = otlp_observed
-        if http_cookie_observed is not None:
-            render_options['http_cookie_observed'] = http_cookie_observed
+        if http_persistence_observed is not None:
+            render_options['http_persistence_observed'] = (
+                http_persistence_observed)
+        if read_http_header_key is not None:
+            render_options['read_http_header_key'] = read_http_header_key
         if system_ca_observed is not None:
             render_options['system_ca_observed'] = system_ca_observed
         if backoff_policies:
@@ -1089,7 +1143,11 @@ class HaproxyAmphoraLoadBalancerDriver(
         batch_options = (
             {'tcp_batch_configs': tcp_batch_configs} if staged_batch else {})
 
-        def publish(amphora, **options):
+        def publish(amphora, *, tcp_only=False, **options):
+            verify_publication = (
+                verify_header_publication or
+                (weighted_present and details[amphora.id].get(
+                    weighted_capability) is True))
             return self._update_amphora_listeners(
                 loadbalancer, amphora, timeout_dict=timeout_dict,
                 amp_details=details[amphora.id],
@@ -1097,9 +1155,10 @@ class HaproxyAmphoraLoadBalancerDriver(
                 frontend_tls_certs=frontend_certs[amphora.id],
                 closed_frontend=closed_frontend,
                 l7policy_activation=l7policy_activation,
-                **({'verify_publication': True} if weighted_present and
-                   details[amphora.id].get(weighted_capability) is True
+                **({'verify_publication': True} if verify_publication
                    else {}),
+                **({'tcp_only': True} if tcp_only or
+                   amphora.id not in requested_amp_ids else {}),
                 **({'weighted_passthrough_degraded': True}
                    if weighted_partial else {}),
                 **render_options, **options)
@@ -1110,7 +1169,8 @@ class HaproxyAmphoraLoadBalancerDriver(
             try:
                 reloaded_listeners.append(publish(amphora, **batch_options))
             except Exception as error:
-                if staged_batch and not system_ca_pools:
+                if (staged_batch and not system_ca_pools and
+                        not verify_header_publication):
                     raise
                 LOG.warning('Could not reload listeners on amphora %s (%s).',
                             amphora.id, type(error).__name__)
@@ -1122,25 +1182,38 @@ class HaproxyAmphoraLoadBalancerDriver(
             try:
                 self._reload_tcp_batch_configs(
                     loadbalancer, tcp_batch_configs, backoff_policies,
-                    http_cookie_observed, otlp_observed, system_ca_observed,
-                    closing_system_ca=closing_system_ca)
+                    http_persistence_observed, otlp_observed,
+                    system_ca_observed,
+                    closing=closing_system_ca or closing_header,
+                    verify_publication=verify_header_publication)
             except Exception as error:
-                if not system_ca_pools:
+                if not system_ca_pools and not verify_header_publication:
                     raise
                 batch_error = error
 
-        if system_ca_pools and (reload_errors or batch_error) and (
-                not closing_system_ca or (staged_batch and reload_errors)):
+        render_failed = staged_batch and bool(reload_errors)
+        close_system_ca = system_ca_pools and (
+            not closing_system_ca or render_failed)
+        close_header = verify_header_publication and (
+            not closing_header or render_failed)
+        if ((reload_errors or batch_error) and
+                (close_system_ca or close_header)):
             # An upload or reload can leave an earlier peer on the new graph.
             # Publish a fresh closed generation independently on each peer.
-            closed.update(system_ca_pools)
-            closure = dict.fromkeys(system_ca_pools, {'closed': True})
-            for amphora in attempted:
-                certs[amphora.id].update(closure)
+            if close_system_ca:
+                closed.update(system_ca_pools)
+            if close_header:
+                for detail in details.values():
+                    detail[header_capability] = False
+            for amphora in (closure_peers.values() if close_header
+                            else attempted):
+                if close_system_ca:
+                    certs[amphora.id].update(
+                        dict.fromkeys(system_ca_pools, {'closed': True}))
                 try:
-                    publish(amphora)
+                    publish(amphora, tcp_only=bool(close_header))
                 except Exception as error:
-                    LOG.warning('Could not confirm backend TLS System CA '
+                    LOG.warning('Could not confirm protected pool '
                                 'withdrawal on amphora %s (%s).', amphora.id,
                                 type(error).__name__)
                     reload_errors.setdefault(amphora.id, error)

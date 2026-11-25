@@ -800,3 +800,29 @@ worker renders the affected pool without affinity. The acknowledged
 reload and recovery rules for the absolute timeout profile also apply
 here. To return to a browser session cookie while retaining the existing
 absolute timeout, send ``session_persistence: {cookie_permanent: false}``.
+
+HTTP session persistence headers
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The Amphora provider can issue a session identifier in a configured HTTP
+response field such as ``X-Session``. A request with that field can return to
+the same member after route and pool selection. Each pool and header name
+has its own signing context. With an absolute timeout, replay leaves the
+original expiration in place. HAProxy issues a fresh identifier when an
+upstream member responds to a request without a usable identifier.
+
+Enable this capability after deploying the schema, API, provider library,
+workers and Amphora agents and qualifying the regional HAProxy binaries.
+Configure the same private 32-byte signing key on each worker through
+``[haproxy_amphora] http_cookie_signing_key_file``. Then set::
+
+   [api_settings]
+   enabled_http_header_persistence_providers = amphora
+
+The API advertises ``http_header_persistence_v1``. Each allocated Amphora
+checks its configured HAProxy binary for the required rules and fetches.
+When a required capability or signing key is unavailable, requests routed
+to the affected pool receive HTTP 503. Its selection and weight are
+preserved, and other pools continue serving traffic. The API reports
+``ERROR`` for the affected pool until all allocated Amphorae confirm recovery.
+Withdrawing the persistence policy remains available after regional opt-out.
