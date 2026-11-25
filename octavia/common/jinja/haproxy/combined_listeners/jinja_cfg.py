@@ -214,7 +214,8 @@ class JinjaTemplater:
                      haproxy_versions, amp_details, socket_path=None,
                      otlp_tls_certs=None, http_cookie_results=None,
                      otlp_publication=None, http_retry_backoff_results=None,
-                     weighted_passthrough_degraded=False):
+                     weighted_passthrough_degraded=False,
+                     config_publication=None, system_ca_results=None):
         """Convert a logical configuration to the HAProxy version
 
         :param host_amphora: The Amphora this configuration is hosted on
@@ -251,6 +252,10 @@ class JinjaTemplater:
             otlp_publication=otlp_publication,
             **({'weighted_passthrough_degraded': True}
                if weighted_passthrough_degraded else {}),
+            **({'config_publication': config_publication}
+               if config_publication is not None else {}),
+            **({'system_ca_results': system_ca_results}
+               if system_ca_results is not None else {}),
             **({'http_retry_backoff_results': http_retry_backoff_results}
                if http_retry_backoff_results is not None else {}),
             **({'http_cookie_results': http_cookie_results}
@@ -297,7 +302,9 @@ class JinjaTemplater:
                                 http_cookie_results=None,
                                 otlp_publication=None,
                                 http_retry_backoff_results=None,
-                                weighted_passthrough_degraded=False):
+                                weighted_passthrough_degraded=False,
+                                config_publication=None,
+                                system_ca_results=None):
         """Renders a templated configuration from a load balancer object
 
         :param host_amphora: The Amphora this configuration is hosted on
@@ -460,8 +467,10 @@ class JinjaTemplater:
                     hostname = pool.get('backend_tls_hostname')
                     require_h2 = pool.get('backend_tls_require_h2')
                     sans = pool.get('backend_tls_subject_alt_names')
+                    system_ca = pool.get('backend_tls_system_ca_sha256')
                     if not pool['enabled'] or (
-                            hostname is None and not require_h2 and not sans):
+                            hostname is None and not require_h2 and
+                            not sans and not system_ca):
                         continue
                     if (amp_details or {}).get(
                             constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME
@@ -488,6 +497,12 @@ class JinjaTemplater:
                         raise driver_except.AmpVersionUnsupported(
                             version='HAProxy requires explicit backend TLS '
                                     'subject alternative name support')
+                    if system_ca and (amp_details or {}).get(
+                            constants.GATEWAY_CAPABILITY_BACKEND_TLS_SYSTEM_CA
+                    ) is not True:
+                        raise driver_except.AmpVersionUnsupported(
+                            version='Amphora lacks backend TLS system CA '
+                                    'support')
                     if (not validate.is_exact_sni_name(hostname) or
                             pool['protocol'] not in (
                                 PROTOCOL_MAP[constants.PROTOCOL_HTTP],
@@ -499,6 +514,8 @@ class JinjaTemplater:
                         raise exceptions.ValidationException(detail=(
                             'Missing or invalid backend TLS identity or '
                             'trust configuration.'))
+                    if system_ca and system_ca_results is not None:
+                        system_ca_results[pool['id']] = system_ca
                     monitor = pool['health_monitor']
                     if tcp and monitor and monitor['enabled']:
                         validate.validate_tcp_tls_backend_monitor(
@@ -527,6 +544,7 @@ class JinjaTemplater:
 
         jinja_dict = {
             'otlp_publication': otlp_publication,
+            'config_publication': config_publication,
             'loadbalancer': loadbalancer,
             'stats_sock': socket_path,
             'log_http': self.log_http,
@@ -837,7 +855,9 @@ class JinjaTemplater:
                     validate.validate_tcp_redirect_pool_protocol(
                         pool.protocol, pool.tls_enabled,
                         tcp_tls_termination=True, hostname=hostname,
-                        ca_ref=pool.ca_tls_certificate_id)
+                        ca_ref=pool.ca_tls_certificate_id,
+                        system_ca=getattr(pool, 'backend_tls_system_ca',
+                                          False))
                 except exceptions.ValidationException:
                     pool_certs = {'closed': True}
             if (not tcp_tls_termination and
@@ -1274,8 +1294,12 @@ class JinjaTemplater:
         sans = getattr(pool, 'backend_tls_subject_alt_names', None)
         if sans:
             ret_value['backend_tls_subject_alt_names'] = sans
+        system_ca = getattr(pool, 'backend_tls_system_ca', False) is True
+        system_ca_digest = (pool_tls_certs or {}).get('system_ca_sha256')
         if (octavia_utils.is_disabled_backend_tls_pool(pool) or
-                (pool_tls_certs and pool_tls_certs.get('closed'))):
+                (pool_tls_certs and pool_tls_certs.get('closed')) or
+                (system_ca and not (system_ca_digest and
+                                    pool_tls_certs.get('ca_cert')))):
             ret_value['closed'] = True
             ret_value['enabled'] = False
             return ret_value
@@ -1351,7 +1375,9 @@ class JinjaTemplater:
             if (pool.alpn_protocols is not None and
                     feature_compatibility.get(constants.POOL_ALPN, False)):
                 ret_value['alpn_protocols'] = ",".join(pool.alpn_protocols)
-        if (pool.ca_tls_certificate_id and pool_tls_certs and
+        if system_ca:
+            ret_value['backend_tls_system_ca_sha256'] = system_ca_digest
+        if ((pool.ca_tls_certificate_id or system_ca) and pool_tls_certs and
                 pool_tls_certs.get('ca_cert')):
             ret_value['ca_cert'] = pool_tls_certs.get('ca_cert')
         if (pool.crl_container_id and pool_tls_certs and

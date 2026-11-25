@@ -86,6 +86,10 @@ class Server:
                               '/loadbalancer/<amphora_id>/<lb_id>/haproxy',
                               view_func=self.upload_haproxy_config,
                               methods=['PUT'])
+        self.app.add_url_rule(
+            rule=PATH_PREFIX + '/loadbalancer/<lb_id>/backend-system-ca',
+            view_func=self._loadbalancer.stage_backend_tls_system_ca,
+            methods=['PUT'])
         # TODO(gthiemonge) rename 'udp_listener' endpoint to 'lvs_listener'
         # when api_version is bumped
         self.app.add_url_rule(rule=PATH_PREFIX +

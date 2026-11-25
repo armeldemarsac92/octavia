@@ -156,6 +156,7 @@ def get_haproxy_capabilities():
     if not output.startswith(strict_dns_builds):
         return capabilities
     capabilities[constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME] = True
+    capabilities[constants.GATEWAY_CAPABILITY_BACKEND_TLS_SYSTEM_CA] = True
     capabilities[constants.GATEWAY_CAPABILITY_TCP_TLS_BACKEND_AUTH] = True
     if output.startswith(strict_dns_builds[1:]):
         capabilities[constants.GATEWAY_CAPABILITY_BACKEND_TLS_H2_ALPN] = True

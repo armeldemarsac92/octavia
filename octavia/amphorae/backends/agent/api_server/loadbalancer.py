@@ -19,8 +19,11 @@ import re
 import shutil
 import stat
 import subprocess
+import tempfile
 import time
+import uuid
 
+from cryptography import x509
 import flask
 import jinja2
 from oslo_config import cfg
@@ -33,11 +36,16 @@ from octavia.amphorae.backends.agent.api_server import util
 from octavia.amphorae.backends.utils import haproxy_query
 from octavia.common import constants as consts
 from octavia.common import utils as octavia_utils
+from octavia.common import validate
 
 LOG = logging.getLogger(__name__)
 BUFFER = 100
 HAPROXY_RELOAD_RETRIES = 3
 HAPROXY_QUERY_RETRIES = 5
+SYSTEM_CA_BUNDLE_LIMIT = 8 * 1024 * 1024
+SYSTEM_CA_CERTIFICATE = re.compile(
+    rb'-----BEGIN CERTIFICATE-----[\r\n]+'
+    rb'[A-Za-z0-9+/=\r\n]+-----END CERTIFICATE-----')
 
 CONF = cfg.CONF
 
@@ -85,6 +93,56 @@ class Loadbalancer:
                 hashlib.md5(octavia_utils.b(cfg),
                             usedforsecurity=False).hexdigest())  # nosec
             return resp
+
+    @staticmethod
+    def stage_backend_tls_system_ca(lb_id):
+        request = flask.request.get_json(silent=True)
+        if not isinstance(request, dict):
+            return webob.Response(status=400)
+        path, digest = request.get('path'), request.get('sha256')
+        try:
+            if (str(uuid.UUID(lb_id)) != lb_id or
+                    not validate.is_backend_tls_system_ca_profile(
+                        path, digest)):
+                return webob.Response(status=400)
+            with os.fdopen(os.open(path, os.O_RDONLY | os.O_NONBLOCK),
+                           'rb') as source:
+                if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+                    return webob.Response(status=400)
+                pem = source.read(SYSTEM_CA_BUNDLE_LIMIT + 1)
+            if (not pem or len(pem) > SYSTEM_CA_BUNDLE_LIMIT or
+                    hashlib.sha256(pem).hexdigest() != digest):
+                return webob.Response(status=409)
+            remainder = SYSTEM_CA_CERTIFICATE.sub(b'', pem)
+            if any(line.strip() and not line.lstrip().startswith(b'#')
+                   for line in remainder.splitlines()):
+                return webob.Response(status=400)
+            certificates = x509.load_pem_x509_certificates(pem)
+            if not certificates or not all(
+                    cert.extensions.get_extension_for_class(
+                        x509.BasicConstraints).value.ca for cert in
+                    certificates):
+                return webob.Response(status=400)
+
+            directory = os.path.join(util.haproxy_dir(lb_id),
+                                     consts.HAPROXY_SYSTEM_CA_DIRECTORY)
+            os.makedirs(directory, mode=0o700, exist_ok=True)
+            snapshot = os.path.join(directory, f'{digest}.pem')
+            # Publish a complete file once. Later stages can confirm the
+            # snapshot but cannot replace it while HAProxy is loading it.
+            with tempfile.NamedTemporaryFile(dir=directory) as staged:
+                staged.write(pem)
+                staged.flush()
+                try:
+                    os.link(staged.name, snapshot)
+                except FileExistsError:
+                    with open(snapshot, 'rb') as existing:
+                        if existing.read(SYSTEM_CA_BUNDLE_LIMIT + 1) != pem:
+                            return webob.Response(status=409)
+        except (OSError, ValueError, x509.ExtensionNotFound,
+                x509.DuplicateExtension):
+            return webob.Response(status=400)
+        return webob.Response(json={'sha256': digest}, status=201)
 
     def upload_haproxy_config(self, amphora_id, lb_id):
         """Upload the haproxy config
@@ -220,9 +278,14 @@ class Loadbalancer:
                 'details': f"Unknown action: {action}"}, status=400)
 
         publication = None
+        header = consts.HAPROXY_OTLP_PUBLICATION_HEADER
+        description_prefix = 'octavia-otlp'
         if action == consts.AMP_ACTION_RELOAD and flask.has_request_context():
-            publication = flask.request.headers.get(
-                consts.HAPROXY_OTLP_PUBLICATION_HEADER)
+            config_header = consts.HAPROXY_CONFIG_PUBLICATION_HEADER
+            if config_header in flask.request.headers:
+                header = config_header
+                description_prefix = 'octavia-config'
+            publication = flask.request.headers.get(header)
             if (publication is not None and
                     not re.fullmatch('[a-f0-9]{32}', publication)):
                 return webob.Response(
@@ -302,7 +365,7 @@ class Loadbalancer:
         if publication is not None:
             query = haproxy_query.HAProxyQuery(
                 util.haproxy_sock_path(lb_id), timeout=0.3)
-            description = f'octavia-otlp-{publication}'
+            description = f'{description_prefix}-{publication}'
             # systemctl only signals HAProxy. Wait for the active data-plane
             # worker to report the exact description from the uploaded config.
             for _ in range(HAPROXY_QUERY_RETRIES):
@@ -314,7 +377,6 @@ class Loadbalancer:
                         info.get('Stopping') == '0'):
                     response = webob.Response(
                         json={'message': 'OK'}, status=202)
-                    header = consts.HAPROXY_OTLP_PUBLICATION_HEADER
                     response.headers[header] = publication
                     return response
                 time.sleep(0.1)

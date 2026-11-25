@@ -113,6 +113,8 @@ HAPROXY_OTLP_TRACING_SCRIPT = '/var/lib/octavia/octavia-telemetry.lua'
 HAPROXY_OTLP_SAMPLING_SCRIPT = (
     '/var/lib/octavia/octavia-telemetry-sampling-v1.lua')
 HAPROXY_OTLP_PUBLICATION_HEADER = 'X-Octavia-OTLP-Publication'
+HAPROXY_CONFIG_PUBLICATION_HEADER = 'X-Octavia-Config-Publication'
+HAPROXY_SYSTEM_CA_DIRECTORY = 'backend-system-ca'
 HAPROXY_OTLP_TRACING_PROXY_PREFIX = 'octavia-otlp-'
 HAPROXY_OTLP_TRACING_SOCKET_DIR = '/run/octavia/telemetry'
 GATEWAY_CAPABILITY_LISTENER_REQUEST_FILTERS = 'listener_request_filters_v1'
@@ -135,6 +137,7 @@ TCP_MEMBER_BATCH_APPLIED = 'applied'
 GATEWAY_CAPABILITY_BACKEND_H2C = 'backend_h2c_v1'
 GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME = 'backend_tls_hostname_v1'
 GATEWAY_CAPABILITY_BACKEND_TLS_H2_ALPN = 'backend_tls_h2_alpn_v1'
+GATEWAY_CAPABILITY_BACKEND_TLS_SYSTEM_CA = 'backend_tls_system_ca_v1'
 GATEWAY_CAPABILITY_BACKEND_TLS_SUBJECT_ALT_NAMES = (
     'backend_tls_subject_alt_names_v1')
 GATEWAY_BACKEND_TLS_POOL_TAG = 'gateway-api-openstack.backend-tls=v1'

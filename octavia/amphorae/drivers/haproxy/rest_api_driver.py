@@ -147,7 +147,9 @@ class HaproxyAmphoraLoadBalancerDriver(
         with (
             self._otlp_render_results(loadbalancer) as tracing_options,
             self._http_cookie_render_results(
-                loadbalancer, target_id=amphora.id) as cookie_options
+                loadbalancer, target_id=amphora.id) as cookie_options,
+            self._system_ca_render_results(
+                loadbalancer, failover=finalizing_failover) as system_options
         ):
             if (opted_in or fallback or withdrawn or
                     utils.active_http_retry_backoff_policies(loadbalancer) or
@@ -157,13 +159,14 @@ class HaproxyAmphoraLoadBalancerDriver(
                 peers = {amp.id: amp for amp in loadbalancer.amphorae
                          if amp.status != consts.DELETED}
                 peers[amphora.id] = amphora
+                targets = list(peers.values()) if system_options else [amphora]
                 self._update_protected_tls_listeners(
-                    loadbalancer, [amphora], peers.values(), protected,
+                    loadbalancer, targets, peers.values(), protected,
                     fallback, withdrawn, timeout_dict=timeout_dict,
                     **({'require_http_retry_backoff': True,
                         'require_weighted_passthrough_topology': True}
                        if finalizing_failover else {}),
-                    **tracing_options, **cookie_options)
+                    **tracing_options, **cookie_options, **system_options)
             else:
                 self._update_amphora_listeners(
                     loadbalancer, amphora, timeout_dict=timeout_dict,
@@ -188,8 +191,12 @@ class HaproxyAmphoraLoadBalancerDriver(
         return targets
 
     @staticmethod
-    def _otlp_publication_acked(response, publication):
-        header = consts.HAPROXY_OTLP_PUBLICATION_HEADER
+    def _haproxy_publication_acked(response, *, otlp_publication=None,
+                                   config_publication=None):
+        header = (consts.HAPROXY_CONFIG_PUBLICATION_HEADER
+                  if config_publication else
+                  consts.HAPROXY_OTLP_PUBLICATION_HEADER)
+        publication = config_publication or otlp_publication
         return (publication is not None and
                 getattr(response, 'status_code', None) == 202 and
                 response.headers.get(header) == publication)
@@ -288,6 +295,45 @@ class HaproxyAmphoraLoadBalancerDriver(
                         loadbalancer.id, loadbalancer.topology, expected,
                         loadbalancer.enabled))
 
+    @contextlib.contextmanager
+    def _system_ca_render_results(self, loadbalancer, *, failover=False):
+        pools = utils.backend_tls_system_ca_pool_ids(loadbalancer)
+        if not pools:
+            yield {}
+            return
+
+        expected = {amp.id: amp.role for amp in loadbalancer.amphorae
+                    if amp.status != consts.DELETED}
+        topology = (loadbalancer.id, loadbalancer.topology, expected)
+        results = {}
+        completed = False
+        if failover:
+            with db_api.session().begin() as session:
+                repo.PoolRepository().set_backend_tls_system_ca_digests(
+                    session, topology, dict.fromkeys(pools))
+        try:
+            yield {'system_ca_observed': results}
+            completed = True
+        finally:
+            digests = dict.fromkeys(pools)
+            try:
+                peers = self._allocated_amphorae(loadbalancer)
+            except driver_except.ListenerProvisioningError:
+                peers = []
+            if completed and peers and set(expected) == {
+                    amp.id for amp in peers}:
+                profile = validate.backend_tls_system_ca_profile(
+                    loadbalancer.provider)
+                if profile:
+                    digest = profile[1]
+                    for pool_id in pools:
+                        if all(results.get(amp.id, {}).get(pool_id) == digest
+                               for amp in peers):
+                            digests[pool_id] = digest
+            with db_api.session().begin() as session:
+                repo.PoolRepository().set_backend_tls_system_ca_digests(
+                    session, topology, digests)
+
     def _update_amphora_listeners(
             self, loadbalancer, amphora, timeout_dict=None, *,
             amp_details=None, backend_tls_certs=None,
@@ -295,7 +341,8 @@ class HaproxyAmphoraLoadBalancerDriver(
             l7policy_activation=False, otlp_observed=None,
             tcp_batch_configs=None, http_cookie_observed=None,
             http_retry_backoff_observed=None, required_backoff_policies=(),
-            verify_publication=False, weighted_passthrough_degraded=False):
+            verify_publication=False, weighted_passthrough_degraded=False,
+            system_ca_observed=None):
         if not loadbalancer.listeners:
             LOG.debug('No listeners found to update.')
             return set()
@@ -404,13 +451,21 @@ class HaproxyAmphoraLoadBalancerDriver(
                 tracing_results = {
                     listener_id: tracing_results[listener_id]
                     for listener_id in configured & tracing_results.keys()}
-                # The existing publication token is read from the active
-                # HAProxy worker after reload, independent of OTLP.
-                publication = (uuid.uuid4().hex
-                               if tracing_results or verify_publication
-                               else None)
-                publication_options = (
-                    {'otlp_publication': publication} if publication else {})
+                system_ca_results = (
+                    {} if system_ca_observed is not None else None)
+                system_ca_capability = (
+                    consts.GATEWAY_CAPABILITY_BACKEND_TLS_SYSTEM_CA)
+                publication_options = {}
+                if (system_ca_results is not None and
+                        (amp_details or {}).get(system_ca_capability) is True):
+                    publication_options['config_publication'] = (
+                        uuid.uuid4().hex)
+                elif (tracing_results or verify_publication or
+                      system_ca_results is not None):
+                    publication_options['otlp_publication'] = uuid.uuid4().hex
+                system_ca_options = (
+                    {'system_ca_results': system_ca_results}
+                    if system_ca_results is not None else {})
                 cookie_results = {}
                 cookie_options = (
                     {'http_cookie_results': cookie_results}
@@ -425,6 +480,7 @@ class HaproxyAmphoraLoadBalancerDriver(
                     haproxy_versions=haproxy_versions,
                     amp_details=amp_details, **tracing_options,
                     **cookie_options, **publication_options, **backoff_options,
+                    **system_ca_options,
                     **({'weighted_passthrough_degraded': True}
                        if weighted_passthrough_degraded else {}))
                 if any(backoff_results.get(policy_id) == consts.ERROR
@@ -433,8 +489,10 @@ class HaproxyAmphoraLoadBalancerDriver(
                     raise driver_except.HttpRetryBackoffUnsupported()
                 if tcp_batch_configs is not None:
                     tcp_batch_configs.append((amphora, config, cookie_results,
-                                              tracing_results, publication,
-                                              backoff_results))
+                                              tracing_results,
+                                              publication_options,
+                                              backoff_results,
+                                              system_ca_results))
                     return configured
                 self.clients[amphora.api_version].upload_config(
                     amphora, loadbalancer.id, config,
@@ -442,16 +500,19 @@ class HaproxyAmphoraLoadBalancerDriver(
                 response = self.clients[amphora.api_version].reload_listener(
                     amphora, loadbalancer.id, timeout_dict=timeout_dict,
                     **publication_options)
-                if (verify_publication and not
-                        self._otlp_publication_acked(response, publication)):
+                acknowledged = self._haproxy_publication_acked(
+                    response, **publication_options)
+                if not acknowledged and (
+                        system_ca_results is not None or verify_publication):
                     raise driver_except.ListenerProvisioningError()
                 if http_cookie_observed is not None:
                     http_cookie_observed[amphora.id] = cookie_results
                 if http_retry_backoff_observed is not None:
                     http_retry_backoff_observed[amphora.id] = backoff_results
-                if (otlp_observed is not None and
-                        self._otlp_publication_acked(response, publication)):
+                if otlp_observed is not None and acknowledged:
                     otlp_observed[amphora.id] = tracing_results
+                if system_ca_observed is not None and acknowledged:
+                    system_ca_observed[amphora.id] = system_ca_results
             elif tcp_batch_configs is None:
                 # If we aren't updating any listeners, make sure there are
                 # no listeners hanging around. For example if this update
@@ -547,14 +608,9 @@ class HaproxyAmphoraLoadBalancerDriver(
     def _allocated_amphorae(loadbalancer):
         amphorae = [amp for amp in loadbalancer.amphorae
                     if amp.status == consts.AMPHORA_ALLOCATED]
-        roles = {
-            consts.TOPOLOGY_SINGLE: {consts.ROLE_STANDALONE},
-            consts.TOPOLOGY_ACTIVE_STANDBY: {
-                consts.ROLE_MASTER, consts.ROLE_BACKUP},
-        }.get(loadbalancer.topology, set())
-        if (not roles or len(amphorae) != len(roles) or
-                {amp.role for amp in amphorae} != roles or
-                len({amp.id for amp in amphorae}) != len(roles)):
+        if (not utils.amphora_roles_match_topology(
+                loadbalancer.topology, [amp.role for amp in amphorae]) or
+                len({amp.id for amp in amphorae}) != len(amphorae)):
             raise driver_except.ListenerProvisioningError()
         return amphorae
 
@@ -640,61 +696,86 @@ class HaproxyAmphoraLoadBalancerDriver(
         fallback, withdrawn = self._frontend_fallback_listeners(loadbalancer)
         with (
             self._otlp_render_results(loadbalancer) as tracing_options,
-            self._http_cookie_render_results(loadbalancer) as cookie_options
+            self._http_cookie_render_results(loadbalancer) as cookie_options,
+            self._system_ca_render_results(loadbalancer) as system_options
         ):
             if (amphorae and
                     (opted_in or fallback or withdrawn or
                      backoff_policies or weighted_passthrough or
                      self._has_active_http_cookie_path(loadbalancer))):
-                recovered = self._update_protected_tls_listeners(
+                return self._update_protected_tls_listeners(
                     loadbalancer, amphorae, amphorae, protected, fallback,
                     withdrawn, l7policy_activation=l7policy_activation,
                     l7policy_restoration=l7policy_restoration,
                     **({'require_weighted_passthrough_topology': True}
                        if weighted_passthrough else {}),
-                    **tracing_options, **batch_options, **cookie_options)
-                if not tcp_member_batch:
-                    return recovered
-            else:
-                for amphora in amphorae:
-                    self._update_amphora_listeners(
-                        loadbalancer, amphora,
-                        l7policy_activation=l7policy_activation,
-                        **tracing_options, **batch_options, **cookie_options)
+                    **tracing_options, **batch_options, **cookie_options,
+                    **system_options)
+            for amphora in amphorae:
+                self._update_amphora_listeners(
+                    loadbalancer, amphora,
+                    l7policy_activation=l7policy_activation,
+                    **tracing_options, **batch_options, **cookie_options,
+                    **system_options)
             if tcp_member_batch:
                 self._reload_tcp_batch_configs(
                     loadbalancer, tcp_batch_configs, backoff_policies,
                     cookie_options.get('http_cookie_observed'),
-                    tracing_options.get('otlp_observed'))
+                    tracing_options.get('otlp_observed'),
+                    system_options.get('system_ca_observed'))
 
     def _reload_tcp_batch_configs(self, loadbalancer, configs,
                                   backoff_policies, cookie_votes,
-                                  tracing_votes):
-        # Validate all prepared configs before requesting a reload.
-        for amphora, config, _, _, _, _ in configs:
-            self.clients[amphora.api_version].upload_config(
-                amphora, loadbalancer.id, config)
+                                  tracing_votes, system_ca_votes, *,
+                                  closing_system_ca=False):
+        # Ordinarily every peer must validate the batch before a reload.
+        # If all System pools are closing, apply that withdrawal wherever
+        # publication is possible and report every failed batch as failed.
+        uploaded = []
+        errors = []
+        for entry in configs:
+            amphora, config, *_ = entry
+            try:
+                self.clients[amphora.api_version].upload_config(
+                    amphora, loadbalancer.id, config)
+            except Exception as error:
+                if not closing_system_ca:
+                    raise
+                errors.append(error)
+            else:
+                uploaded.append(entry)
         backoff_votes = {}
         verify_publication = utils.has_tls_sni_passthrough_weighted_policies(
             loadbalancer)
         completed = False
         try:
             for (amphora, _, cookie_results, tracing_results,
-                 publication, backoff_results) in configs:
+                 publication_options, backoff_results,
+                 system_ca_results) in uploaded:
                 client = self.clients[amphora.api_version]
-                publication_options = (
-                    {'otlp_publication': publication} if publication else {})
-                response = client.reload_listener(
-                    amphora, loadbalancer.id, **publication_options)
-                if (verify_publication and not
-                        self._otlp_publication_acked(response, publication)):
-                    raise driver_except.ListenerProvisioningError()
+                try:
+                    response = client.reload_listener(
+                        amphora, loadbalancer.id, **publication_options)
+                    acknowledged = self._haproxy_publication_acked(
+                        response, **publication_options)
+                    if not acknowledged and (
+                            system_ca_results is not None or
+                            verify_publication):
+                        raise driver_except.ListenerProvisioningError()
+                except Exception as error:
+                    if not closing_system_ca:
+                        raise
+                    errors.append(error)
+                    continue
                 if cookie_votes is not None:
                     cookie_votes[amphora.id] = cookie_results
                 backoff_votes[amphora.id] = backoff_results
-                if (tracing_votes is not None and
-                        self._otlp_publication_acked(response, publication)):
+                if tracing_votes is not None and acknowledged:
                     tracing_votes[amphora.id] = tracing_results
+                if system_ca_votes is not None and acknowledged:
+                    system_ca_votes[amphora.id] = system_ca_results
+            if errors:
+                raise errors[0]
             completed = True
         finally:
             if backoff_policies:
@@ -718,17 +799,22 @@ class HaproxyAmphoraLoadBalancerDriver(
                        tracing_pair or retry_backoff or weighted_passthrough or
                        self._has_active_http_cookie_path(loadbalancer))
         if coordinated and amphora_index == 0:
+            system_ca = bool(utils.backend_tls_system_ca_pool_ids(
+                loadbalancer))
             peers = [amp for amp in loadbalancer.amphorae
                      if amp.status != consts.DELETED]
             unreachable = {
                 amp.id for amp in peers
                 if (amphorae_status.get(amp.id, {}).get(consts.UNREACHABLE) or
                     (amp.id not in amphorae_status and
-                     (tracing_pair or retry_backoff or weighted_passthrough)))
+                     (tracing_pair or retry_backoff or weighted_passthrough or
+                      system_ca)))
             }
             with (
                 self._otlp_render_results(loadbalancer) as tracing_options,
-                self._http_cookie_render_results(loadbalancer) as cookie_state
+                self._http_cookie_render_results(loadbalancer) as cookie_state,
+                self._system_ca_render_results(
+                    loadbalancer, failover=True) as system_options
             ):
                 self._update_protected_tls_listeners(
                     loadbalancer, [amp for amp in peers
@@ -740,7 +826,7 @@ class HaproxyAmphoraLoadBalancerDriver(
                        if retry_backoff else {}),
                     **({'require_weighted_passthrough_topology': True}
                        if weighted_passthrough else {}),
-                    **tracing_options, **cookie_state)
+                    **tracing_options, **cookie_state, **system_options)
         return coordinated
 
     @staticmethod
@@ -772,7 +858,7 @@ class HaproxyAmphoraLoadBalancerDriver(
 
     @staticmethod
     def _backend_tls_pools(loadbalancer):
-        opted_in = False
+        opted_in = bool(utils.backend_tls_system_ca_pool_ids(loadbalancer))
         pools = {}
         for listener in loadbalancer.listeners:
             if listener.protocol in consts.LVS_PROTOCOLS:
@@ -812,7 +898,8 @@ class HaproxyAmphoraLoadBalancerDriver(
             coordinating_failover=False, l7policy_restoration=False,
             otlp_observed=None, tcp_batch_configs=None,
             http_cookie_observed=None, require_http_retry_backoff=False,
-            require_weighted_passthrough_topology=False):
+            require_weighted_passthrough_topology=False,
+            system_ca_observed=None):
         # Preflight the pair before staging material or reloading either peer.
         probe_targets = {
             amp.id: amp for amp in (peers if protected or fallback
@@ -925,8 +1012,15 @@ class HaproxyAmphoraLoadBalancerDriver(
 
         certs = {amphora.id: {} for amphora in amphorae}
         closed = set()
+        system_ca_pools = set()
+        system_ca_material = None
         for pool_id, (listener, pool) in protected.items():
             required = [consts.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME]
+            system_ca = getattr(pool, 'backend_tls_system_ca', False) is True
+            if system_ca:
+                system_ca_pools.add(pool_id)
+                required.append(
+                    consts.GATEWAY_CAPABILITY_BACKEND_TLS_SYSTEM_CA)
             if pool.protocol == consts.PROTOCOL_TCP:
                 required.append(consts.GATEWAY_CAPABILITY_TCP_TLS_BACKEND_AUTH)
             if getattr(pool, 'backend_tls_require_h2', False) is True:
@@ -944,9 +1038,19 @@ class HaproxyAmphoraLoadBalancerDriver(
                             'on amphorae %s.', pool_id, unsupported)
             else:
                 try:
+                    if system_ca and system_ca_material is None:
+                        # All system pools share the same regional image
+                        # bundle. Fail any of them as a unit across the pair.
+                        system_ca_material = {}
+                        system_ca_material = self._stage_system_ca(
+                            loadbalancer, peers, timeout_dict)
+                    if system_ca and not system_ca_material:
+                        raise driver_except.ListenerProvisioningError()
                     material = {
                         amphora.id: self._process_pool_certs(
-                            listener, pool, amphora, loadbalancer.id)
+                            listener, pool, amphora, loadbalancer.id,
+                            **({'system_ca_material': system_ca_material}
+                               if system_ca else {}))
                         for amphora in peers
                     }
                 except Exception as error:
@@ -961,48 +1065,99 @@ class HaproxyAmphoraLoadBalancerDriver(
             for amphora in amphorae:
                 certs[amphora.id][pool_id] = {'closed': True}
 
-        if tcp_batch_configs is not None and closed and not weighted_partial:
+        if (tcp_batch_configs is not None and not weighted_partial and
+                closed - system_ca_pools):
             raise driver_except.ListenerProvisioningError()
 
         reload_errors = dict(weighted_errors)
+        if system_ca_observed is not None:
+            reload_errors.update(dict.fromkeys(
+                unreachable, driver_except.ListenerProvisioningError()))
         reloaded_listeners = []
-        tracing_options = {}
+        render_options = {}
         if otlp_observed is not None:
-            tracing_options['otlp_observed'] = otlp_observed
-        if tcp_batch_configs is not None and not weighted_partial:
-            tracing_options['tcp_batch_configs'] = tcp_batch_configs
+            render_options['otlp_observed'] = otlp_observed
         if http_cookie_observed is not None:
-            tracing_options['http_cookie_observed'] = http_cookie_observed
-        backoff_options = (
-            {'http_retry_backoff_observed': backoff_votes,
-             'required_backoff_policies': required_backoff_policies}
-            if backoff_policies else {})
-        for amphora in amphorae:
-            if weighted_partial and amphora.id in probe_failures:
-                continue
+            render_options['http_cookie_observed'] = http_cookie_observed
+        if system_ca_observed is not None:
+            render_options['system_ca_observed'] = system_ca_observed
+        if backoff_policies:
+            render_options.update(
+                http_retry_backoff_observed=backoff_votes,
+                required_backoff_policies=required_backoff_policies)
+        staged_batch = tcp_batch_configs is not None and not weighted_partial
+        batch_options = (
+            {'tcp_batch_configs': tcp_batch_configs} if staged_batch else {})
+
+        def publish(amphora, **options):
+            return self._update_amphora_listeners(
+                loadbalancer, amphora, timeout_dict=timeout_dict,
+                amp_details=details[amphora.id],
+                backend_tls_certs=certs[amphora.id],
+                frontend_tls_certs=frontend_certs[amphora.id],
+                closed_frontend=closed_frontend,
+                l7policy_activation=l7policy_activation,
+                **({'verify_publication': True} if weighted_present and
+                   details[amphora.id].get(weighted_capability) is True
+                   else {}),
+                **({'weighted_passthrough_degraded': True}
+                   if weighted_partial else {}),
+                **render_options, **options)
+
+        attempted = [amp for amp in amphorae if
+                     not (weighted_partial and amp.id in probe_failures)]
+        for amphora in attempted:
             try:
-                configured = self._update_amphora_listeners(
-                    loadbalancer, amphora, timeout_dict=timeout_dict,
-                    amp_details=details[amphora.id],
-                    backend_tls_certs=certs[amphora.id],
-                    frontend_tls_certs=frontend_certs[amphora.id],
-                    closed_frontend=closed_frontend,
-                    l7policy_activation=l7policy_activation,
-                    **({'verify_publication': True} if weighted_present and
-                       details[amphora.id].get(weighted_capability) is True
-                       else {}),
-                    **({'weighted_passthrough_degraded': True}
-                       if weighted_partial else {}),
-                    **tracing_options, **backoff_options)
-                reloaded_listeners.append(configured)
+                reloaded_listeners.append(publish(amphora, **batch_options))
             except Exception as error:
-                if tcp_batch_configs is not None and not weighted_partial:
+                if staged_batch and not system_ca_pools:
                     raise
                 LOG.warning('Could not reload listeners on amphora %s (%s).',
                             amphora.id, type(error).__name__)
                 reload_errors[amphora.id] = error
 
-        if tcp_batch_configs is not None and not weighted_partial:
+        batch_error = None
+        closing_system_ca = bool(system_ca_pools and system_ca_pools <= closed)
+        if staged_batch and not reload_errors:
+            try:
+                self._reload_tcp_batch_configs(
+                    loadbalancer, tcp_batch_configs, backoff_policies,
+                    http_cookie_observed, otlp_observed, system_ca_observed,
+                    closing_system_ca=closing_system_ca)
+            except Exception as error:
+                if not system_ca_pools:
+                    raise
+                batch_error = error
+
+        if system_ca_pools and (reload_errors or batch_error) and (
+                not closing_system_ca or (staged_batch and reload_errors)):
+            # An upload or reload can leave an earlier peer on the new graph.
+            # Publish a fresh closed generation independently on each peer.
+            closed.update(system_ca_pools)
+            closure = dict.fromkeys(system_ca_pools, {'closed': True})
+            for amphora in attempted:
+                certs[amphora.id].update(closure)
+                try:
+                    publish(amphora)
+                except Exception as error:
+                    LOG.warning('Could not confirm backend TLS System CA '
+                                'withdrawal on amphora %s (%s).', amphora.id,
+                                type(error).__name__)
+                    reload_errors.setdefault(amphora.id, error)
+
+        if staged_batch:
+            if closed:
+                with db_api.session().begin() as session:
+                    repo.PoolRepository().set_backend_tls_pool_statuses(
+                        session, closed=closed, recovered=())
+            if reload_errors:
+                raise next(iter(reload_errors.values()))
+            if batch_error is not None:
+                raise batch_error
+            if any(pool.id in closed and pool.tcp_member_batch_id not in (
+                    None, consts.TCP_MEMBER_BATCH_FAILED)
+                   for pool in loadbalancer.pools):
+                raise driver_except.ListenerProvisioningError()
             return
 
         if backoff_policies:
@@ -1054,6 +1209,26 @@ class HaproxyAmphoraLoadBalancerDriver(
             raise driver_except.ListenerProvisioningError()
         if l7policy_activation:
             return recovered
+
+    def _stage_system_ca(self, loadbalancer, peers, timeout_dict):
+        expected = self._allocated_amphorae(loadbalancer)
+        profile = validate.backend_tls_system_ca_profile(loadbalancer.provider)
+        if not profile or {amp.id for amp in expected} != {
+                amp.id for amp in peers}:
+            raise driver_except.ListenerProvisioningError()
+        path, digest = profile
+        for amphora in expected:
+            client = self.clients[amphora.api_version]
+            if client.stage_backend_tls_system_ca(
+                    amphora, loadbalancer.id, path, digest,
+                    timeout_dict=timeout_dict) != digest:
+                raise driver_except.ListenerProvisioningError()
+        return {
+            'system_ca_sha256': digest,
+            'ca_cert': os.path.join(
+                CONF.haproxy_amphora.base_path, loadbalancer.id,
+                consts.HAPROXY_SYSTEM_CA_DIRECTORY, f'{digest}.pem'),
+        }
 
     def _publish_http_retry_backoff_results(
             self, loadbalancer, policies, votes, *, completed, failed=()):
@@ -1192,16 +1367,16 @@ class HaproxyAmphoraLoadBalancerDriver(
         non_lvs_listener_count = len([
             1 for li in listener.load_balancer.listeners
             if li.protocol not in consts.LVS_PROTOCOLS])
-        if non_lvs_listener_count > 0:
+        if not non_lvs_listener_count:
+            with self._system_ca_render_results(listener.load_balancer):
+                self.clients[amphora.api_version].delete_listener(
+                    amphora, listener.load_balancer.id)
+        else:
             # We have other listeners, so just update is fine.
             # TODO(rm_work): This is a little inefficient since this duplicates
             # a lot of the detection logic that has already been done, but it
             # is probably safer to reuse the existing code-path.
             self.update_amphora_listeners(listener.load_balancer, amphora)
-        else:
-            # Deleting the last listener, so really do the delete
-            self.clients[amphora.api_version].delete_listener(
-                amphora, listener.load_balancer.id)
 
     def get_info(self, amphora, raise_retry_exception=False,
                  timeout_dict=None):
@@ -1441,17 +1616,24 @@ class HaproxyAmphoraLoadBalancerDriver(
                 listener, pool, amphora, obj_id)
         return pool_certs_dict
 
-    def _process_pool_certs(self, listener, pool, amphora, obj_id):
+    def _process_pool_certs(self, listener, pool, amphora, obj_id, *,
+                            system_ca_material=None):
         pool_cert_dict = {}
         if utils.is_disabled_backend_tls_pool(pool):
             return pool_cert_dict
         hostname = getattr(pool, 'backend_tls_hostname', None)
+        system_ca = getattr(pool, 'backend_tls_system_ca', False) is True
+        valid_ca = bool(pool.ca_tls_certificate_id)
+        if system_ca:
+            valid_ca = (bool(system_ca_material) and
+                        pool.ca_tls_certificate_id is None and
+                        not pool.crl_container_id)
         if utils.is_protected_backend_tls_pool(pool) and (
                 not validate.is_exact_sni_name(hostname) or
                 pool.protocol not in (consts.PROTOCOL_HTTP,
                                       consts.PROTOCOL_TCP) or
                 pool.tls_enabled is not True or
-                not pool.ca_tls_certificate_id or
+                not valid_ca or
                 getattr(pool, 'backend_h2c', False)):
             raise exceptions.ValidationException(detail=(
                 'Missing or invalid backend TLS identity or trust '
@@ -1466,6 +1648,9 @@ class HaproxyAmphoraLoadBalancerDriver(
                     monitor.provisioning_status not in
                     (consts.PENDING_DELETE, consts.DELETED)):
                 validate.validate_tcp_tls_backend_monitor(monitor.type)
+
+        if system_ca:
+            pool_cert_dict.update(system_ca_material)
 
         # Handle the client cert(s) and key
         if pool.tls_certificate_id:
@@ -1745,15 +1930,25 @@ class AmphoraAPIClient1_0(AmphoraAPIClientBase):
         return None
 
     def _action(self, action, amp, object_id, timeout_dict=None, *,
-                otlp_publication=None):
+                otlp_publication=None, config_publication=None):
         options = {}
-        if otlp_publication is not None:
+        if config_publication is not None:
+            options['headers'] = {
+                consts.HAPROXY_CONFIG_PUBLICATION_HEADER: config_publication}
+        elif otlp_publication is not None:
             options['headers'] = {
                 consts.HAPROXY_OTLP_PUBLICATION_HEADER: otlp_publication}
         r = self.put(
             amp, f'loadbalancer/{object_id}/{action}',
             timeout_dict=timeout_dict, **options)
         return exc.check_exception(r)
+
+    def stage_backend_tls_system_ca(self, amp, loadbalancer_id, path, digest,
+                                    timeout_dict=None):
+        response = self.put(
+            amp, f'loadbalancer/{loadbalancer_id}/backend-system-ca',
+            timeout_dict, json={'path': path, 'sha256': digest})
+        return exc.check_exception(response).json()['sha256']
 
     def upload_cert_pem(self, amp, loadbalancer_id, pem_filename, pem_file):
         r = self.put(

@@ -92,6 +92,7 @@ class AmphoraProviderDriver(driver_base.ProviderDriver):
     supports_http_method_match = True
     supports_backend_h2c = True
     supports_backend_tls_hostname = True
+    supports_backend_tls_system_ca = True
     supports_backend_tls_h2_alpn = True
     supports_backend_tls_subject_alt_names = True
     supports_tcp_tls_termination = True

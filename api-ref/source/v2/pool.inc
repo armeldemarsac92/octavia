@@ -49,6 +49,8 @@ Response Parameters
    - alpn_protocols: alpn_protocols-pool
    - backend_h2c: backend-h2c
    - backend_tls_hostname: backend-tls-hostname
+   - backend_tls_system_ca: backend-tls-system-ca
+   - backend_tls_system_ca_sha256: backend-tls-system-ca-sha256
    - backend_tls_require_h2: backend-tls-require-h2
    - backend_tls_subject_alt_names: backend-tls-subject-alt-names
    - backend_retry_budget: backend-retry-budget
@@ -182,6 +184,7 @@ Request
    - alpn_protocols: alpn_protocols-pool-optional
    - backend_h2c: backend-h2c
    - backend_tls_hostname: backend-tls-hostname
+   - backend_tls_system_ca: backend-tls-system-ca
    - backend_tls_require_h2: backend-tls-require-h2
    - backend_tls_subject_alt_names: backend-tls-subject-alt-names
    - backend_retry_budget: backend-retry-budget
@@ -331,6 +334,8 @@ Response Parameters
    - alpn_protocols: alpn_protocols-pool
    - backend_h2c: backend-h2c
    - backend_tls_hostname: backend-tls-hostname
+   - backend_tls_system_ca: backend-tls-system-ca
+   - backend_tls_system_ca_sha256: backend-tls-system-ca-sha256
    - backend_tls_require_h2: backend-tls-require-h2
    - backend_tls_subject_alt_names: backend-tls-subject-alt-names
    - backend_retry_budget: backend-retry-budget
@@ -411,6 +416,8 @@ Response Parameters
    - alpn_protocols: alpn_protocols-pool
    - backend_h2c: backend-h2c
    - backend_tls_hostname: backend-tls-hostname
+   - backend_tls_system_ca: backend-tls-system-ca
+   - backend_tls_system_ca_sha256: backend-tls-system-ca-sha256
    - backend_tls_require_h2: backend-tls-require-h2
    - backend_tls_subject_alt_names: backend-tls-subject-alt-names
    - backend_retry_budget: backend-retry-budget
@@ -483,6 +490,7 @@ Request
    - alpn_protocols: alpn_protocols-pool-optional
    - backend_h2c: backend-h2c
    - backend_tls_hostname: backend-tls-hostname
+   - backend_tls_system_ca: backend-tls-system-ca
    - backend_tls_require_h2: backend-tls-require-h2
    - backend_tls_subject_alt_names: backend-tls-subject-alt-names
    - backend_retry_budget: backend-retry-budget
@@ -520,6 +528,8 @@ Response Parameters
    - alpn_protocols: alpn_protocols-pool
    - backend_h2c: backend-h2c
    - backend_tls_hostname: backend-tls-hostname
+   - backend_tls_system_ca: backend-tls-system-ca
+   - backend_tls_system_ca_sha256: backend-tls-system-ca-sha256
    - backend_tls_require_h2: backend-tls-require-h2
    - backend_tls_subject_alt_names: backend-tls-subject-alt-names
    - backend_retry_budget: backend-retry-budget

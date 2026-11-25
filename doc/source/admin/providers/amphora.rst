@@ -583,6 +583,44 @@ on an active protected pool also requires regional enrollment. Existing
 protected pools can keep serving, drain or be removed. Disable and detach a pool before clearing its hostname
 requirement.
 
+System trust for authenticated TLS backends
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Upgrade the Octavia API, workers, provider library, database and Amphora
+agents before enrolling a region. Qualify the fleet's strict backend TLS
+hostname support and confirm that the CA package installs the same readable
+PEM bundle on every eligible image.
+
+.. code-block:: ini
+
+   [api_settings]
+   enabled_backend_tls_hostname_providers = amphora
+   enabled_backend_tls_system_ca_providers = amphora
+
+   [haproxy_amphora]
+   backend_tls_system_ca_path = /etc/ssl/certs/ca-certificates.crt
+   backend_tls_system_ca_sha256 = <lowercase SHA-256 of the exact PEM file>
+
+Set these options consistently on the regional API and workers. The path is
+on each Amphora. An operator supplies the profile and a pool selects it with
+``backend_tls_system_ca: true``. The pool also requires ``tls_enabled`` and
+a literal ``backend_tls_hostname``. A pool can supply its own client
+certificate and use independently supported SAN or ALPN options.
+
+Octavia compares the local bundle to the configured SHA-256 on every
+serving Amphora when programming the pool. It stages the verified bytes at
+a digest-addressed path and reloads HAProxy with strict verification. A
+pool with a missing, invalid or different bundle closes while the remaining
+pools can serve. When the full topology acknowledges the installed config,
+the API publishes the applied digest. An enabled pool attached to an
+enabled listener can report the digest without members.
+
+Rotate the bundle through the image or the system CA package. Confirm the
+regional digest and reconcile affected load balancers to install that
+generation. The loaded generation continues using its snapshot until the
+next reconciliation. A mismatching peer on reconcile or failover closes
+the affected system pools. Disable a pool before withdrawing the mode.
+
 Backend Service retry budgets
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
