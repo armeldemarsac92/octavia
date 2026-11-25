@@ -146,6 +146,38 @@ class HAProxyCompatTestCase(base.TestCase):
                 self.assertEqual(expected, result)
 
     @mock.patch.object(haproxy_compatibility.subprocess, 'check_output')
+    @mock.patch.object(haproxy_compatibility, '_valid_haproxy_config')
+    def test_grpc_mirror_needs_the_streaming_build_and_action(
+            self, validate, check_output):
+        binary = '/opt/amphora/custom-haproxy'
+        haproxy_compatibility.CONF.set_override(
+            'haproxy_cmd', binary, group='haproxy_amphora')
+        old = (
+            'HAProxy version 3.0.19-ade9c1262-octavia-strict-dns-v1'
+            '-h2-alpn-v1-backend-sans-v1-http-policy-v1-http-mirror-v1'
+            '-listener-auth-v1-backend-retry-budget-v1-listener-otlp-v1'
+            '-route-retry-backoff-v1')
+        grpc_mirror = constants.GATEWAY_CAPABILITY_GRPC_REQUEST_MIRROR
+        http_mirror = constants.GATEWAY_CAPABILITY_HTTP_REQUEST_MIRROR
+        for suffix, parses, expected in (
+                ('', True, False),
+                ('-grpc-mirror-v1', False, False),
+                ('-grpc-mirror-v1', True, True)):
+            with self.subTest(suffix=suffix, parses=parses):
+                check_output.return_value = old + suffix + ' 2026/03/19'
+                validate.reset_mock()
+                validate.return_value = parses
+                features = haproxy_compatibility.get_haproxy_capabilities()
+                self.assertTrue(features[http_mirror])
+                self.assertEqual(expected, features.get(grpc_mirror, False))
+                calls = [
+                    call for call in validate.call_args_list
+                    if 'octavia-grpc-mirror ' in call.args[1]]
+                self.assertEqual([mock.call(
+                    binary, haproxy_compatibility._GRPC_MIRROR_PROBE)]
+                    if suffix else [], calls)
+
+    @mock.patch.object(haproxy_compatibility.subprocess, 'check_output')
     def test_http_retry_backoff_capability_uses_configured_binary(
             self, check_output):
         binary = '/opt/amphora/custom-haproxy'

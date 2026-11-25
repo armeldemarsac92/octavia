@@ -80,6 +80,7 @@ class AmphoraProviderDriver(driver_base.ProviderDriver):
     supports_http_retry_backoff = True
     supports_backend_retry_budget = True
     supports_http_request_mirror = True
+    supports_grpc_request_mirror = True
     supports_listener_otlp_tracing = True
     supports_listener_otlp_sampling = True
     supports_listener_otlp_span_attributes = True

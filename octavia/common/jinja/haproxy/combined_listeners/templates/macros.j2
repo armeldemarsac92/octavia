@@ -364,10 +364,20 @@ backend {{ pool.id }}:{{ listener.id }}
 {%- endmacro %}
 
 
+{% macro selected_request_operation(operation, match) -%}
+    {% if operation.startswith('octavia-grpc-mirror ') %}
+    http-request {{ operation|safe }} if {{ match }} { var(txn.octavia_grpc_mirror) -m bool }
+    http-request {{ operation|replace('octavia-grpc-mirror ', 'octavia-mirror ', 1)|safe }} if {{ match }} !{ var(txn.octavia_grpc_mirror) -m bool }
+    {% else %}
+    http-request {{ operation|safe }} if {{ match }}
+    {% endif %}
+{%- endmacro %}
+
+
 {% macro mirrored_rule_requests(listener, backend_type, backend_id) -%}
     {% for policy_id, operations in listener.get('mirrored_rules_by_backend', {}).get((backend_type, backend_id), []) %}
         {% for operation in operations %}
-    http-request {{ operation|safe }} if {{ selected_policy_match_macro(policy_id) }}
+            {{- selected_request_operation(operation, selected_policy_match_macro(policy_id)) -}}
         {% endfor %}
     {% endfor %}
 {%- endmacro %}
@@ -572,6 +582,11 @@ frontend {{ listener.id }}
     mode {{ listener.protocol_mode }}
     {% if listener.request_mirror_pools is defined %}
     filter octavia-mirror /run/octavia/mirror
+    {% endif %}
+    {% if listener.grpc_mirror_media_acl is defined %}
+    {# Classify the original request before route and target header filters. #}
+    acl octavia_grpc_mirror_media req.fhdr(content-type) -m reg -i {{ listener.grpc_mirror_media_acl|safe }}
+    http-request set-var(txn.octavia_grpc_mirror) bool(true) if METH_POST { fc_http_major eq 2 } { req.fhdr_cnt(content-type) eq 1 } octavia_grpc_mirror_media
     {% endif %}
     {% set policies = listener.l7policies|selectattr('enabled')|selectattr('l7rules')|list %}
     {% set tcp_weighted = policies|selectattr('tcp_weighted_targets', 'defined')|list %}
@@ -985,13 +1000,19 @@ listen octavia-auth-{{ pool.id }}
 {% endmacro %}
 
 
-{% macro mirror_delivery_macro(constants, lib_consts, pool, state_file) %}
+{% macro mirror_delivery_macro(constants, lib_consts, pool, state_file, grpc_content_type_acl) %}
 listen octavia-mirror-{{ pool.id }}
     bind /run/octavia/mirror/{{ pool.id }}.sock user nobody mode 600 octavia-mirror-socket
     mode http
     no log
     retries 0
     no option redispatch
+    {% if pool.backend_h2c or pool.backend_tls_require_h2 %}
+    {# The private HTTP/1 hop strips TE. Advertise trailers on the new
+       HTTP/2 connection for a gRPC request. #}
+    acl octavia_grpc_media req.fhdr(content-type) -m reg -i {{ grpc_content_type_acl|safe }}
+    http-request set-header te trailers if METH_POST { req.fhdr_cnt(content-type) eq 1 } octavia_grpc_media
+    {% endif %}
     http-request disable-l7-retry
 {{ backend_retry_budget(pool) -}}
     option abortonclose
@@ -1184,7 +1205,7 @@ backend {{ pool.id }}:{{ listener.id }}
     {% endfor %}
     {% for policy_id, target in listener.get('target_filters_by_pool', {}).get(pool.id, []) %}
         {% for operation in target.request_filters %}
-    http-request {{ operation|safe }} if {{ weighted_target_match_macro(policy_id, target) }}
+            {{- selected_request_operation(operation, weighted_target_match_macro(policy_id, target)) -}}
         {% endfor %}
     {% endfor %}
     balance {{ pool.lb_algorithm }}

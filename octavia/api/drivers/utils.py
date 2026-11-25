@@ -254,6 +254,13 @@ def gateway_capabilities(driver):
                     False) is True):
             capabilities.append(
                 constants.GATEWAY_CAPABILITY_GRPC_BINARY_RESPONSE_METADATA)
+        mirror_providers = api_settings.enabled_grpc_request_mirror_providers
+        if (driver.name in mirror_providers and
+                constants.GATEWAY_CAPABILITY_HTTP_REQUEST_MIRROR in
+                capabilities and getattr(
+                    driver, 'supports_grpc_request_mirror', False) is True):
+            capabilities.append(
+                constants.GATEWAY_CAPABILITY_GRPC_REQUEST_MIRROR)
     if (driver.name in api_settings.enabled_backend_h2c_providers and
             getattr(driver, 'supports_backend_h2c', False) is True):
         capabilities.append(constants.GATEWAY_CAPABILITY_BACKEND_H2C)

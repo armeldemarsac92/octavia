@@ -194,6 +194,10 @@ api_opts = [
                        'mirroring. Enable after upgrading the database, '
                        'provider library, API, workers and eligible '
                        'Amphora images.')),
+    cfg.ListOpt('enabled_grpc_request_mirror_providers', default=[],
+                help=_('Providers supporting streaming gRPC mirrors. '
+                       'Enable after upgrading regional APIs, workers and '
+                       'eligible Amphora images.')),
     cfg.ListOpt('enabled_l7policy_initial_rules_providers', default=[],
                 help=_('Provider driver names that can create a disabled HTTP '
                        'L7 policy with its initial rules in one operation. '

@@ -1,0 +1,248 @@
+diff --git a/include/haproxy/http_client-t.h b/include/haproxy/http_client-t.h
+index 90cecde..090b08a 100644
+--- a/include/haproxy/http_client-t.h
++++ b/include/haproxy/http_client-t.h
+@@ -50,11 +50,13 @@ struct httpclient {
+ #define    HTTPCLIENT_FS_STARTED      0x00010000 /* the httpclient was started */
+ #define    HTTPCLIENT_FS_ENDED        0x00020000 /* the httpclient is stopped */
+ #define    HTTPCLIENT_FS_GOT_HEADERS  0x00040000 /* complete final response headers */
++#define    HTTPCLIENT_FS_MIRROR_RESPONSE 0x00080000 /* discarding a final mirror response */
+ 
+ /* options */
+ #define    HTTPCLIENT_O_HTTPPROXY     0x00000001 /* the request must be use an absolute URI */
+ #define    HTTPCLIENT_O_IGNORE_RESPONSE 0x00000002 /* discard mirror replies */
+ #define    HTTPCLIENT_O_HEADERS_ONLY  0x00000004 /* stop reading after final response headers */
++#define    HTTPCLIENT_O_STREAM_UPLOAD 0x00000008 /* continue mirror upload after response headers */
+ 
+ /* States of the HTTP Client Appctx */
+ enum {
+diff --git a/include/haproxy/http_client.h b/include/haproxy/http_client.h
+index 4664045..1a029d0 100644
+--- a/include/haproxy/http_client.h
++++ b/include/haproxy/http_client.h
+@@ -12,6 +12,7 @@ void httpclient_stop_and_destroy(struct httpclient *hc);
+ struct proxy *httpclient_create_proxy(const char *id);
+ struct proxy *httpclient_create_local_proxy(const char *id);
+ struct proxy *httpclient_create_mirror_proxy(const char *id);
++struct proxy *httpclient_create_streaming_mirror_proxy(const char *id);
+ struct ist httpclient_local_proxy_metadata(const struct session *sess);
+ struct httpclient *httpclient_new(void *caller, enum http_meth_t meth, struct ist url);
+ struct httpclient *httpclient_new_from_proxy(struct proxy *px, void *caller, enum http_meth_t meth, struct ist url);
+diff --git a/src/flt_octavia_mirror.c b/src/flt_octavia_mirror.c
+index dc8abeb..458b2d1 100644
+--- a/src/flt_octavia_mirror.c
++++ b/src/flt_octavia_mirror.c
+@@ -34,6 +34,7 @@
+ 
+ static const char mirror_filter_id[] = "octavia-mirror";
+ static struct proxy *mirror_proxy;
++static struct proxy *grpc_mirror_proxy;
+ static char mirror_directory[sizeof(((struct sockaddr_un *)0)->sun_path)];
+ 
+ static struct {
+@@ -51,6 +52,7 @@ struct mirror_rule {
+ 	struct sockaddr_storage address;
+ 	unsigned int numerator;
+ 	unsigned int denominator;
++	int streaming;
+ };
+ 
+ /* Both the source filter and HTTP client execute on the source stream thread.
+@@ -66,6 +68,7 @@ struct mirror_copy {
+ 	char metadata[1 + OCTAVIA_MIRROR_SNI_MAX];
+ 	unsigned int first;
+ 	unsigned int count;
++	int streaming;
+ };
+ 
+ /* Metadata follows the copy's lifetime, independently of the source stream. */
+@@ -186,6 +189,15 @@ static struct task *expire_mirror(struct task *task, void *context, unsigned int
+ 	return NULL;
+ }
+ 
++/* Bound gaps in the source upload even if the shadow response is busy.
++ * After end of upload, the same deadline bounds disposal of the reply.
++ */
++static void renew_streaming_mirror(struct mirror_copy *copy)
++{
++	copy->timer->expire = tick_add(now_ms, MS_TO_TICKS(MIRROR_IDLE_MS));
++	task_queue(copy->timer);
++}
++
+ static struct buffer *push_mirror_buffer(struct mirror_copy *copy)
+ {
+ 	struct buffer *tail;
+@@ -359,8 +371,11 @@ static int filter_mirror_payload(struct stream *stream, struct filter *filter, s
+ 					HA_ATOMIC_INC(&mirror_stats.queue_drops);
+ 					cancel_mirror(copy);
+ 				}
+-				else
++				else {
++					if (copy->streaming)
++						renew_streaming_mirror(copy);
+ 					appctx_wakeup(copy->client->appctx);
++				}
+ 			}
+ 		}
+ 		pos.ret = 0;
+@@ -407,6 +422,8 @@ static int filter_mirror_end(struct stream *stream, struct filter *filter, struc
+ 
+ 	while ((copy = filter->ctx)) {
+ 		if (finish_mirror_payload(copy)) {
++			if (copy->streaming)
++				renew_streaming_mirror(copy);
+ 			unlink_mirror(copy);
+ 			appctx_wakeup(copy->client->appctx);
+ 			continue;
+@@ -501,7 +518,9 @@ static enum act_return action_octavia_mirror(struct act_rule *rule, struct proxy
+ 		goto preparation_failed;
+ 	}
+ 	copy->timer = task_new_here();
+-	copy->client = httpclient_new_from_proxy(mirror_proxy, copy, line->info.req.meth,
++	copy->streaming = target->streaming;
++	copy->client = httpclient_new_from_proxy(target->streaming ? grpc_mirror_proxy : mirror_proxy,
++	                                         copy, line->info.req.meth,
+ 	                                         ist("http://localhost/"));
+ 	if (!copy->timer || !copy->client ||
+ 	    !sockaddr_alloc(&copy->client->dst, &target->address, sizeof(target->address)) ||
+@@ -511,6 +530,8 @@ static enum act_return action_octavia_mirror(struct act_rule *rule, struct proxy
+ 		goto free_copy;
+ 
+ 	copy->client->options |= HTTPCLIENT_O_IGNORE_RESPONSE;
++	if (target->streaming)
++		copy->client->options |= HTTPCLIENT_O_STREAM_UPLOAD;
+ 	copy->client->local_proxy_metadata = capture_mirror_metadata(copy, sess, line);
+ 	copy->client->ops.res_end = release_mirror_client;
+ 	if (!bodyless)
+@@ -521,7 +542,10 @@ static enum act_return action_octavia_mirror(struct act_rule *rule, struct proxy
+ 	copy->client->flags |= HTTPCLIENT_FA_AUTOKILL;
+ 	copy->timer->process = expire_mirror;
+ 	copy->timer->context = copy;
+-	task_schedule(copy->timer, tick_add(now_ms, MS_TO_TICKS(MIRROR_LIFETIME_MS)));
++	if (copy->streaming)
++		renew_streaming_mirror(copy);
++	else
++		task_schedule(copy->timer, tick_add(now_ms, MS_TO_TICKS(MIRROR_LIFETIME_MS)));
+ 
+ 	if (!bodyless && !complete) {
+ 		copy->next = source->ctx;
+@@ -633,6 +657,7 @@ static enum act_parse_ret parse_octavia_mirror_rule(const char **args, int *cur_
+ 		return ACT_RET_PRS_ERR;
+ 	}
+ 	*target = parsed;
++	target->streaming = !strcmp(args[*cur_arg - 1], "octavia-grpc-mirror");
+ 	rule->arg.act.p[0] = target;
+ 	rule->action = ACT_CUSTOM;
+ 	rule->action_ptr = action_octavia_mirror;
+@@ -727,7 +752,8 @@ static int precheck_mirror(void)
+ 	/* Internal client socket, private listener's accepted socket and pool-side socket. */
+ 	global.maxsock += 3 * MIRROR_ACTIVE_LIMIT;
+ 	mirror_proxy = httpclient_create_mirror_proxy("<OCTAVIA-MIRROR>");
+-	return mirror_proxy ? ERR_NONE : ERR_FATAL;
++	grpc_mirror_proxy = httpclient_create_streaming_mirror_proxy("<OCTAVIA-GRPC-MIRROR>");
++	return mirror_proxy && grpc_mirror_proxy ? ERR_NONE : ERR_FATAL;
+ }
+ 
+ static int parse_mirror_bind(char **args, int cur_arg, struct proxy *px,
+@@ -755,6 +781,7 @@ static int cli_show_mirrors(char **args, char *payload, struct appctx *appctx, v
+ static struct action_kw_list mirror_actions = {
+ 	.kw = {
+ 		{ "octavia-mirror", parse_octavia_mirror_rule, 0 },
++		{ "octavia-grpc-mirror", parse_octavia_mirror_rule, 0 },
+ 		{ NULL, NULL, 0 },
+ 	},
+ };
+diff --git a/src/http_client.c b/src/http_client.c
+index e23ccf4..1e129e4 100644
+--- a/src/http_client.c
++++ b/src/http_client.c
+@@ -746,6 +746,7 @@ void httpclient_applet_io_handler(struct appctx *appctx)
+ 	uint32_t hdr_num;
+ 	uint32_t sz;
+ 	int ret;
++	int streaming_mirror;
+ 
+ 	if (unlikely(se_fl_test(appctx->sedesc, (SE_FL_EOS|SE_FL_ERROR)))) {
+ 		if (co_data(res)) {
+@@ -759,6 +760,7 @@ void httpclient_applet_io_handler(struct appctx *appctx)
+ 	 * check if hc is still there to run the IO handler */
+ 	if (!hc)
+ 		goto out;
++	streaming_mirror = !!(hc->options & HTTPCLIENT_O_STREAM_UPLOAD);
+ 
+ 	while (1) {
+ 
+@@ -771,7 +773,7 @@ void httpclient_applet_io_handler(struct appctx *appctx)
+ 		 */
+ 		while ((hc->options & HTTPCLIENT_O_IGNORE_RESPONSE) && co_data(res)) {
+ 			htx = htxbuf(&res->buf);
+-			if (appctx->st0 == HTTPCLIENT_S_RES_BODY) {
++			if (hc->flags & HTTPCLIENT_FS_MIRROR_RESPONSE) {
+ 				co_htx_skip(res, htx, co_data(res));
+ 				if (htx_is_empty(htx) && (htx->flags & HTX_FL_EOM))
+ 					appctx->st0 = HTTPCLIENT_S_RES_END;
+@@ -784,9 +786,12 @@ void httpclient_applet_io_handler(struct appctx *appctx)
+ 				goto error;
+ 			sl = htx_get_blk_ptr(htx, blk);
+ 			if (sl->info.res.status >= 200 || sl->info.res.status == 101) {
+-				if (appctx->st0 < HTTPCLIENT_S_RES_STLINE)
++				if (appctx->st0 < HTTPCLIENT_S_RES_STLINE &&
++				    (!streaming_mirror || sl->info.res.status != 200))
+ 					goto error;
+-				appctx->st0 = HTTPCLIENT_S_RES_BODY;
++				hc->flags |= HTTPCLIENT_FS_MIRROR_RESPONSE;
++				if (appctx->st0 >= HTTPCLIENT_S_RES_STLINE)
++					appctx->st0 = HTTPCLIENT_S_RES_BODY;
+ 				continue;
+ 			}
+ 			do {
+@@ -801,7 +806,8 @@ void httpclient_applet_io_handler(struct appctx *appctx)
+ 			htx_to_buf(htx, &res->buf);
+ 			sc_will_read(sc);
+ 		}
+-		if ((hc->options & HTTPCLIENT_O_IGNORE_RESPONSE) && appctx->st0 == HTTPCLIENT_S_RES_BODY)
++		if ((hc->flags & HTTPCLIENT_FS_MIRROR_RESPONSE) &&
++		    appctx->st0 >= HTTPCLIENT_S_RES_STLINE && appctx->st0 < HTTPCLIENT_S_RES_END)
+ 			goto out;
+ 
+ 		switch(appctx->st0) {
+@@ -1340,6 +1346,7 @@ enum httpclient_proxy_mode {
+ 	HTTPCLIENT_PROXY_DEFAULT,
+ 	HTTPCLIENT_PROXY_UNIX,
+ 	HTTPCLIENT_PROXY_MIRROR,
++	HTTPCLIENT_PROXY_STREAMING_MIRROR,
+ };
+ 
+ static struct proxy *httpclient_create_proxy_mode(const char *id, enum httpclient_proxy_mode mode)
+@@ -1371,7 +1378,9 @@ static struct proxy *httpclient_create_proxy_mode(const char *id, enum httpclien
+ 		px->options &= ~PR_O_REUSE_MASK;
+ 		px->retry_type = 0;
+ 	}
+-	px->options2 |= PR_O2_INDEPSTR;
++	/* Request writes count as activity while a gRPC mirror is uploading. */
++	if (mode != HTTPCLIENT_PROXY_STREAMING_MIRROR)
++		px->options2 |= PR_O2_INDEPSTR;
+ 	px->mode = PR_MODE_HTTP;
+ 	px->maxconn = 0;
+ 	px->accept = NULL;
+@@ -1399,7 +1408,7 @@ static struct proxy *httpclient_create_proxy_mode(const char *id, enum httpclien
+ 	srv_raw->xprt = xprt_get(XPRT_RAW);
+ 	if (!local)
+ 		srv_raw->flags |= SRV_F_MAPPORTS;  /* needed to apply the port change with resolving */
+-	else if (mode == HTTPCLIENT_PROXY_MIRROR)
++	else if (mode == HTTPCLIENT_PROXY_MIRROR || mode == HTTPCLIENT_PROXY_STREAMING_MIRROR)
+ 		srv_raw->pp_opts |= SRV_PP_V2 | SRV_PP_V2_OCTAVIA_MIRROR;
+ 	srv_raw->id = strdup("<HTTPCLIENT>");
+ 	if (!srv_raw->id) {
+@@ -1518,6 +1527,11 @@ struct proxy *httpclient_create_mirror_proxy(const char *id)
+ 	return httpclient_create_proxy_mode(id, HTTPCLIENT_PROXY_MIRROR);
+ }
+ 
++struct proxy *httpclient_create_streaming_mirror_proxy(const char *id)
++{
++	return httpclient_create_proxy_mode(id, HTTPCLIENT_PROXY_STREAMING_MIRROR);
++}
++
+ /*
+  * Initialize the proxy for the HTTP client with 2 servers, one for raw HTTP,
+  * the other for HTTPS.
