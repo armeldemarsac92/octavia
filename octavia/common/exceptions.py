@@ -286,6 +286,12 @@ class L7PolicyActivationConflict(APIException):
     code = 409
 
 
+class L7PolicyRemovalConflict(APIException):
+    msg = _('L7 policy removal requires a disabled, settled policy and '
+            'a matching snapshot.')
+    code = 409
+
+
 class InvalidL7PolicyAction(APIException):
     msg = _('Invalid L7 Policy action specified: %(action)s')
     code = 400

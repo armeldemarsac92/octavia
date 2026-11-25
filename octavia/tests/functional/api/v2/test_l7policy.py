@@ -1520,6 +1520,174 @@ class TestInitialL7Rules(base.BaseAPITest):
         self.assertEqual(2, len(replacement['rules']))
         self._dispatch('create_l7policy')
 
+    def _enable_conditional_removal(self):
+        self.conf.config(
+            group='api_settings',
+            enabled_l7policy_conditional_removal_providers=['amphora'])
+
+    def _removal_path(self, policy_id):
+        return (self.L7POLICY_PATH.format(l7policy_id=policy_id) +
+                '/conditional_removal')
+
+    def _removal_request(self, path):
+        snapshot = self.get(path).json['l7policy_removal']
+        return {'l7policy_removal': {
+            'expected_revision': snapshot['revision']}}
+
+    def test_conditional_removal_frees_quota_and_preserves_neighbor(self):
+        self._authenticated_project()
+        with self.session.begin():
+            repositories.QuotasRepository().update(
+                self.session, self.project_id,
+                quota={'l7policy': 2, 'l7rule': 3})
+        neighbor = self._post_policy(
+            redirect_prefix='https://neighbor.test', tags=['neighbor'],
+            rules=[dict(self.rules[0], tags=['neighbor'])])['l7policy']
+        self._dispatch('create_l7policy')
+        neighbor_path = self.L7POLICY_PATH.format(l7policy_id=neighbor['id'])
+        self.put(neighbor_path, {'l7policy': {'admin_state_up': True}})
+        self._dispatch('update_l7policy')
+
+        rules = [dict(rule, tags=['retiring']) for rule in self.rules]
+        policy = self._post_policy(tags=['retiring'], rules=rules)['l7policy']
+        self._dispatch('create_l7policy')
+        self._post_policy(status=403)
+
+        capability = constants.GATEWAY_CAPABILITY_L7POLICY_CONDITIONAL_REMOVAL
+        capability_path = self.PROVIDERS_PATH + '/amphora/gateway_capabilities'
+        capabilities = self.get(capability_path).json['gateway_capabilities']
+        self.assertNotIn(capability, capabilities)
+        path = self._removal_path(policy['id'])
+        self.get(path, status=501)
+        self.post(path, {'l7policy_removal': {'expected_revision': '0' * 64}},
+                  status=501)
+        self.rpc.cast.assert_not_called()
+        self._enable_conditional_removal()
+        self.assertIn(capability,
+                      self.get(capability_path).json['gateway_capabilities'])
+
+        active_path = self._removal_path(neighbor['id'])
+        neighbor_snapshot = self.get(active_path).json['l7policy_removal']
+        self.post(active_path, self._removal_request(active_path), status=409)
+        self.rpc.cast.assert_not_called()
+
+        snapshot = self.get(path).json['l7policy_removal']
+        self.assertEqual(self.lb_id, snapshot['loadbalancer_id'])
+        self.assertCountEqual([rule['id'] for rule in policy['rules']],
+                              [rule['id'] for rule in
+                               snapshot['policy']['rules']])
+        self.assertEqual(['retiring'], snapshot['policy']['tags'])
+        for rule in snapshot['policy']['rules']:
+            self.assertEqual(['retiring'], rule['tags'])
+        payload = {'l7policy_removal': {
+            'expected_revision': snapshot['revision']}}
+        self.post(path, payload, status=202)
+        self.assertEqual(snapshot, self.get(path).json['l7policy_removal'])
+        self.post(path, payload, status=202)
+        first, replay = self.rpc.cast.call_args_list
+        self.assertEqual(first, replay)
+        self.rpc.cast.reset_mock()
+        worker = endpoints.Endpoints()
+        worker.remove_l7policy_conditionally({}, **first.kwargs)
+
+        self.get(path, status=404)
+        self.assertEqual(
+            neighbor_snapshot['policy'],
+            self.get(active_path).json['l7policy_removal']['policy'])
+        replacement = self._post_policy(rules=rules)['l7policy']
+        self._dispatch('create_l7policy')
+        self.assertEqual(2, len(replacement['rules']))
+        worker.remove_l7policy_conditionally({}, **replay.kwargs)
+        with self.session.begin():
+            quotas = repositories.QuotasRepository().get(
+                self.session, project_id=self.project_id)
+            self.assertEqual((2, 3), (quotas.in_use_l7policy,
+                                      quotas.in_use_l7rule))
+
+    def test_conditional_removal_rechecks_rules_after_dispatch(self):
+        self._enable_conditional_removal()
+        policy = self._post_policy(tags=['retiring'])['l7policy']
+        self._dispatch('create_l7policy')
+        path = self._removal_path(policy['id'])
+        payload = self._removal_request(path)
+        self.post(path, payload, status=202)
+        delivery = self.rpc.cast.call_args.kwargs
+        self.rpc.cast.reset_mock()
+
+        rule_path = self.L7RULES_PATH.format(l7policy_id=policy['id'])
+        foreign = self.post(rule_path, {'rule': {
+            'type': 'PATH', 'compare_type': 'EQUAL_TO', 'value': '/foreign',
+            'tags': ['neighbor'],
+        }}, status=201).json['rule']
+        self._dispatch('create_l7rule')
+        observed = self.get(path).json['l7policy_removal']
+        self.post(path, payload, status=409)
+        self.rpc.cast.assert_not_called()
+
+        endpoints.Endpoints().remove_l7policy_conditionally({}, **delivery)
+        self.assertEqual(observed, self.get(path).json['l7policy_removal'])
+        self.assertIn(foreign['id'],
+                      [rule['id'] for rule in observed['policy']['rules']])
+
+    def test_conditional_removal_yields_to_pending_delete(self):
+        self._authenticated_project()
+        self._enable_conditional_removal()
+        saved = self._post_policy()['l7policy']
+        self._dispatch('create_l7policy')
+        policy_path = self.L7POLICY_PATH.format(l7policy_id=saved['id'])
+        path = self._removal_path(saved['id'])
+        payload = self._removal_request(path)
+        self.post(path, payload, status=202)
+        delivery = self.rpc.cast.call_args.kwargs
+        self.rpc.cast.reset_mock()
+
+        self.delete(policy_path)
+        with mock.patch.object(repositories.L7PolicyRepository,
+                               'load_activation_references') as load_rules:
+            self.post(path, payload, status=409)
+            endpoints.Endpoints().remove_l7policy_conditionally(
+                {}, **delivery)
+            load_rules.assert_not_called()
+        self.assertEqual('PENDING_DELETE', self.get(policy_path).json[
+            'l7policy']['provisioning_status'])
+        self._dispatch('delete_l7policy')
+        self.get(policy_path, status=404)
+        with self.session.begin():
+            quotas = repositories.QuotasRepository().get(
+                self.session, project_id=self.project_id)
+            self.assertEqual((0, 0), (quotas.in_use_l7policy,
+                                      quotas.in_use_l7rule))
+
+    def test_conditional_removal_uses_rule_collection_permission(self):
+        self._authenticated_project()
+        self._enable_conditional_removal()
+        saved = self._post_policy()['l7policy']
+        self._dispatch('create_l7policy')
+        path = self._removal_path(saved['id'])
+        rules_path = self.L7RULES_PATH.format(l7policy_id=saved['id'])
+        allow = 'project_id:%(project_id)s and role:member'
+        enforcer = policy.Policy(use_conf=False)
+        rules = {
+            f'{constants.RBAC_L7POLICY}{constants.RBAC_GET_ONE}': allow,
+            f'{constants.RBAC_L7RULE}{constants.RBAC_GET_ALL}': allow,
+            f'{constants.RBAC_L7RULE}{constants.RBAC_GET_ONE}': '!',
+            f'{constants.RBAC_L7POLICY}{constants.RBAC_DELETE}': allow,
+            f'{constants.RBAC_L7RULE}{constants.RBAC_DELETE}': '!',
+        }
+        enforcer.set_rules(oslo_policy.Rules.from_dict(rules), use_conf=False)
+        with mock.patch.object(policy, 'get_enforcer', return_value=enforcer):
+            snapshot = self.get(path).json['l7policy_removal']
+            self.assertCountEqual(self.get(rules_path).json['rules'],
+                                  snapshot['policy']['rules'])
+            request = {'l7policy_removal': {
+                'expected_revision': snapshot['revision']}}
+            self.post(path, request, status=403)
+            self.rpc.cast.assert_not_called()
+            rules[f'{constants.RBAC_L7RULE}{constants.RBAC_DELETE}'] = allow
+            enforcer.set_rules(oslo_policy.Rules.from_dict(rules),
+                               use_conf=False)
+            self.post(path, request, status=202)
+
     def test_rule_creation_requires_separate_permission(self):
         self._authenticated_project()
         enforcer = policy.Policy(use_conf=False)

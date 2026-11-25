@@ -227,6 +227,9 @@ def gateway_capabilities(driver):
             is True):
         capabilities.append(
             constants.GATEWAY_CAPABILITY_L7POLICY_BATCH_ACTIVATION)
+    if l7policy_conditional_removal_available(driver):
+        capabilities.append(
+            constants.GATEWAY_CAPABILITY_L7POLICY_CONDITIONAL_REMOVAL)
     tcp_rejection_providers = (
         api_settings.enabled_tcp_connection_rejection_providers)
     if (driver.name in tcp_rejection_providers and
@@ -713,6 +716,13 @@ def uses_tls_sni_policy_path(driver, protocol, tcp_tls_termination=False):
     return protocol == constants.PROTOCOL_TCP and (
         tcp_tls_termination is True or
         getattr(driver, 'supports_tls_sni_passthrough', False) is True)
+
+
+def l7policy_conditional_removal_available(driver):
+    enabled = CONF.api_settings.enabled_l7policy_conditional_removal_providers
+    return (driver.name in enabled and
+            getattr(driver, 'supports_l7policy_conditional_removal',
+                    False) is True)
 
 
 def l7policy_batch_activation_available(driver, listener):

@@ -2337,6 +2337,34 @@ class TestHaproxyCfg(base.TestCase):
                       f'if {match}\n', first)
         self.assertNotIn(f'octavia-grpc-mirror {unused_id}', rendered)
 
+    def test_disabled_policy_leaves_retained_mirror_render_unchanged(self):
+        amp = sample_configs_combined.sample_amphora_tuple()
+        listener = sample_configs_combined.sample_listener_tuple(l7=True)
+        primary, secondary = listener.pools
+        mirror = secondary._replace(id='8f388635-d55a-4f89-9937-a7550b72e710')
+        policy = listener.l7policies[0]
+        serving = SimpleNamespace(
+            **dict(policy._asdict(), id='serving', redirect_pool=primary),
+            request_mirrors=[
+                dict(pool_id=mirror.id, numerator=1, denominator=1)])
+        retiring = policy._replace(id='retiring', redirect_pool=mirror)
+        listener = listener._replace(default_pool=primary,
+                                     pools=[primary, mirror])
+        capability = constants.GATEWAY_CAPABILITY_HTTP_REQUEST_MIRROR
+
+        def render(policies):
+            return self.jinja_cfg.build_config(
+                amp, [listener._replace(l7policies=policies)], None,
+                haproxy_versions=['3', '0', '19'],
+                amp_details={capability: True})
+
+        backend = f'\nbackend {mirror.id}:{listener.id}\n'
+        self.assertIn(backend, render([retiring, serving]))
+        closed = render([retiring._replace(enabled=False), serving])
+        self.assertEqual(closed, render([serving]))
+        self.assertNotIn(backend, closed)
+        self.assertIn(f'listen octavia-mirror-{mirror.id}\n', closed)
+
     def test_request_mirrors_keep_tls_identity_and_alpn(self):
         amp = sample_configs_combined.sample_amphora_tuple()
         listener = sample_configs_combined.sample_listener_tuple(l7=True)

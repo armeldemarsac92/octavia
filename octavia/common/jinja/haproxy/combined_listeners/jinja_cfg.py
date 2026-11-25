@@ -1052,12 +1052,16 @@ class JinjaTemplater:
                 policy, feature_compatibility, tls_enabled, tls_certs,
                 available_pool_ids, available_mirror_pool_ids,
                 grpc_mirror_pool_ids)
-            primary_pool_ids.add(getattr(policy.redirect_pool, 'id', None))
-            targets = getattr(policy, 'targets', None) or []
-            primary_pool_ids.update(
-                target.get('pool_id') for target in targets)
-            configured_mirror_pool_ids.update(validate.request_mirror_pool_ids(
-                getattr(policy, 'request_mirrors', None), targets))
+            if policy.enabled:
+                # Closing an HTTP policy must leave a retained mirror
+                # with the same pool classification as removing it.
+                primary_pool_ids.add(getattr(policy.redirect_pool, 'id', None))
+                targets = getattr(policy, 'targets', None) or []
+                primary_pool_ids.update(target.get('pool_id')
+                                        for target in targets)
+                configured_mirror_pool_ids.update(
+                    validate.request_mirror_pool_ids(
+                        getattr(policy, 'request_mirrors', None), targets))
             if https_sections is not None:
                 transformed['https_section'] = https_sections[hostname]
             if mixed_mode:

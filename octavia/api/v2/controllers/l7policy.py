@@ -30,10 +30,12 @@ from octavia.api.v2.controllers import base
 from octavia.api.v2.controllers import l7rule
 from octavia.api.v2.types import l7policy as l7policy_types
 from octavia.api.v2.types import l7policy_activation as activation_types
+from octavia.api.v2.types import l7policy_removal as removal_types
 from octavia.common import constants
 from octavia.common import data_models
 from octavia.common import exceptions
 from octavia.common import l7policy_activation
+from octavia.common import l7policy_removal
 from octavia.common import validate
 from octavia.db import prepare as db_prepare
 from octavia.i18n import _
@@ -177,6 +179,86 @@ def _expands_weighted_forwarding(previous, targets):
         sum(target['weight'] for target in previous) >
         sum(target['weight'] for target in previous if 'pool_id' in target) *
         sum(target['weight'] for target in targets))
+
+
+class L7PolicyRemovalController(base.BaseController):
+    RBAC_TYPE = constants.RBAC_L7POLICY
+
+    def __init__(self, policy_id):
+        super().__init__()
+        self.policy_id = policy_id
+
+    def _parent_ids(self, session):
+        # End the lookup transaction before taking current reads under lock.
+        with session.begin():
+            scope = self.repositories.l7policy.get_parent_scope(
+                session, self.policy_id, show_deleted=False)
+            if scope is None:
+                raise exceptions.NotFound(resource='L7Policy',
+                                          id=self.policy_id)
+            return scope.load_balancer_id, scope.listener_id
+
+    def _authorize(self, context, lb, policy_action, rules_action):
+        self._auth_validate_action(context, lb.project_id, policy_action)
+        self._auth_validate_action(context, lb.project_id, rules_action,
+                                   rbac_type=constants.RBAC_L7RULE)
+        driver = driver_factory.get_driver(lb.provider)
+        if not driver_utils.l7policy_conditional_removal_available(driver):
+            raise exceptions.ProviderNotImplementedError(
+                prov=driver.name, user_msg=_(
+                    'Conditional L7 policy removal is unavailable.'))
+        return driver
+
+    @wsme_pecan.wsexpose(removal_types.L7PolicyRemovalRootResponse)
+    def get(self):
+        """Read the policy and its complete rule set for removal."""
+        context = pecan_request.context.get('octavia_context')
+        session = context.session
+        lb_id, listener_id = self._parent_ids(session)
+        with session.begin():
+            lb = l7policy_removal.lock_load_balancer(
+                session, self.repositories, lb_id)
+            self._authorize(context, lb, constants.RBAC_GET_ONE,
+                            constants.RBAC_GET_ALL)
+            policy = l7policy_removal.lock_policy(
+                session, self.repositories, lb, listener_id, self.policy_id)
+            result, revision = l7policy_removal.snapshot(lb, policy)
+        return removal_types.L7PolicyRemovalRootResponse(
+            l7policy_removal=removal_types.L7PolicyRemovalSnapshot(
+                revision=revision, loadbalancer_id=lb_id, policy=result))
+
+    @wsme_pecan.wsexpose(
+        None, body=removal_types.L7PolicyRemovalRootPOST, status_code=202)
+    def post(self, removal_):
+        """Request removal of the disabled policy at the observed revision."""
+        if not removal_:
+            raise exceptions.ValidationException(detail=_(
+                'Supply an l7policy_removal object.'))
+        expected_revision = removal_.l7policy_removal.expected_revision
+        context = pecan_request.context.get('octavia_context')
+        session = context.session
+        lb_id, listener_id = self._parent_ids(session)
+        with session.begin():
+            lb = l7policy_removal.lock_load_balancer(
+                session, self.repositories, lb_id)
+            driver = self._authorize(context, lb, constants.RBAC_DELETE,
+                                     constants.RBAC_DELETE)
+            policy = l7policy_removal.lock_policy(
+                session, self.repositories, lb, listener_id, self.policy_id,
+                removing=True)
+            l7policy_removal.validate_removal(lb, policy, expected_revision)
+            driver_utils.require_no_exposed_request_transforms(
+                driver, self.repositories.l7policy, session,
+                policy_id=self.policy_id)
+            project_id = lb.project_id
+        driver_utils.call_provider(
+            driver.name, driver.l7policy_conditional_remove, {
+                constants.LOADBALANCER_ID: lb_id,
+                constants.LISTENER_ID: listener_id,
+                constants.L7POLICY_ID: self.policy_id,
+                constants.PROJECT_ID: project_id,
+                'expected_revision': expected_revision,
+            })
 
 
 class L7PolicyActivationController(base.BaseController):
@@ -1069,6 +1151,8 @@ class L7PolicyController(base.BaseController):
         Verifies that the l7policy passed in the url exists, and if so decides
         which controller, if any, should control be passed.
         """
+        if l7policy_id and remainder and remainder[0] == 'conditional_removal':
+            return L7PolicyRemovalController(l7policy_id), remainder[1:]
         context = pecan_request.context.get('octavia_context')
         if l7policy_id and remainder and remainder[0] == 'rules':
             remainder = remainder[1:]
