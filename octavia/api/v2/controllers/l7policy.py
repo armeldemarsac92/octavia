@@ -253,7 +253,8 @@ class L7PolicyActivationController(base.BaseController):
             request_header_operations=policy.request_header_operations,
             response_header_operations=policy.response_header_operations,
             request_url_rewrite=policy.request_url_rewrite,
-            request_cors=policy.request_cors, targets=policy.targets)
+            request_cors=policy.request_cors, targets=policy.targets,
+            http_request_policy=policy.http_request_policy)
         if policy.redirect_pool_id:
             pool = repo.get_redirect_pool_for_update(
                 session, listener, policy.redirect_pool_id)
@@ -447,6 +448,9 @@ class L7PolicyController(base.BaseController):
                 listener_ids=[listener_id])
             listener = self.repositories.listener.get_for_update(
                 lock_session, listener_id, show_deleted=False)
+            if l7policy_dict.get('http_request_policy') is not None:
+                driver_utils.require_http_request_policy(
+                    driver, listener.protocol)
             passthrough = l7policy_dict.get('tcp_tls_passthrough', False)
             driver_utils.validate_tcp_tls_policy_mode(
                 driver, listener.tcp_tls_mixed_mode, passthrough)
@@ -590,6 +594,12 @@ class L7PolicyController(base.BaseController):
             cors_changed = cors != db_l7policy.request_cors
             if cors_changed and cors is not None:
                 https_routing_changed.add('request_cors')
+            previous_request_policy = db_l7policy.http_request_policy
+            request_policy = l7policy_dict.get(
+                'http_request_policy', previous_request_policy)
+            request_policy_changed = request_policy != previous_request_policy
+            if request_policy is not None and request_policy_changed:
+                https_routing_changed.add('http_request_policy')
             if (hostname is not None and
                     (reopening or
                      https_routing_changed.intersection(l7policy_dict))):
@@ -638,6 +648,12 @@ class L7PolicyController(base.BaseController):
             expands_filter_scope = enabled and (
                 activates_policy or updated_request_transform or
                 hostname != db_l7policy.https_listener_hostname)
+            if request_policy is not None and (
+                    request_policy_changed or (enabled and (
+                        activates_policy or routing_changed_or_disabled or
+                        targets != old_targets))):
+                driver_utils.require_http_request_policy(
+                    driver, listener.protocol)
             if _requires_target_filter_capability(
                     old_targets, targets, expands_filter_scope):
                 driver_utils.require_weighted_target_request_filters(
@@ -701,7 +717,8 @@ class L7PolicyController(base.BaseController):
                                   constants.L7POLICY_ACTION_REDIRECT_REQUEST)
                 for policy_action in (action, db_l7policy.action)) or
                 'request_url_rewrite' in l7policy_dict or
-                'request_cors' in l7policy_dict)
+                'request_cors' in l7policy_dict or
+                'http_request_policy' in l7policy_dict)
             if persist_before_dispatch:
                 # Validate target pool references before sending them to a
                 # provider. The write rolls back if the provider rejects it.

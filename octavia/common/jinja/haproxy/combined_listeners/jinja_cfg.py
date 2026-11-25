@@ -229,6 +229,7 @@ class JinjaTemplater:
         feature_compatibility = feature_compatibility or {}
         san_capability = (
             constants.GATEWAY_CAPABILITY_BACKEND_TLS_SUBJECT_ALT_NAMES)
+        policy_capability = constants.GATEWAY_CAPABILITY_HTTP_REQUEST_POLICY
         fallback_capability = (
             constants.GATEWAY_CAPABILITY_FRONTEND_CLIENT_AUTH_INSECURE_FALLBACK)
         loadbalancer = self._transform_loadbalancer(
@@ -271,6 +272,11 @@ class JinjaTemplater:
             for listener in loadbalancer['listeners']:
                 if not listener['enabled']:
                     continue
+                if ('http_request_policies_by_pool' in listener and
+                        (amp_details or {}).get(policy_capability)
+                        is not True):
+                    raise driver_except.AmpVersionUnsupported(
+                        version='HAProxy lacks HTTP request policy support')
                 if (listener.get('client_auth_insecure_fallback') and
                         (amp_details or {}).get(fallback_capability)
                         is not True):
@@ -740,12 +746,14 @@ class JinjaTemplater:
         responses_by_backend = {}
         cors_by_backend = {}
         rewrites_by_pool = {}
+        http_request_policies_by_pool = {}
         target_filters_by_pool = {}
         for policy in l7policies:
             request_ops = policy.get('request_header_operations')
             response_ops = policy.get('response_header_operations')
             cors = policy.get('request_cors')
             rewrite = policy.get('request_url_rewrite')
+            request_policy = policy.get('http_request_policy')
             pool_ids = set()
             fixed_responses = set()
             if 'weighted_targets' in policy:
@@ -770,6 +778,9 @@ class JinjaTemplater:
                     cors_by_backend.setdefault(('pool', pool_id), []).append(
                         (policy['id'], cors))
             for pool_id in pool_ids:
+                if request_policy is not None:
+                    http_request_policies_by_pool.setdefault(
+                        pool_id, []).append((policy['id'], request_policy))
                 if rewrite:
                     rewrites_by_pool.setdefault(pool_id, []).append(
                         (policy['id'], rewrite))
@@ -796,6 +807,9 @@ class JinjaTemplater:
             ret_value['target_filters_by_pool'] = target_filters_by_pool
         if requests_by_pool:
             ret_value['request_header_operations_by_pool'] = requests_by_pool
+        if http_request_policies_by_pool:
+            ret_value['http_request_policies_by_pool'] = (
+                http_request_policies_by_pool)
         if rewrites_by_pool:
             ret_value['request_url_rewrites_by_pool'] = rewrites_by_pool
         if responses_by_backend:
@@ -1069,6 +1083,12 @@ class JinjaTemplater:
                 ret_value['request_url_rewrite'] = (
                     self._transform_request_url_rewrite(
                         l7policy.request_url_rewrite))
+            request_policy = getattr(l7policy, 'http_request_policy', None)
+            if (request_policy is not None and l7policy.action in
+                    (constants.L7POLICY_ACTION_REDIRECT_TO_POOL,
+                     constants.L7POLICY_ACTION_WEIGHTED_TARGETS)):
+                ret_value['http_request_policy'] = (
+                    self._transform_http_request_policy(request_policy))
             cors = getattr(l7policy, 'request_cors', None)
             if (cors is not None and l7policy.action in
                     (constants.L7POLICY_ACTION_REDIRECT_TO_POOL,
@@ -1081,6 +1101,17 @@ class JinjaTemplater:
                     ret_value[field] = self._transform_header_operations(
                         operations, field)
         return ret_value
+
+    @staticmethod
+    def _transform_http_request_policy(policy):
+        policy = validate.http_request_policy(policy)
+        retry = policy.get('retry')
+        attempts = 'default' if retry is None else retry.get('attempts', 1)
+        codes = ','.join(str(code) for code in (retry or {}).get('codes', []))
+        return (
+            policy.get('request_timeout_ms', 'default'),
+            policy.get('backend_request_timeout_ms', 'default'),
+            attempts, codes or 'none')
 
     @staticmethod
     def _cors_origin_pattern(origin):

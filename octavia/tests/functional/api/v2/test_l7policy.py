@@ -815,6 +815,104 @@ class TestInitialL7Rules(base.BaseAPITest):
         assert_snapshot('update_l7policy', None)
         self.assertNotIn(field, self.get(path).json['l7policy'])
 
+    @mock.patch.object(amphora_noop.NoopAmphoraLoadBalancerDriver, 'update')
+    def test_http_request_policy_round_trip_and_withdrawal(self, update):
+        field = 'http_request_policy'
+        provider_caps = self.PROVIDERS_PATH + '/amphora/gateway_capabilities'
+        capability = constants.GATEWAY_CAPABILITY_HTTP_REQUEST_POLICY
+        pool = self.create_pool(self.lb_id, 'HTTP', 'ROUND_ROBIN')['pool']
+        pool_id = pool['id']
+        self.set_lb_status(self.lb_id)
+        self.rpc.cast.reset_mock()
+        target = {'redirect_pool_id': pool_id, 'admin_state_up': False,
+                  'rules': self.rules}
+        policy_data = {'request_timeout_ms': 2**63 - 1,
+                       'backend_request_timeout_ms': 500,
+                       'retry': {'attempts': 3, 'codes': [500, 504]}}
+        self.assertNotIn(
+            capability, self.get(provider_caps).json['gateway_capabilities'])
+        self.create_l7policy(self.listener_id, 'REDIRECT_TO_POOL', status=501,
+                             http_request_policy=policy_data, **target)
+        self.conf.config(
+            group='api_settings',
+            enabled_http_request_policy_providers=['amphora'])
+        self.assertIn(
+            capability, self.get(provider_caps).json['gateway_capabilities'])
+        with mock.patch.object(
+                driver_utils, 'HTTP_REQUEST_POLICY_PAYLOAD_AVAILABLE', False):
+            self.assertNotIn(capability, self.get(
+                provider_caps).json['gateway_capabilities'])
+
+        for value in (
+                {'request_timeout_ms': True},
+                {'request_timeout_ms': 2**63},
+                {'request_timeout_ms': 100, 'backend_request_timeout_ms': 200},
+                {'retry': {'attempts': 2**31}},
+                {'retry': {'codes': [500, 500]}},
+                {'retry': {'codes': [501]}},
+                {'retry': {'backoff': 10}}):
+            with self.subTest(value=value):
+                self.create_l7policy(
+                    self.listener_id, 'REDIRECT_TO_POOL', status=400,
+                    http_request_policy=value, **target)
+        self.create_l7policy(self.listener_id, 'REJECT', status=400,
+                             http_request_policy={})
+
+        policy = self.create_l7policy(
+            self.listener_id, 'REDIRECT_TO_POOL',
+            http_request_policy=policy_data, **target)['l7policy']
+        path = self.L7POLICY_PATH.format(l7policy_id=policy['id'])
+        self.assertEqual(policy_data, policy[field])
+        self.assertEqual(policy_data, self.rpc.cast.call_args.kwargs[
+            constants.L7POLICY][field])
+        self._dispatch('create_l7policy')
+        snapshot, = update.call_args.args
+        worker_policy, = snapshot.listeners[0].l7policies
+        self.assertEqual(policy_data, worker_policy.http_request_policy)
+        self.assertEqual(policy_data, self.get(path).json['l7policy'][field])
+        listed, = self.get(self.L7POLICIES_PATH).json['l7policies']
+        self.assertEqual(policy_data, listed[field])
+
+        for body, stored in (
+                ({'name': 'renamed'}, policy_data),
+                ({field: {'request_timeout_ms': 0, 'retry': {}}},
+                 {'request_timeout_ms': 0, 'retry': {}}),
+                ({field: {'retry': {'attempts': 0}}},
+                 {'retry': {'attempts': 0}})):
+            with self.subTest(body=body):
+                updated = self.put(path, {'l7policy': body}).json['l7policy']
+                self.assertEqual(stored, updated[field])
+                updates = self.rpc.cast.call_args.kwargs[
+                    constants.L7POLICY_UPDATES]
+                self.assertEqual(field in body, field in updates)
+                if field in body:
+                    self.assertEqual(stored, updates[field])
+                self._dispatch('update_l7policy')
+
+        self.put(path, {'l7policy': {'admin_state_up': True}})
+        self._dispatch('update_l7policy')
+        self.conf.config(
+            group='api_settings', enabled_http_request_policy_providers=[])
+        rule_path = self.L7RULE_PATH.format(
+            l7policy_id=policy['id'], l7rule_id=policy['rules'][0]['id'])
+        self.delete(rule_path, status=501)
+        self.rpc.cast.assert_not_called()
+        self.put(path, {'l7policy': {'admin_state_up': False}})
+        self._dispatch('update_l7policy')
+        self.put(path, {'l7policy': {'admin_state_up': True}}, status=501)
+        self.rpc.cast.assert_not_called()
+
+        cleared = self.put(path, {'l7policy': {field: None}}).json['l7policy']
+        self.assertNotIn(field, cleared)
+        self.assertIsNone(self.rpc.cast.call_args.kwargs[
+            constants.L7POLICY_UPDATES][field])
+        update.reset_mock()
+        self._dispatch('update_l7policy')
+        snapshot, = update.call_args.args
+        worker_policy, = snapshot.listeners[0].l7policies
+        self.assertIsNone(worker_policy.http_request_policy)
+        self.assertNotIn(field, self.get(path).json['l7policy'])
+
     @mock.patch.object(driver_utils, 'REQUEST_CORS_PAYLOAD_AVAILABLE', False)
     def test_cors_cleanup_with_pre_cors_provider_payload(self):
         self.conf.config(group='api_settings',
@@ -2982,6 +3080,31 @@ class TestL7Policy(base.BaseAPITest):
         self.put(path, {'l7policy': {
             'action': 'WEIGHTED_TARGETS', 'targets': targets}}, status=501)
         self.assertEqual('REJECT', self.get(path).json['l7policy']['action'])
+
+    @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
+    def test_create_amphora_with_nested_http_request_policy(self, _rpc):
+        self.conf.config(
+            group='api_settings',
+            enabled_http_request_policy_providers=['amphora'])
+        field = 'http_request_policy'
+        data = {'backend_request_timeout_ms': 100}
+        policy = {
+            'action': 'REDIRECT_TO_POOL',
+            'redirect_pool': {'name': 'destination'},
+            field: data,
+            'rules': [{'type': 'PATH', 'compare_type': 'EQUAL_TO',
+                       'value': '/policy'}],
+        }
+        lb = self.create_load_balancer(
+            uuidutils.generate_uuid(), provider='amphora',
+            pools=[{'name': 'destination', 'protocol': 'HTTP',
+                    'lb_algorithm': 'ROUND_ROBIN'}],
+            listeners=[{'protocol': 'HTTP', 'protocol_port': 80,
+                        'l7policies': [policy]}])['loadbalancer']
+        stored, = lb['listeners'][0]['l7policies']
+        self.assertEqual(data, stored[field])
+        path = self.L7POLICY_PATH.format(l7policy_id=stored['id'])
+        self.assertEqual(data, self.get(path).json['l7policy'][field])
 
     @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
     def test_create_amphora_with_nested_fixed_weighted_targets(self, _client):

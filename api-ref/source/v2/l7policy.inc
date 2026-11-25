@@ -139,6 +139,7 @@ Response Parameters
    - redirect_request: l7policy-redirect-request
    - request_url_rewrite: l7policy-request-url-rewrite
    - request_cors: l7policy-request-cors
+   - http_request_policy: l7policy-http-request-policy
    - redirect_url: l7policy-redirect-url
    - rules: l7policy-rule-ids
    - tags: tags
@@ -213,6 +214,11 @@ The regional ``request_cors_v1`` provider capability enables
 policies. See the provider Gateway API capabilities for the fields,
 limits and defaults.
 
+The regional ``http_request_policy_v1`` provider capability enables
+``http_request_policy`` on HTTP and ``TERMINATED_HTTPS`` policies with
+``REDIRECT_TO_POOL`` or ``WEIGHTED_TARGETS``. See the provider Gateway API
+capabilities for the timeout and retry semantics.
+
 L7 policies with ``action`` of ``REJECT`` will return a ``Forbidden (403)``
 response code to the requester.
 
@@ -264,6 +270,7 @@ Request
    - redirect_request: l7policy-redirect-request
    - request_url_rewrite: l7policy-request-url-rewrite
    - request_cors: l7policy-request-cors
+   - http_request_policy: l7policy-http-request-policy
    - redirect_url: l7policy-redirect-url-optional
    - rules: l7policy-initial-rules
    - tags: tags-optional
@@ -303,6 +310,7 @@ Response Parameters
    - redirect_request: l7policy-redirect-request
    - request_url_rewrite: l7policy-request-url-rewrite
    - request_cors: l7policy-request-cors
+   - http_request_policy: l7policy-http-request-policy
    - redirect_url: l7policy-redirect-url
    - rules: l7policy-rule-ids
    - tags: tags
@@ -375,6 +383,7 @@ Response Parameters
    - redirect_request: l7policy-redirect-request
    - request_url_rewrite: l7policy-request-url-rewrite
    - request_cors: l7policy-request-cors
+   - http_request_policy: l7policy-http-request-policy
    - redirect_url: l7policy-redirect-url
    - rules: l7policy-rule-ids
    - tags: tags
@@ -438,6 +447,7 @@ Request
    - redirect_request: l7policy-redirect-request
    - request_url_rewrite: l7policy-request-url-rewrite
    - request_cors: l7policy-request-cors
+   - http_request_policy: l7policy-http-request-policy
    - redirect_url: l7policy-redirect-url-optional
    - tags: tags-optional
 
@@ -476,6 +486,7 @@ Response Parameters
    - redirect_request: l7policy-redirect-request
    - request_url_rewrite: l7policy-request-url-rewrite
    - request_cors: l7policy-request-cors
+   - http_request_policy: l7policy-http-request-policy
    - redirect_url: l7policy-redirect-url
    - rules: l7policy-rule-ids
    - tags: tags

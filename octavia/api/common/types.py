@@ -319,6 +319,18 @@ class HTTPRequestURLRewrite(wtypes.UserType):
             raise ValueError(str(e)) from e
 
 
+class HTTPRequestPolicy(wtypes.UserType):
+    basetype = object
+    name = 'http_request_policy'
+
+    @staticmethod
+    def validate(value):
+        try:
+            return validate.http_request_policy(value)
+        except exceptions.InvalidL7PolicyArgs as e:
+            raise ValueError(str(e)) from e
+
+
 class HTTPRequestCORS(wtypes.UserType):
     basetype = object
     name = 'request_cors'

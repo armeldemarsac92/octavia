@@ -49,6 +49,9 @@ def policy_revision(policy):
                 'tags': sorted(resource.tags)}
 
     data = values(policy, ACTIVATION_POLICY_FIELDS)
+    request_policy = getattr(policy, 'http_request_policy', None)
+    if request_policy is not None:
+        data['http_request_policy'] = request_policy
     data['rules'] = [values(rule, ACTIVATION_RULE_FIELDS) for rule in
                      sorted(policy.l7rules, key=lambda rule: rule.id)]
     return _digest(data)
