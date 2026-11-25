@@ -89,6 +89,7 @@ class AmphoraProviderDriver(driver_base.ProviderDriver):
     supports_listener_request_filters = True
     supports_l7policy_initial_rules = True
     supports_l7policy_batch_activation = True
+    supports_l7policy_conditional_removal = True
     supports_tcp_connection_rejection = True
     supports_udp_packet_drop = True
     supports_http_header_exact = True
@@ -505,6 +506,10 @@ class AmphoraProviderDriver(driver_base.ProviderDriver):
     def l7policy_batch_activate(self, activation):
         self.client.cast({}, 'activate_l7policies',
                          **{consts.L7POLICY_ACTIVATION: activation})
+
+    def l7policy_conditional_remove(self, removal):
+        self.client.cast({}, 'remove_l7policy_conditionally',
+                         **{consts.L7POLICY_REMOVAL: removal})
 
     # L7 Rule
     def l7rule_create(self, l7rule):

@@ -211,6 +211,10 @@ api_opts = [
                 help=_('Provider drivers that can activate a group of '
                        'prepared HTTP L7 policies in one operation. Enable '
                        'after upgrading the database, API and all workers.')),
+    cfg.ListOpt('enabled_l7policy_conditional_removal_providers', default=[],
+                help=_('Providers that can remove a disabled L7 policy and '
+                       'its observed rules together. Enable after upgrading '
+                       'the API and all workers.')),
     cfg.ListOpt('enabled_http_method_match_providers', default=[],
                 help=_('Provider driver names whose regional fleets '
                        'support exact HTTP method L7 rules. Enable '

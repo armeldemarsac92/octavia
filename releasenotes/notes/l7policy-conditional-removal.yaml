@@ -1,0 +1,27 @@
+---
+features:
+  - |
+    The Amphora provider supports conditional removal of an L7 policy and
+    its rules through ``/v2/lbaas/l7policies/{id}/conditional_removal``.
+    GET returns ``l7policy_removal`` with the load balancer ID, the full
+    policy and rule snapshot, and an opaque ``revision``. Clients verify the
+    identities and ownership tags in that snapshot and POST
+    ``{"l7policy_removal": {"expected_revision": "<revision>"}}``.
+    The policy must be administratively down and its disable operation
+    must have finished. POST returns 409 if the policy is active, unsettled,
+    or changed since the snapshot.
+    A 202 response acknowledges queueing; GET returns 404 after removal.
+    Until then, the same POST can redeliver a matching snapshot. If the
+    snapshot changes after queueing, the worker discards the stale request.
+    The worker also yields if another transaction holds the load balancer.
+    Clients may retry with a fresh verified snapshot. The worker deletes
+    the policy and its rules and releases their quotas in one transaction.
+upgrade:
+  - |
+    After upgrading the regional Octavia API and all workers, add
+    ``amphora`` to ``[api_settings]
+    enabled_l7policy_conditional_removal_providers`` to advertise
+    ``l7policy_conditional_removal_v1``. The setting defaults to an empty
+    list. Requests sent while the feature is disabled return 501 for an
+    existing policy. Enable conditional removal on databases that support
+    row locks with ``FOR UPDATE SKIP LOCKED``.

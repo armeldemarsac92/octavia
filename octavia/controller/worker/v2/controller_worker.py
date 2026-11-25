@@ -911,6 +911,10 @@ class ControllerWorker:
         self.run_flow(flow_utils.get_activate_l7policies_flow, store={
             constants.L7POLICY_ACTIVATION: l7policy_activation})
 
+    def remove_l7policy_conditionally(self, l7policy_removal):
+        self.run_flow(flow_utils.get_conditional_l7policy_removal_flow,
+                      store={constants.L7POLICY_REMOVAL: l7policy_removal})
+
     @staticmethod
     def _batch_owns_resource(resource_repo, resource_id):
         if CONF.api_settings.enabled_l7policy_batch_activation_providers:

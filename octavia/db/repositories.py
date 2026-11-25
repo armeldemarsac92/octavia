@@ -719,11 +719,7 @@ class Repositories:
 
         # Lock the project record in the database to block other quota checks
         try:
-            quotas = (lock_session.query(models.Quotas)
-                      .filter_by(project_id=project_id)
-                      .populate_existing()
-                      .with_for_update()
-                      .first())
+            quotas = self.quotas.get_for_update(lock_session, project_id)
             if not quotas:
                 if not CONF.api_settings.auth_strategy == consts.NOAUTH:
                     LOG.error('Quota decrement on %(clss)s called on '
@@ -878,10 +874,10 @@ class LoadBalancerRepository(BaseRepository):
         return (session.query(self.model_class.id).filter_by(id=id)
                 .with_for_update().scalar())
 
-    def get_for_update(self, session, id):
+    def get_for_update(self, session, id, *, skip_locked=False):
         return (session.query(self.model_class).filter_by(id=id)
                 .options(lazyload('*')).populate_existing()
-                .with_for_update().one_or_none())
+                .with_for_update(skip_locked=skip_locked).one_or_none())
 
     def test_and_set_provisioning_status(self, session, id, status,
                                          raise_exception=False, *,
@@ -1013,8 +1009,11 @@ class LoadBalancerRepository(BaseRepository):
     @staticmethod
     def _invalidate_batch(lb):
         lb.tcp_member_batch = None
+        api_settings = CONF.api_settings
         if (lb.l7policy_graph_generation or lb.l7policy_activation or
-                CONF.api_settings.enabled_l7policy_batch_activation_providers):
+                api_settings.enabled_l7policy_batch_activation_providers or
+                lb.provider in
+                api_settings.enabled_l7policy_conditional_removal_providers):
             lb.l7policy_graph_generation = uuidutils.generate_uuid()
             lb.l7policy_activation = None
 
@@ -2468,16 +2467,19 @@ class L7PolicyRepository(BaseRepository):
                 .options(lazyload('*')).order_by(policy.position, policy.id)
                 .populate_existing().with_for_update().all())
 
-    def load_activation_references(self, session, policies):
-        """Refresh the child rows needed by the activation precondition."""
+    def load_activation_references(self, session, policies, *,
+                                   include_deleted_rules=False):
+        """Refresh the child rows needed by the L7 policy precondition."""
         if not policies:
             return
         policies_by_id = {policy.id: policy for policy in policies}
         rule_model = models.L7Rule
-        rules = (session.query(rule_model)
-                 .filter(rule_model.l7policy_id.in_(policies_by_id),
-                         rule_model.provisioning_status != consts.DELETED)
-                 .options(lazyload('*')).order_by(rule_model.id)
+        rule_query = session.query(rule_model).filter(
+            rule_model.l7policy_id.in_(policies_by_id))
+        if not include_deleted_rules:
+            rule_query = rule_query.filter(
+                rule_model.provisioning_status != consts.DELETED)
+        rules = (rule_query.options(lazyload('*')).order_by(rule_model.id)
                  .populate_existing().with_for_update().all())
         target_model = models.L7PolicyTarget
         targets = (session.query(target_model)
@@ -3186,7 +3188,17 @@ class L7PolicyRepository(BaseRepository):
                 consts.PENDING_DELETE, consts.DELETED)))
             .with_for_update().all())
 
-    def get_for_update(self, session, id, show_deleted=True):
+    def get_parent_scope(self, session, policy_id, show_deleted=True):
+        policy = self.model_class
+        query = (session.query(policy.project_id, policy.listener_id,
+                               models.Listener.load_balancer_id)
+                 .join(policy.listener).filter(policy.id == policy_id))
+        if not show_deleted:
+            query = query.filter(policy.provisioning_status != consts.DELETED)
+        return query.one_or_none()
+
+    def get_for_update(self, session, id, show_deleted=True, *,
+                       load_targets_and_mirrors=True):
         """Load the current policy and its targets for a write transaction."""
         query = (session.query(self.model_class).filter_by(id=id)
                  .options(lazyload('*')).populate_existing()
@@ -3198,6 +3210,8 @@ class L7PolicyRepository(BaseRepository):
         if policy is None:
             raise exceptions.NotFound(
                 resource=data_models.L7Policy._name(), id=id)
+        if not load_targets_and_mirrors:
+            return policy
 
         # A lazy load can still see an old REPEATABLE READ snapshot even
         # after admission under the load balancer lock. Read the targets
@@ -3369,6 +3383,11 @@ class L7PolicyRepository(BaseRepository):
 
 class QuotasRepository(BaseRepository):
     model_class = models.Quotas
+
+    def get_for_update(self, session, project_id):
+        return (session.query(self.model_class)
+                .filter_by(project_id=project_id)
+                .populate_existing().with_for_update().first())
 
     def update(self, session, project_id, **model_kwargs):
         kwargs_quota = model_kwargs['quota']

@@ -55,6 +55,11 @@ class L7PolicyFlows:
             amphora_driver_tasks.ApplyL7PolicyActivation(
                 requires=constants.L7POLICY_ACTIVATION))
 
+    def get_conditional_l7policy_removal_flow(self):
+        return linear_flow.Flow('octavia-conditional-l7policy-removal').add(
+            database_tasks.DeleteL7PolicyConditionallyInDB(
+                requires=constants.L7POLICY_REMOVAL))
+
     def get_delete_l7policy_flow(self):
         """Create a flow to delete an L7 policy
 
