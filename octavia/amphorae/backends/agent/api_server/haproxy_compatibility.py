@@ -78,6 +78,38 @@ def _supports_http_cookie_path(haproxy_cmd):
     return True
 
 
+_TLS_SNI_PASSTHROUGH_WEIGHTED_POOLS_PROBE = (
+    """global
+    description octavia-probe
+defaults
+    mode tcp
+    timeout client 1s
+    timeout connect 1s
+    timeout server 1s
+frontend probe
+    bind 127.0.0.1:12345
+    tcp-request inspect-delay 1s
+    acl route req.ssl_sni -i -m end .example.test
+    tcp-request content set-var(sess.draw) rand(16000000) """
+    """if { req.ssl_hello_type 1 } route
+    tcp-request content accept if { req.ssl_hello_type 1 }
+    use_backend target if route { var(sess.draw) -m int 0:15999999 }
+backend target
+""")
+
+
+def _supports_tls_sni_passthrough_weighted_pools(haproxy_cmd):
+    try:
+        subprocess.run(
+            [haproxy_cmd, '-c', '-q', '-f', '/dev/stdin'],
+            input=_TLS_SNI_PASSTHROUGH_WEIGHTED_POOLS_PROBE, text=True,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            check=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return True
+
+
 def get_haproxy_capabilities():
     haproxy_cmd = CONF.haproxy_amphora.haproxy_cmd
     try:
@@ -90,6 +122,11 @@ def get_haproxy_capabilities():
     if _supports_http_cookie_path(haproxy_cmd):
         capabilities[constants.GATEWAY_CAPABILITY_HTTP_COOKIE_PATH] = True
     version = re.match(r'HAProxy version (\d+)\.(\d+)\.', output)
+    if (version and tuple(map(int, version.groups())) >= (2, 2) and
+            _supports_tls_sni_passthrough_weighted_pools(haproxy_cmd)):
+        capabilities[
+            constants.GATEWAY_CAPABILITY_TLS_SNI_PASSTHROUGH_WEIGHTED_POOLS
+        ] = True
     if (version and int(version.group(1)) >= 3 and
             '+OPENSSL' in output.split()):
         capabilities[

@@ -281,6 +281,24 @@ class TestAmphoraDriverTasks(base.TestCase):
             amp_list_update_obj.execute, _LB_mock, 0, [_amphora_mock], {},
             AMP_ID)
 
+        weighted = data_models.L7Policy(
+            action=constants.L7POLICY_ACTION_WEIGHTED_TARGETS,
+            enabled=True, l7rules=[data_models.L7Rule(enabled=True)])
+        mock_lb_get.return_value = data_models.LoadBalancer(
+            enabled=True, topology=constants.TOPOLOGY_ACTIVE_STANDBY,
+            listeners=[data_models.Listener(protocol=constants.PROTOCOL_TCP,
+                                            enabled=True,
+                                            l7policies=[weighted])])
+        mock_amphora_repo_update.reset_mock()
+        mock_driver.update_failover_listeners.side_effect = (
+            driver_except.CoordinatedListenerUpdateError({
+                'surviving-amp': RuntimeError('unconfirmed withdrawal')}))
+        self.assertRaises(
+            driver_except.CoordinatedListenerUpdateError,
+            amp_list_update_obj.execute, _LB_mock, 0, [_amphora_mock], {},
+            AMP_ID)
+        mock_amphora_repo_update.assert_not_called()
+
     @mock.patch('octavia.db.repositories.LoadBalancerRepository.get')
     @mock.patch('octavia.db.api.session')
     def test_listeners_update(self,

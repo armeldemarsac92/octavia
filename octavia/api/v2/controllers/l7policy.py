@@ -42,9 +42,6 @@ from octavia.i18n import _
 CONF = cfg.CONF
 LOG = logging.getLogger(__name__)
 
-ACTIVATION_PROTOCOLS = (constants.PROTOCOL_HTTP,
-                        constants.PROTOCOL_TERMINATED_HTTPS)
-
 
 def validate_policy_headers(policy, protocol, driver, old_policy=None):
     for field, require in (
@@ -152,14 +149,16 @@ class L7PolicyActivationController(base.BaseController):
                 listener.project_id != lb.project_id):
             raise exceptions.L7PolicyActivationConflict()
         driver = driver_factory.get_driver(lb.provider)
-        if (constants.GATEWAY_CAPABILITY_L7POLICY_BATCH_ACTIVATION not in
-                driver_utils.gateway_capabilities(driver) or
-                listener.protocol not in ACTIVATION_PROTOCOLS):
+        return listener, lb, driver
+
+    @staticmethod
+    def _require_batch_activation(driver, listener):
+        if not driver_utils.l7policy_batch_activation_available(
+                driver, listener):
             raise exceptions.ProviderNotImplementedError(
                 prov=driver.name, user_msg=_(
                     'Grouped L7 policy activation is unavailable for this '
                     'listener.'))
-        return listener, lb, driver
 
     @wsme_pecan.wsexpose(activation_types.L7PolicyActivationRootResponse)
     def get(self):
@@ -167,8 +166,11 @@ class L7PolicyActivationController(base.BaseController):
         context = pecan_request.context.get('octavia_context')
         lb_id = self._parent_id(context)
         with context.session.begin():
-            listener, lb, _driver = self._get_listener_and_provider(
+            listener, lb, driver = self._get_listener_and_provider(
                 context, lb_id, constants.RBAC_GET_ONE)
+            operation = lb.l7policy_activation or {}
+            if operation.get('listener_id') != listener.id:
+                self._require_batch_activation(driver, listener)
             if (lb.provisioning_status.startswith('PENDING_') and
                     not self.repositories.load_balancer._batch_pending(lb)):
                 raise exceptions.L7PolicyActivationConflict()
@@ -216,8 +218,14 @@ class L7PolicyActivationController(base.BaseController):
             if operation.get('phase') in l7policy_activation.PENDING:
                 if not replay:
                     raise exceptions.L7PolicyActivationConflict()
+                if not driver_utils.l7policy_batch_activation_available(
+                        driver, listener):
+                    lb.l7policy_activation = {
+                        **operation, 'phase': 'reverting'}
                 self._dispatch(driver, lb.id, operation['id'])
                 return
+            if not replay:
+                self._require_batch_activation(driver, listener)
             if (lb.provisioning_status != constants.ACTIVE or
                     self.repositories.load_balancer.tcp_batch_pending(lb) or
                     listener.provisioning_status != constants.ACTIVE or
@@ -234,6 +242,8 @@ class L7PolicyActivationController(base.BaseController):
                     all(p.enabled and p.provisioning_status == constants.ACTIVE
                         for p in policies)):
                 return
+            if replay:
+                self._require_batch_activation(driver, listener)
             if (graph.graph_revision != request['graph_revision'] or
                     [policy.id for policy in order] != request['order'] or
                     len(policies) != len(revisions)):
@@ -277,18 +287,41 @@ class L7PolicyActivationController(base.BaseController):
             listener.https_virtual_hosts, policy.https_listener_hostname)
         if hostname is not None:
             driver_utils.require_https_listener_isolation(driver)
+        if protocol == constants.PROTOCOL_TCP:
+            if (policy.action != constants.L7POLICY_ACTION_WEIGHTED_TARGETS or
+                    (listener.tcp_tls_termination and
+                     not policy.tcp_tls_passthrough)):
+                raise exceptions.ValidationException(detail=_(
+                    'TCP batch activation requires weighted TLS SNI '
+                    'passthrough policies.'))
+            driver_utils.validate_tcp_tls_policy_mode(
+                driver, listener.tcp_tls_mixed_mode,
+                policy.tcp_tls_passthrough)
         for rule in policy.l7rules:
             if rule.enabled:
-                driver_utils.validate_l7rule_context(driver, rule.type,
-                                                     protocol)
+                driver_utils.validate_l7rule_context(
+                    driver, rule.type, protocol,
+                    tcp_tls_termination=listener.tcp_tls_termination)
+                if protocol == constants.PROTOCOL_TCP:
+                    driver_utils.require_tls_sni_rule_comparison(
+                        driver, rule.compare_type)
         driver_utils.require_gateway_policy_action(
             driver, policy.action, protocol,
+            tcp_tls_termination=listener.tcp_tls_termination,
+            tcp_tls_mixed_mode=listener.tcp_tls_mixed_mode,
+            tcp_tls_passthrough=policy.tcp_tls_passthrough,
             request_header_operations=policy.request_header_operations,
             response_header_operations=policy.response_header_operations,
             request_url_rewrite=policy.request_url_rewrite,
             request_cors=policy.request_cors, targets=policy.targets,
             http_request_policy=policy.http_request_policy,
             request_mirrors=policy.request_mirrors)
+        if protocol == constants.PROTOCOL_TCP:
+            driver_utils.validate_tcp_policy_targets(
+                driver, repo, session, listener, policy.action,
+                policy.redirect_pool_id, policy.targets,
+                policy.tcp_tls_passthrough, active_targets_only=True)
+            return
         repo.validate_mirror_pools(
             session, listener, policy.request_mirrors, policy.targets)
         if policy.redirect_pool_id:
@@ -435,7 +468,6 @@ class L7PolicyController(base.BaseController):
                         lib_consts.PROTOCOL_TERMINATED_HTTPS)
                 weighted_tls_sni = (
                     listener.protocol == constants.PROTOCOL_TCP and
-                    listener.tcp_tls_termination and
                     l7policy.action ==
                     constants.L7POLICY_ACTION_WEIGHTED_TARGETS)
                 if (not (http_listener or weighted_tls_sni) or
@@ -479,6 +511,7 @@ class L7PolicyController(base.BaseController):
             driver_utils.require_gateway_policy_action(
                 driver, l7policy_dict['action'], listener.protocol,
                 tcp_tls_termination=listener.tcp_tls_termination,
+                tcp_tls_mixed_mode=listener.tcp_tls_mixed_mode,
                 tcp_tls_passthrough=l7policy_dict.get(
                     'tcp_tls_passthrough', False),
                 request_url_rewrite=l7policy_dict.get('request_url_rewrite'),
@@ -530,7 +563,7 @@ class L7PolicyController(base.BaseController):
                 if weighted_tls_sni:
                     driver_utils.require_tls_sni_rule_comparison(
                         driver, rule['compare_type'],
-                        listener.tcp_tls_termination)
+                        listener.tcp_tls_termination and not passthrough)
             db_l7policy = self._validate_create_l7policy(
                 lock_session, l7policy_dict)
             if rules:
@@ -756,7 +789,9 @@ class L7PolicyController(base.BaseController):
                 if enabled and not weighted_tcp:
                     # Changing an active selector to a scalar pool can
                     # redirect a share that was deliberately closed.
-                    driver_utils.require_tls_sni_weighted_pools(driver)
+                    driver_utils.require_tls_sni_weighted_pools(
+                        driver, passthrough=(
+                            passthrough or not listener.tcp_tls_termination))
                 if weighted_tcp and gate_routing:
                     old_positive = [target for target in old_targets
                                     if target['weight'] > 0]
@@ -775,6 +810,7 @@ class L7PolicyController(base.BaseController):
                 driver_utils.require_gateway_policy_action(
                     driver, action, listener.protocol,
                     tcp_tls_termination=listener.tcp_tls_termination,
+                    tcp_tls_mixed_mode=listener.tcp_tls_mixed_mode,
                     tcp_tls_passthrough=passthrough,
                     targets=targets if weighted_tcp else None,
                     **retained_headers)

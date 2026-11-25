@@ -177,8 +177,20 @@ class MemberController(base.BaseController):
             capabilities and
             self.repositories.l7policy.has_active_tls_sni_weighted_pool(
                 session, pool.id))
+        passthrough_weighted_pools_withdrawn = (
+            constants.GATEWAY_CAPABILITY_TLS_SNI_PASSTHROUGH_WEIGHTED_POOLS
+            not in capabilities and
+            self.repositories.l7policy.has_active_tls_sni_weighted_pool(
+                session, pool.id, passthrough=True))
+        weighted_suffix_withdrawn = (
+            constants.GATEWAY_CAPABILITY_TLS_SNI_SUFFIX not in capabilities and
+            self.repositories.l7policy.has_active_tls_sni_weighted_pool(
+                session, pool.id, passthrough=True,
+                compare_type=constants.L7RULE_COMPARE_TYPE_ENDS_WITH))
         if not (backend_auth_withdrawn or mixed_mode_withdrawn or
-                weighted_pools_withdrawn):
+                weighted_pools_withdrawn or
+                passthrough_weighted_pools_withdrawn or
+                weighted_suffix_withdrawn):
             return
         member_ids = [member_id for member_id, _ in changes if member_id]
         current = self.repositories.member.get_routing_for_update(
@@ -208,6 +220,11 @@ class MemberController(base.BaseController):
                     driver_utils.require_tcp_tls_mixed_mode(driver)
                 if weighted_pools_withdrawn:
                     driver_utils.require_tls_sni_weighted_pools(driver)
+                if passthrough_weighted_pools_withdrawn:
+                    driver_utils.require_tls_sni_weighted_pools(
+                        driver, passthrough=True)
+                if weighted_suffix_withdrawn:
+                    driver_utils.require_tls_sni_suffix(driver)
 
     def _validate_create_member(self, lock_session, member_dict):
         """Validate creating member on pool."""

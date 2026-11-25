@@ -1829,6 +1829,132 @@ class TestHaproxyCfg(base.TestCase):
                     exact._replace(value='invalid name')]))
                 self.assertNotIn(f'frontend {current.id}', config)
 
+    def test_render_weighted_passthrough_tcp_tls_sni(self):
+        conf = self.useFixture(oslo_fixture.Config(cfg.CONF))
+        samples = sample_configs_combined
+        listener = samples.sample_listener_tuple(
+            proto='TCP', persistence=False, tls=True)
+        owners = {'load_balancer_id': listener.load_balancer.id,
+                  'project_id': listener.project_id}
+        origin = SimpleNamespace(**dict(
+            listener.default_pool._asdict(), **owners,
+            id='6496e223-2e4e-4d2a-bfa0-36a6f8558965'))
+        closed = SimpleNamespace(**dict(
+            samples.sample_pool_tuple(proto='TCP', sample_pool=2,
+                                      persistence=False)._asdict(),
+            **owners, id='6729a234-2be5-4dd6-b901-fa1cf9cbdb5b'))
+        closed.members = []
+        exact = samples.sample_l7rule_tuple(
+            'exact', type='TLS_SNI', compare_type='EQUAL_TO',
+            value='a.example.test')
+        suffix = exact._replace(id='suffix', compare_type='ENDS_WITH',
+                                value='*.example.test')
+        neighbor = samples.sample_l7policy_tuple('neighbor')._replace(
+            redirect_pool=origin, l7rules=[suffix])
+        targets = [{'pool_id': origin.id, 'weight': 257},
+                   {'pool_id': closed.id, 'weight': 128}]
+        capability = (
+            constants.GATEWAY_CAPABILITY_TLS_SNI_PASSTHROUGH_WEIGHTED_POOLS)
+        draw = 'set-var(sess.octavia_sni_weighted_draw) rand(385)'
+        for mixed in (False, True):
+            with self.subTest(mixed=mixed):
+                weighted = SimpleNamespace(**dict(
+                    neighbor._asdict(), id='weighted',
+                    action=constants.L7POLICY_ACTION_WEIGHTED_TARGETS,
+                    redirect_pool=None, l7rules=[exact], targets=targets,
+                    tcp_tls_passthrough=mixed))
+                current = SimpleNamespace(**dict(
+                    listener._asdict(), **owners, default_pool=None,
+                    tcp_tls_termination=mixed, tcp_tls_mixed_mode=mixed,
+                    pools=[origin, closed], l7policies=[neighbor, weighted]))
+
+                def render(supported=True, degraded=False):
+                    return self.jinja_cfg.render_loadbalancer_obj(
+                        samples.sample_amphora_tuple(), [current],
+                        amp_details={capability: supported},
+                        haproxy_version='3.0.19',
+                        weighted_passthrough_degraded=degraded)
+
+                conf.config(
+                    group='api_settings',
+                    enabled_tls_sni_passthrough_weighted_pool_providers=[
+                        'amphora'])
+                config = render()
+                self.assertEqual(1, config.count(draw))
+                self.assertIn('req.ssl_sni -i -m str a.example.test', config)
+                self.assertIn(f'{draw} if {{ req.ssl_hello_type 1 }} exact',
+                              config)
+                self.assertIn(f'use_backend {origin.id}:{current.id} if exact '
+                              '{ var(sess.octavia_sni_weighted_draw) '
+                              '-m int 0:256 }', config)
+                self.assertIn(f'use_backend {closed.id}:{current.id} if exact '
+                              '{ var(sess.octavia_sni_weighted_draw) '
+                              '-m int 257:384 }', config)
+                reject = ('use_backend octavia-sni-closed-' +
+                          current.id + ' if exact')
+                if mixed:
+                    self.assertIn('ssl_fc_sni -i -m end .example.test', config)
+                    neighbor_route = (
+                        f'use_backend octavia-tls-mixed-{current.id}-dispatch'
+                        ' if suffix')
+                else:
+                    self.assertNotIn(' ssl crt ', config)
+                    neighbor_route = (
+                        f'use_backend {origin.id}:{current.id} if suffix')
+                self.assertLess(config.index(reject),
+                                config.index(neighbor_route))
+
+                config = render(supported=False)
+                self.assertNotIn(draw, config)
+                self.assertIn(reject, config)
+                self.assertIn(neighbor_route, config)
+
+                # Octavia keeps the reserved share on existing policies
+                # after regional admission is withdrawn.
+                conf.config(
+                    group='api_settings',
+                    enabled_tls_sni_passthrough_weighted_pool_providers=[])
+                closed.enabled = False
+                config = render()
+                self.assertIn(draw, config)
+                closed_route = (
+                    f'use_backend {closed.id}:{current.id} if exact'
+                    if mixed else reject)
+                self.assertIn(
+                    closed_route + ' { var(sess.octavia_sni_weighted_draw)'
+                    ' -m int 257:384 }', config)
+                self.assertLess(config.index(closed_route),
+                                config.index(neighbor_route))
+
+                closed.enabled = True
+                closed.provisioning_status = constants.PENDING_UPDATE
+                config = render(degraded=True)
+                self.assertIn(
+                    f'use_backend {origin.id}:{current.id} if exact '
+                    '{ var(sess.octavia_sni_weighted_draw) -m int 0:256 }',
+                    config)
+                self.assertIn(
+                    reject + ' { var(sess.octavia_sni_weighted_draw) '
+                    '-m int 257:384 }', config)
+                self.assertIn(neighbor_route, config)
+
+                weighted.provisioning_status = constants.PENDING_UPDATE
+                config = render(degraded=True)
+                self.assertNotIn(draw, config)
+                self.assertLess(config.index(reject),
+                                config.index(neighbor_route))
+
+                weighted.provisioning_status = constants.ACTIVE
+                closed.provisioning_status = constants.ACTIVE
+                closed.tls_enabled = True
+                config = render()
+                self.assertNotIn(
+                    f'use_backend {closed.id}:{current.id} if exact', config)
+                self.assertIn(
+                    reject + ' { var(sess.octavia_sni_weighted_draw)'
+                    ' -m int 257:384 }', config)
+                closed.tls_enabled = False
+
     def test_render_template_l7policies(self):
         fe = ("frontend sample_listener_id_1\n"
               "    maxconn {maxconn}\n"

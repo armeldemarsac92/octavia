@@ -500,26 +500,38 @@ backend {{ pool.id }}:{{ listener.id }}
 {% endmacro %}
 
 
-{% macro tcp_sni_policies_macro(constants, listener, policies) %}
+{% macro tcp_sni_draw_macro(constants, policies, raw_tls=False, mixed_mode=False) %}
+    {% set hello = ' { req.ssl_hello_type 1 }' if raw_tls else '' %}
+    {% for policy in policies %}
+        {% if policy.tcp_weighted_targets and (not mixed_mode or policy.tcp_tls_passthrough) %}
+    tcp-request content set-var(sess.octavia_sni_weighted_draw) rand({{ policy.total_weight }}) if{{ hello }}{{ l7rule_list_macro(constants, policy) }}
+        {% endif %}
+    tcp-request content accept if{{ hello }}{{ l7rule_list_macro(constants, policy) }}
+    {% endfor %}
+    {% if raw_tls %}
+    tcp-request content accept if{{ hello }}
+    {% endif %}
+{% endmacro %}
+
+
+{% macro tcp_sni_weighted_backends_macro(constants, listener, policy) %}
     {% set closed = constants.HAPROXY_TLS_SNI_WEIGHTED_CLOSED_PREFIX ~ listener.id %}
+    {% for target in policy.tcp_weighted_targets %}
+        {% set backend = target.pool_id ~ ':' ~ listener.id if target.pool_id is defined else closed %}
+    use_backend {{ backend }} if{{ l7rule_list_macro(constants, policy) }} { var(sess.octavia_sni_weighted_draw) -m int {{ target.first }}:{{ target.last }} }
+    {% endfor %}
+    use_backend {{ closed }} if{{ l7rule_list_macro(constants, policy) }}
+{% endmacro %}
+
+
+{% macro tcp_sni_policies_macro(constants, listener, policies) %}
     {% for policy in policies %}
         {{- l7policy_rules_macro(constants, policy, listener) -}}
     {% endfor %}
-    {% if listener.tcp_tls_termination %}
-        {% for policy in policies %}
-            {% if policy.tcp_weighted_targets %}
-    tcp-request content set-var(sess.octavia_sni_weighted_draw) rand({{ policy.total_weight }}) if{{ l7rule_list_macro(constants, policy) }}
-            {% endif %}
-    tcp-request content accept if{{ l7rule_list_macro(constants, policy) }}
-        {% endfor %}
-    {% endif %}
+    {{- tcp_sni_draw_macro(constants, policies, raw_tls=not listener.tcp_tls_termination) -}}
     {% for policy in policies %}
         {% if policy.tcp_weighted_targets is defined %}
-            {% for target in policy.tcp_weighted_targets %}
-                {% set backend = target.pool_id ~ ':' ~ listener.id if target.pool_id is defined else closed %}
-    use_backend {{ backend }} if{{ l7rule_list_macro(constants, policy) }} { var(sess.octavia_sni_weighted_draw) -m int {{ target.first }}:{{ target.last }} }
-            {% endfor %}
-    use_backend {{ closed }} if{{ l7rule_list_macro(constants, policy) }}
+            {{- tcp_sni_weighted_backends_macro(constants, listener, policy) -}}
         {% else %}
             {{- l7policy_macro(constants, policy, listener) -}}
         {% endif %}
@@ -557,9 +569,13 @@ frontend {{ listener.id }}
     {% if listener.request_mirror_pools is defined %}
     filter octavia-mirror /run/octavia/mirror
     {% endif %}
+    {% set policies = listener.l7policies|selectattr('enabled')|selectattr('l7rules')|list %}
+    {% set tcp_weighted = policies|selectattr('tcp_weighted_targets', 'defined')|list %}
     {% if listener.inspect_tls_sni is defined %}
     tcp-request inspect-delay {{ listener.timeout_tcp_inspect }}
+        {% if not tcp_weighted %}
     tcp-request content accept if { req.ssl_hello_type 1 }
+        {% endif %}
     {% endif %}
     {% if listener.https_sections is defined %}
         {{- https_listener_isolation_macro(listener.https_sections) -}}
@@ -567,7 +583,6 @@ frontend {{ listener.id }}
     {% if listener.request_filter_sections is defined %}
         {{- listener_request_filters_macro(constants, listener) -}}
     {% endif %}
-    {% set policies = listener.l7policies|selectattr('enabled')|selectattr('l7rules')|list %}
     {% set structured = policies|selectattr('action', 'equalto', constants.L7POLICY_ACTION_REDIRECT_REQUEST)|list %}
     {% set select_policy = listener.weighted_response_codes is defined or
                            listener.request_header_operations_by_pool is defined or
@@ -599,7 +614,7 @@ frontend {{ listener.id }}
             {{- stock_redirect_macro(constants, l7policy, unless_ordered=True) -}}
         {% endfor %}
     {% endif %}
-    {% if policies|selectattr('tcp_weighted_targets', 'defined')|list %}
+    {% if tcp_weighted %}
         {{- tcp_sni_policies_macro(constants, listener, policies) -}}
     {% else %}
         {% for l7policy in policies %}
@@ -658,19 +673,29 @@ frontend {{ listener.id }}
         {% if listener.mixed_tls_termination %}
     tcp-request content set-var(sess.octavia_mixed_sni) req.ssl_sni,lower if octavia_mixed_hello
         {% endif %}
-    tcp-request content accept if octavia_mixed_hello
         {% for policy in listener.l7policies %}
             {{- l7policy_rules_macro(constants, policy, listener, raw_tls=True) -}}
-            {% if policy.tcp_weighted_targets is defined and not policy.tcp_weighted_targets %}
-                {% set target = constants.HAPROXY_TLS_SNI_WEIGHTED_CLOSED_PREFIX ~ listener.id %}
-            {% elif not policy.tcp_tls_passthrough %}
-                {% set target = dispatch %}
-            {% elif policy.redirect_pool.tls_enabled or policy.redirect_pool.backend_tls_hostname is defined %}
-                {% set target = reject %}
+        {% endfor %}
+        {% if listener.l7policies|selectattr('tcp_tls_passthrough')|selectattr('tcp_weighted_targets', 'defined')|list %}
+            {{- tcp_sni_draw_macro(constants, listener.l7policies, raw_tls=True, mixed_mode=True) -}}
+        {% else %}
+    tcp-request content accept if octavia_mixed_hello
+        {% endif %}
+        {% for policy in listener.l7policies %}
+            {% if policy.tcp_weighted_targets is defined and policy.tcp_tls_passthrough %}
+                {{- tcp_sni_weighted_backends_macro(constants, listener, policy) -}}
             {% else %}
-                {% set target = policy.redirect_pool.id ~ ':' ~ listener.id %}
-            {% endif %}
+                {% if policy.tcp_weighted_targets is defined and not policy.tcp_weighted_targets %}
+                    {% set target = constants.HAPROXY_TLS_SNI_WEIGHTED_CLOSED_PREFIX ~ listener.id %}
+                {% elif not policy.tcp_tls_passthrough %}
+                    {% set target = dispatch %}
+                {% elif policy.redirect_pool.tls_enabled or policy.redirect_pool.backend_tls_hostname is defined %}
+                    {% set target = reject %}
+                {% else %}
+                    {% set target = policy.redirect_pool.id ~ ':' ~ listener.id %}
+                {% endif %}
     use_backend {{ target }} if{{ l7rule_list_macro(constants, policy) }}
+            {% endif %}
         {% endfor %}
     {% else %}
     tcp-request content reject
