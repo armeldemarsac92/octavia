@@ -516,6 +516,13 @@ def validate_tcp_tls_backend_monitor(monitor_type):
             'a health monitor that can verify its TLS identity.'))
 
 
+def is_long_http_hostname_regex(rule_type, compare_type, value):
+    return (rule_type == constants.L7RULE_TYPE_HOST_NAME and
+            compare_type == constants.L7RULE_COMPARE_TYPE_REGEX and
+            value is not None and
+            len(value) > constants.MAX_LEGACY_L7RULE_VALUE_LENGTH)
+
+
 # Note that we can evaluate this outside the context of any L7 Policy because
 # L7 rules must be internally consistent.
 def l7rule_data(l7rule, *, validate_request_value=False):
@@ -544,9 +551,11 @@ def l7rule_data(l7rule, *, validate_request_value=False):
     if l7rule.key and len(l7rule.key) > constants.MAX_L7RULE_KEY_LENGTH:
         raise exceptions.InvalidL7Rule(msg=_(
             'L7 rule keys are limited to 255 characters.'))
+    long_http_hostname = is_long_http_hostname_regex(
+        l7rule.type, l7rule.compare_type, l7rule.value)
     # Preserve the original WSME pattern, which allows one final LF. Apply
-    # it to request values so previously stored rules can still be edited.
-    if (validate_request_value and
+    # it to request values and to long hostname regexes on every write path.
+    if ((validate_request_value or long_http_hostname) and
             ('\r' in l7rule.value or '\n' in l7rule.value.removesuffix('\n'))):
         raise exceptions.InvalidL7Rule(msg=_(
             'Line breaks are unsupported in values for this L7 rule type.'))
@@ -565,7 +574,11 @@ def l7rule_data(l7rule, *, validate_request_value=False):
                 'without surrounding whitespace.'))
         return True
 
-    if len(l7rule.value) > constants.MAX_LEGACY_L7RULE_VALUE_LENGTH:
+    if long_http_hostname:
+        if len(l7rule.value) > constants.MAX_L7RULE_HTTP_HOSTNAME_REGEX_LENGTH:
+            raise exceptions.InvalidL7Rule(msg=_(
+                'HTTP hostname regex values are limited to 512 characters.'))
+    elif len(l7rule.value) > constants.MAX_LEGACY_L7RULE_VALUE_LENGTH:
         raise exceptions.InvalidL7Rule(msg=_(
             'L7 rule values are limited to 255 characters for this type.'))
 

@@ -482,6 +482,8 @@ class L7PolicyActivationController(base.BaseController):
             if rule.enabled:
                 driver_utils.validate_l7rule_context(
                     driver, rule.type, protocol,
+                    compare_type=rule.compare_type, value=rule.value,
+                    reactivating=True,
                     tcp_tls_termination=listener.tcp_tls_termination)
                 if protocol == constants.PROTOCOL_TCP:
                     driver_utils.require_tls_sni_rule_comparison(
@@ -878,6 +880,7 @@ class L7PolicyController(base.BaseController):
             for rule in rules:
                 driver_utils.validate_l7rule_context(
                     driver, rule['type'], listener.protocol,
+                    compare_type=rule['compare_type'], value=rule['value'],
                     tcp_tls_termination=listener.tcp_tls_termination)
                 if weighted_tls_sni:
                     driver_utils.require_tls_sni_rule_comparison(

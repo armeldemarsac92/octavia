@@ -85,6 +85,13 @@ def require_listener_render_lock(locks, lb_id):
         raise exceptions.ImmutableObject(resource='Load Balancer', id=lb_id)
 
 
+def http_long_hostname_available(driver):
+    providers = CONF.api_settings.enabled_http_long_hostname_providers
+    return (driver.name in providers and
+            getattr(type(driver), 'supports_http_long_hostname', False)
+            is True)
+
+
 def gateway_capabilities(driver):
     api_settings = CONF.api_settings
     capabilities = []
@@ -292,6 +299,8 @@ def gateway_capabilities(driver):
     if (driver.name in api_settings.enabled_udp_packet_drop_providers and
             driver_factory.supports_udp_packet_drop(driver)):
         capabilities.append(constants.GATEWAY_CAPABILITY_UDP_PACKET_DROP)
+    if http_long_hostname_available(driver):
+        capabilities.append(constants.GATEWAY_CAPABILITY_HTTP_LONG_HOSTNAME)
     if (driver.name in api_settings.enabled_http_header_exact_providers and
             getattr(driver, 'supports_http_header_exact', False) is True):
         capabilities.append(constants.GATEWAY_CAPABILITY_HTTP_HEADER_EXACT)
@@ -1107,6 +1116,13 @@ def _unsupported_http_l7rule(driver, rule_type):
                                                      user_msg=message)
 
 
+def _unsupported_http_long_hostname(driver):
+    return exceptions.ProviderUnsupportedOptionError(
+        prov=driver.name, user_msg=_(
+            'Long HTTP hostname regex values are unavailable for this '
+            'provider.'))
+
+
 def require_active_http_l7rule_capabilities(driver, policy_repo, session,
                                             **parent_filters):
     capabilities = gateway_capabilities(driver)
@@ -1114,6 +1130,13 @@ def require_active_http_l7rule_capabilities(driver, policy_repo, session,
         if (capability not in capabilities and policy_repo.has_enabled_l7rule(
                 session, rule_type, **parent_filters)):
             raise _unsupported_http_l7rule(driver, rule_type)
+    if (constants.GATEWAY_CAPABILITY_HTTP_LONG_HOSTNAME not in capabilities and
+            policy_repo.has_enabled_l7rule(
+                session, constants.L7RULE_TYPE_HOST_NAME,
+                compare_type=constants.L7RULE_COMPARE_TYPE_REGEX,
+                min_value_length=constants.MAX_LEGACY_L7RULE_VALUE_LENGTH + 1,
+                **parent_filters)):
+        raise _unsupported_http_long_hostname(driver)
 
 
 def require_http_l7rule_capability(driver, rule_type):
@@ -1123,14 +1146,24 @@ def require_http_l7rule_capability(driver, rule_type):
 
 
 def validate_l7rule_context(driver, rule_type, protocol, *,
-                            admit_http_l7rule=True, tcp_tls_termination=False):
-    if rule_type in HTTP_L7RULE_CAPABILITIES:
+                            compare_type=None, value=None,
+                            admit_http_l7rule=True, reactivating=False,
+                            tcp_tls_termination=False):
+    long_http_hostname = validate.is_long_http_hostname_regex(
+        rule_type, compare_type, value)
+    if long_http_hostname or rule_type in HTTP_L7RULE_CAPABILITIES:
         if protocol not in (constants.PROTOCOL_HTTP,
                             constants.PROTOCOL_TERMINATED_HTTPS):
             raise exceptions.L7RuleValidation(error=_(
                 '%(rule_type)s requires an HTTP or TERMINATED_HTTPS '
                 'listener.') % {'rule_type': rule_type})
         if admit_http_l7rule:
+            if long_http_hostname and not http_long_hostname_available(driver):
+                if reactivating:
+                    raise _unsupported_http_long_hostname(driver)
+                raise exceptions.L7RuleValidation(error=_(
+                    'L7 rule values are limited to 255 characters for this '
+                    'type.'))
             require_http_l7rule_capability(driver, rule_type)
     elif rule_type == constants.L7RULE_TYPE_TLS_SNI:
         if protocol != constants.PROTOCOL_TCP:

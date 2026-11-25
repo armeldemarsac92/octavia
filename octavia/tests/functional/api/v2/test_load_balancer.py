@@ -23,6 +23,7 @@ from oslo_config import fixture as oslo_fixture
 from oslo_utils import uuidutils
 from sqlalchemy.orm import exc as sa_exception
 
+from octavia.api.drivers.amphora_driver.v2 import driver as amphora_driver
 from octavia.common import constants
 import octavia.common.context
 from octavia.common import data_models
@@ -2822,6 +2823,45 @@ class TestLoadBalancerGraph(base.BaseAPITest):
 
     def _build_body(self, json):
         return {self.root_tag: json}
+
+    @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.'
+                'AmphoraProviderDriver.loadbalancer_create', autospec=True)
+    @mock.patch.object(
+        amphora_driver.AmphoraProviderDriver, 'create_vip_port', autospec=True,
+        side_effect=amphora_driver.AmphoraProviderDriver.create_vip_port)
+    def test_graph_create_with_long_http_hostname(self, create_vip_port,
+                                                  driver_create):
+        rule = {'type': 'HOST_NAME', 'compare_type': 'REGEX',
+                'value': r'\.'.join(['a'] * 127)}
+        policy = {'action': 'REJECT', 'rules': [rule]}
+        listener = {'protocol': 'HTTP', 'protocol_port': 80,
+                    'l7policies': [policy]}
+        body = self._build_body({
+            'vip_subnet_id': uuidutils.generate_uuid(),
+            'project_id': self._project_id, 'provider': 'amphora',
+            'listeners': [listener]})
+        self.post(self.LBS_PATH, body, status=400)
+        create_vip_port.assert_not_called()
+        self.conf.config(group='api_settings',
+                         enabled_http_long_hostname_providers=['amphora'])
+        invalid = copy.deepcopy(body)
+        invalid_rule = (invalid[self.root_tag]['listeners'][0]['l7policies']
+                        [0]['rules'][0])
+        invalid_values = (rule['value'] + '\nextra', rule['value'] + '[',
+                          'a' * 513)
+        for value in invalid_values:
+            invalid_rule['value'] = value
+            self.post(self.LBS_PATH, invalid, status=400)
+            create_vip_port.assert_not_called()
+        driver_create.assert_not_called()
+        response = self.post(self.LBS_PATH, body, status=201)
+        created = response.json[self.root_tag]
+        create_vip_port.assert_called_once()
+        driver_create.assert_called_once()
+        saved_listener, = created['listeners']
+        saved_policy, = saved_listener['l7policies']
+        saved, = saved_policy['rules']
+        self.assertEqual(rule['value'], saved['value'])
 
     @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.'
                 'AmphoraProviderDriver.loadbalancer_create', autospec=True)

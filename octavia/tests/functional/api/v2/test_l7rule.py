@@ -758,6 +758,124 @@ class TestL7Rule(base.BaseAPITest):
         self.assertTrue(reopened['admin_state_up'])
 
     @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
+    def test_long_http_hostname_rule_admission_and_lifecycle(self, rpc):
+        option = 'enabled_http_long_hostname_providers'
+        lb = self.create_load_balancer(
+            uuidutils.generate_uuid(), provider='amphora')['loadbalancer']
+        lb_id = lb['id']
+        self.set_lb_status(lb_id)
+        listener = self.create_listener('HTTP', 80, lb_id)['listener']
+        self.set_lb_status(lb_id)
+        policy = self.create_l7policy(listener['id'], 'REJECT')['l7policy']
+        self.set_lb_status(lb_id)
+        policy_id = policy['id']
+        # 127 one-character labels make a legal 253-character DNS name.
+        value = '^' + r'\.'.join(['a'] * 127) + '(:[0-9]+)?$'
+
+        legacy = self.create_l7rule(policy_id, 'HOST_NAME', 'REGEX',
+                                    'a' * 255)['rule']
+        self.set_lb_status(lb_id)
+        legacy_path = self.L7RULE_PATH.format(l7policy_id=policy_id,
+                                              l7rule_id=legacy['id'])
+        rpc.return_value.cast.reset_mock()
+        rejected = self.create_l7rule(
+            policy_id, 'HOST_NAME', 'REGEX', value, status=400)
+        self.assertIn('255 characters', rejected['faultstring'])
+        self.put(legacy_path, {'rule': {'value': value}}, status=400)
+        self.conf.config(group='api_settings', **{option: ['noop_driver']})
+        self.create_l7rule(self.l7policy_id, 'HOST_NAME', 'REGEX', value,
+                           status=400)
+        rpc.return_value.cast.assert_not_called()
+
+        self.conf.config(group='api_settings', **{option: ['amphora']})
+        for rule_type, compare_type, invalid in (
+                ('HOST_NAME', 'EQUAL_TO', 'a' * 256),
+                ('PATH', 'REGEX', '/' + 'a' * 255),
+                ('HOST_NAME', 'REGEX', 'a' * 513)):
+            self.create_l7rule(policy_id, rule_type, compare_type, invalid,
+                               status=400)
+        rule = self.create_l7rule(policy_id, 'HOST_NAME', 'REGEX', value,
+                                  invert=True)['rule']
+        self.set_lb_status(lb_id)
+        path = self.L7RULE_PATH.format(l7policy_id=policy_id,
+                                       l7rule_id=rule['id'])
+        saved = self.get(path).json['rule']
+        self.assertEqual(value, saved['value'])
+        self.assertTrue(saved['invert'])
+        self.put(legacy_path, {'rule': {'value': 'a' * 512}})
+        self.set_lb_status(lb_id)
+        self.assertEqual('a' * 512,
+                         self.get(legacy_path).json['rule']['value'])
+        self.put(legacy_path, {'rule': {'value': 'a' * 513}}, status=400)
+        self.delete(legacy_path)
+        self.set_lb_status(lb_id)
+
+        self.conf.config(group='api_settings', **{option: []})
+        self.put(path, {'rule': {'invert': False}}, status=400)
+        for parent_path, tag in (
+                (self.L7POLICY_PATH.format(l7policy_id=policy_id), 'l7policy'),
+                (self.LISTENER_PATH.format(listener_id=listener['id']),
+                 'listener'),
+                (self.LB_PATH.format(lb_id=lb_id), 'loadbalancer')):
+            with self.subTest(parent=tag):
+                self.put(parent_path, {tag: {'admin_state_up': False}})
+                self.set_lb_status(lb_id)
+                rpc.return_value.cast.reset_mock()
+                self.put(parent_path, {tag: {'admin_state_up': True}},
+                         status=501)
+                rpc.return_value.cast.assert_not_called()
+                self.conf.config(group='api_settings',
+                                 **{option: ['amphora']})
+                self.put(parent_path, {tag: {'admin_state_up': True}})
+                self.set_lb_status(lb_id)
+                self.conf.config(group='api_settings', **{option: []})
+
+        self.put(path, {'rule': {'admin_state_up': False}})
+        self.set_lb_status(lb_id)
+        self.put(path, {'rule': {'admin_state_up': True}}, status=501)
+        retained = self.get(path).json['rule']
+        self.assertEqual(value, retained['value'])
+        self.assertFalse(retained['admin_state_up'])
+        self.delete(path)
+
+    @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
+    @mock.patch('octavia.common.tls_utils.cert_parser.load_certificates_data')
+    def test_long_http_hostname_rule_listener_protocol(self, cert_data, rpc):
+        cert_data.return_value = {
+            'tls_cert': data_models.TLSContainer(certificate='cert')}
+        self.conf.config(group='api_settings',
+                         enabled_http_long_hostname_providers=['amphora'],
+                         enabled_tls_sni_providers=['amphora'])
+        lb = self.create_load_balancer(
+            uuidutils.generate_uuid(), provider='amphora')['loadbalancer']
+        lb_id = lb['id']
+        self.set_lb_status(lb_id)
+        listener = self.create_listener('TCP', 80, lb_id)['listener']
+        self.set_lb_status(lb_id)
+        pool = self.create_pool(lb_id, 'TCP', 'ROUND_ROBIN')['pool']
+        self.set_lb_status(lb_id)
+        policy = self.create_l7policy(listener['id'], 'REDIRECT_TO_POOL',
+                                      redirect_pool_id=pool['id'])['l7policy']
+        self.set_lb_status(lb_id)
+        value = 'a' * 256
+        response = self.create_l7rule(
+            policy['id'], 'HOST_NAME', 'REGEX', value, status=400)
+        self.assertIn('requires an HTTP', response['faultstring'])
+
+        rule = {'type': 'HOST_NAME', 'compare_type': 'REGEX', 'value': value}
+        response = self.create_listener(
+            'HTTP', 81, lb_id, status=400,
+            l7policies=[{'action': 'REJECT', 'rules': [rule]}])
+        self.assertIn('L7 policy endpoint', response['faultstring'])
+        listener = self.create_listener(
+            'TERMINATED_HTTPS', 443, lb_id,
+            default_tls_container_ref=uuidutils.generate_uuid())['listener']
+        self.set_lb_status(lb_id)
+        policy = self.create_l7policy(listener['id'], 'REJECT')['l7policy']
+        self.set_lb_status(lb_id)
+        self.create_l7rule(policy['id'], 'HOST_NAME', 'REGEX', value)
+
+    @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
     def test_query_param_rule_admission_and_lifecycle(self, rpc):
         lb = self.create_load_balancer(
             uuidutils.generate_uuid(), provider='amphora')['loadbalancer']

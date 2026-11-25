@@ -126,12 +126,21 @@ def validate_policy_options_on_create(
         for rule in policy.get('rules') or []:
             driver_utils.validate_l7rule_context(
                 driver, rule['type'], protocol,
+                compare_type=rule['compare_type'], value=rule['value'],
                 tcp_tls_termination=tcp_tls_termination)
-            if tcp_policy:
+            long_http_hostname = validate.is_long_http_hostname_regex(
+                rule['type'], rule['compare_type'], rule['value'])
+            if long_http_hostname and not creating_load_balancer:
+                raise exceptions.ValidationException(detail=_(
+                    'Create policies with long HTTP hostname regexes from '
+                    'the L7 policy endpoint after creating the listener.'))
+            if tcp_policy or long_http_hostname:
                 try:
                     validate.l7rule_data(data_models.L7Rule.from_dict(rule))
-                except exceptions.InvalidL7Rule as e:
+                except (exceptions.InvalidL7Rule,
+                        exceptions.InvalidRegex) as e:
                     raise exceptions.L7RuleValidation(error=e) from e
+            if tcp_policy:
                 driver_utils.require_tls_sni_rule_comparison(
                     driver, rule['compare_type'],
                     tcp_tls_termination and not passthrough)

@@ -263,6 +263,11 @@ api_opts = [
                        'support exact HTTP method L7 rules. Enable '
                        'after upgrading the database, API, workers '
                        'and Amphora fleet.')),
+    cfg.ListOpt('enabled_http_long_hostname_providers', default=[],
+                help=_('Provider driver names whose regional Amphora fleets '
+                       'support HTTP hostname regex values up to 512 '
+                       'characters. Enable after upgrading the API and '
+                       'workers and qualifying the fleet.')),
     cfg.ListOpt('enabled_http_header_exact_providers', default=[],
                 help=_('Provider driver names whose regional fleets '
                        'support full-value exact HTTP header L7 rules. '

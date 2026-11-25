@@ -205,6 +205,7 @@ class L7RuleController(base.BaseController):
             tcp_tls_termination = db_l7policy.listener.tcp_tls_termination
             driver_utils.validate_l7rule_context(
                 driver, l7rule.type, protocol,
+                compare_type=l7rule.compare_type, value=l7rule.value,
                 tcp_tls_termination=tcp_tls_termination)
             tcp_policy = driver_utils.uses_tls_sni_policy_path(
                 driver, protocol, tcp_tls_termination)
@@ -298,6 +299,7 @@ class L7RuleController(base.BaseController):
                 validate_request_value='value' in updates or leaving_query_type)
         except Exception as e:
             raise exceptions.L7RuleValidation(error=e)
+        return new_l7rule
 
     def _require_no_transform_exposed_by_ordered_redirect(
             self, session, driver, policy):
@@ -398,7 +400,7 @@ class L7RuleController(base.BaseController):
             db_l7policy = self._test_lb_listener_policy_statuses(
                 context.session)
             context.session.refresh(db_l7rule, with_for_update=True)
-            self._validate_rule_update(db_l7rule, l7rule_dict)
+            new_l7rule = self._validate_rule_update(db_l7rule, l7rule_dict)
             protocol = db_l7policy.listener.protocol
             tcp_tls_termination = db_l7policy.listener.tcp_tls_termination
 
@@ -411,14 +413,17 @@ class L7RuleController(base.BaseController):
                 field in l7rule_dict and
                 l7rule_dict[field] != getattr(db_l7rule, field)
                 for field in match_fields)
-            rule_type = l7rule_dict.get('type', db_l7rule.type)
+            rule_type = new_l7rule.type
+            reactivating = enabled and not db_l7rule.enabled
             if rule_type != db_l7rule.type:
                 driver_utils.require_http_l7rule_capability(
                     driver, db_l7rule.type)
             driver_utils.validate_l7rule_context(
                 driver, rule_type, protocol,
-                admit_http_l7rule=(match_changed or
-                                   (enabled and not db_l7rule.enabled)),
+                compare_type=new_l7rule.compare_type,
+                value=new_l7rule.value,
+                admit_http_l7rule=match_changed or reactivating,
+                reactivating=reactivating,
                 tcp_tls_termination=tcp_tls_termination)
             tcp_policy = driver_utils.uses_tls_sni_policy_path(
                 driver, protocol, tcp_tls_termination)

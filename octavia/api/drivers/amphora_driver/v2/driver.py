@@ -102,6 +102,7 @@ class AmphoraProviderDriver(driver_base.ProviderDriver):
     supports_tcp_connection_rejection = True
     supports_udp_packet_drop = True
     supports_http_header_exact = True
+    supports_http_long_hostname = True
     supports_http_query_param_exact = True
     supports_grpc_content_type = True
     supports_grpc_binary_request_metadata = True
