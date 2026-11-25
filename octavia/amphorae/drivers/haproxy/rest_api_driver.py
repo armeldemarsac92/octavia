@@ -153,6 +153,8 @@ class HaproxyAmphoraLoadBalancerDriver(
                 loadbalancer, failover=finalizing_failover) as system_options
         ):
             if (opted_in or fallback or withdrawn or
+                    validate.http_header_name_256_listeners(
+                        loadbalancer) or
                     utils.active_http_retry_backoff_policies(loadbalancer) or
                     utils.has_tls_sni_passthrough_weighted_policies(
                         loadbalancer, active=False) or
@@ -165,7 +167,8 @@ class HaproxyAmphoraLoadBalancerDriver(
                     loadbalancer, targets, peers.values(), protected,
                     fallback, withdrawn, timeout_dict=timeout_dict,
                     **({'require_http_retry_backoff': True,
-                        'require_weighted_passthrough_topology': True}
+                        'require_weighted_passthrough_topology': True,
+                        'require_header_name_topology': True}
                        if finalizing_failover else {}),
                     **tracing_options, **persistence_options,
                     **system_options)
@@ -401,8 +404,9 @@ class HaproxyAmphoraLoadBalancerDriver(
                 client_auth_fallback = getattr(
                     listener, 'client_authentication_insecure_fallback',
                     None) is True
+                if listener.id in closed_frontend:
+                    continue
                 if client_auth_fallback and (
-                        listener.id in closed_frontend or
                         listener.provisioning_status in
                         (consts.PENDING_DELETE, consts.DELETED) or
                         not (listener.enabled and loadbalancer.enabled)):
@@ -746,7 +750,9 @@ class HaproxyAmphoraLoadBalancerDriver(
                             if amp.status == consts.AMPHORA_ALLOCATED))
 
     def update(self, loadbalancer, *, l7policy_activation=False,
-               l7policy_restoration=False, tcp_member_batch=False):
+               l7policy_restoration=False, tcp_member_batch=False,
+               http_header_name_withdrawal=False,
+               require_http_header_name_256=False):
         amphorae = [amphora for amphora in loadbalancer.amphorae
                     if amphora.status != consts.DELETED]
         if tcp_member_batch and not any(
@@ -757,6 +763,12 @@ class HaproxyAmphoraLoadBalancerDriver(
             loadbalancer)
         weighted_passthrough = utils.has_tls_sni_passthrough_weighted_policies(
             loadbalancer, active=False)
+        header_name_256 = (
+            require_http_header_name_256 or
+            validate.http_header_name_256_listeners(loadbalancer,
+                                                    include_new_rules=True))
+        if not amphorae and header_name_256:
+            raise driver_except.HttpHeaderName256Unsupported()
         if (not amphorae and
                 (l7policy_activation or tcp_member_batch or backoff_policies or
                  weighted_passthrough)):
@@ -776,11 +788,19 @@ class HaproxyAmphoraLoadBalancerDriver(
             if (amphorae and
                     (opted_in or fallback or withdrawn or
                      backoff_policies or weighted_passthrough or
+                     header_name_256 or
                      self._http_persistence_capabilities(loadbalancer))):
                 return self._update_protected_tls_listeners(
                     loadbalancer, amphorae, amphorae, protected, fallback,
                     withdrawn, l7policy_activation=l7policy_activation,
                     l7policy_restoration=l7policy_restoration,
+                    **({'require_header_name_topology': True,
+                        'require_http_header_name_256':
+                            require_http_header_name_256,
+                        'http_header_name_withdrawal': (
+                            http_header_name_withdrawal or
+                            l7policy_restoration)}
+                       if header_name_256 else {}),
                     **({'require_weighted_passthrough_topology': True}
                        if weighted_passthrough else {}),
                     **tracing_options, **batch_options, **persistence_options,
@@ -870,7 +890,10 @@ class HaproxyAmphoraLoadBalancerDriver(
             loadbalancer))
         weighted_passthrough = utils.has_tls_sni_passthrough_weighted_policies(
             loadbalancer, active=False)
+        header_name_256 = validate.http_header_name_256_listeners(
+            loadbalancer)
         coordinated = (opted_in or bool(fallback or withdrawn) or
+                       header_name_256 or
                        tracing_pair or retry_backoff or weighted_passthrough or
                        self._http_persistence_capabilities(loadbalancer))
         if coordinated and amphora_index == 0:
@@ -883,7 +906,7 @@ class HaproxyAmphoraLoadBalancerDriver(
                 if (amphorae_status.get(amp.id, {}).get(consts.UNREACHABLE) or
                     (amp.id not in amphorae_status and
                      (tracing_pair or retry_backoff or weighted_passthrough or
-                      system_ca)))
+                      system_ca or header_name_256)))
             }
             with (
                 self._otlp_render_results(loadbalancer) as tracing_options,
@@ -898,6 +921,7 @@ class HaproxyAmphoraLoadBalancerDriver(
                     peers, protected, fallback, withdrawn,
                     timeout_dict=timeout_dict,
                     unreachable=unreachable, coordinating_failover=True,
+                    require_header_name_topology=True,
                     **({'require_http_retry_backoff': True}
                        if retry_backoff else {}),
                     **({'require_weighted_passthrough_topology': True}
@@ -1134,11 +1158,33 @@ class HaproxyAmphoraLoadBalancerDriver(
             http_persistence_observed=None,
             require_http_retry_backoff=False,
             require_weighted_passthrough_topology=False,
-            system_ca_observed=None):
+            system_ca_observed=None, require_header_name_topology=False,
+            http_header_name_withdrawal=False,
+            require_http_header_name_256=False):
         # Preflight the pair before staging material or reloading either peer.
+        header_name_256 = validate.http_header_name_256_listeners(
+            loadbalancer, include_new_rules=require_header_name_topology and
+            not coordinating_failover)
+        header_name_required = require_http_header_name_256 or header_name_256
         probe_targets = {
             amp.id: amp for amp in (peers if protected or fallback
                                     else amphorae)}
+        header_name_peers = ()
+        header_topology_missing = False
+        if header_name_required:
+            # A replacement may be provisioned before the full peer set is
+            # available. Coordinated publication still checks the whole set.
+            header_name_peers = peers if coordinating_failover else amphorae
+            if require_header_name_topology:
+                try:
+                    self._allocated_amphorae(loadbalancer)
+                except driver_except.ListenerProvisioningError as error:
+                    header_topology_missing = True
+                    if not http_header_name_withdrawal:
+                        unsupported = (
+                            driver_except.HttpHeaderName256Unsupported())
+                        raise unsupported from error
+            probe_targets.update((amp.id, amp) for amp in header_name_peers)
         persistence_capabilities = (
             self._http_persistence_capabilities(loadbalancer))
         header_capability = consts.GATEWAY_CAPABILITY_HTTP_HEADER_PERSISTENCE
@@ -1192,6 +1238,27 @@ class HaproxyAmphoraLoadBalancerDriver(
                     requests.RequestException, ValueError):
                 probe_failures.add(amphora.id)
                 details[amphora.id] = {}
+
+        header_name_closed = set()
+        if header_name_required:
+            capability = consts.GATEWAY_CAPABILITY_HTTP_HEADER_NAME_256
+            unsupported = {amp.id for amp in header_name_peers
+                           if details[amp.id].get(capability) is not True}
+            if unsupported or header_topology_missing or not amphorae:
+                LOG.warning(
+                    'Cannot confirm 256-byte HTTP header name support for '
+                    'load balancer %s. Unqualified Amphorae: %s.',
+                    loadbalancer.id, sorted(unsupported))
+                error = driver_except.HttpHeaderName256Unsupported()
+                if (require_http_header_name_256 or
+                        not http_header_name_withdrawal or not amphorae):
+                    if coordinating_failover and unsupported:
+                        raise driver_except.CoordinatedListenerUpdateError(
+                            dict.fromkeys(unsupported, error))
+                    raise error
+                # Keep the same policy scope on every reachable peer. Removing
+                # only the unavailable predicate could match more traffic.
+                header_name_closed = header_name_256
 
         read_http_header_key = None
         closing_header = False
@@ -1368,7 +1435,7 @@ class HaproxyAmphoraLoadBalancerDriver(
                 amp_details=details[amphora.id],
                 backend_tls_certs=certs[amphora.id],
                 frontend_tls_certs=frontend_certs[amphora.id],
-                closed_frontend=closed_frontend,
+                closed_frontend=closed_frontend | header_name_closed,
                 l7policy_activation=l7policy_activation,
                 **({'verify_publication': True} if verify_publication
                    else {}),
@@ -1604,6 +1671,16 @@ class HaproxyAmphoraLoadBalancerDriver(
                         amp, loadbalancer.id, *args)
 
     def reload(self, loadbalancer, amphora=None, timeout_dict=None):
+        if validate.http_header_name_256_listeners(loadbalancer):
+            peers = self._allocated_amphorae(loadbalancer)
+            capability = consts.GATEWAY_CAPABILITY_HTTP_HEADER_NAME_256
+            for peer in peers:
+                self._populate_amphora_api_version(peer, timeout_dict)
+                detail = self.clients[peer.api_version].get_details(
+                    peer, timeout_dict=timeout_dict)
+                if not isinstance(detail, dict) or detail.get(
+                        capability) is not True:
+                    raise driver_except.ListenerProvisioningError()
         self._apply('reload_listener', loadbalancer, amphora, timeout_dict)
 
     def start(self, loadbalancer, amphora=None, timeout_dict=None):
@@ -1622,12 +1699,26 @@ class HaproxyAmphoraLoadBalancerDriver(
                         amp, listener.id)
             return
 
-        # In case the listener is not UDP or SCTP, things get more complicated.
+        # A combined configuration must withdraw the same frontends on
+        # every reachable peer if an extended match cannot be rendered.
+        extended = validate.http_header_name_256_listeners(loadbalancer)
+        cleanup_errors = []
         for amp in loadbalancer.amphorae:
-            if amp.status != consts.DELETED:
+            if amp.status == consts.DELETED:
+                continue
+            if not extended:
                 self._combined_config_delete(amp, listener)
+                continue
+            try:
+                self._combined_config_delete(amp, listener, render=False)
+            except Exception as error:
+                cleanup_errors.append(error)
+        if extended:
+            self.update(loadbalancer, http_header_name_withdrawal=True)
+        if cleanup_errors:
+            raise cleanup_errors[0]
 
-    def _combined_config_delete(self, amphora, listener):
+    def _combined_config_delete(self, amphora, listener, *, render=True):
         # Remove the listener from the listener list on the LB before
         # passing the whole thing over to update (so it'll actually delete)
         # In case of amphorae in ACTIVE_STANDBY topology, ensure that we don't
@@ -1650,6 +1741,9 @@ class HaproxyAmphoraLoadBalancerDriver(
             self.clients[amphora.api_version].delete_cert_pem(
                 amphora, listener.load_balancer.id,
                 f'{cert_id}.pem')
+
+        if not render:
+            return
 
         # See how many non-UDP/SCTP listeners we have left
         non_lvs_listener_count = len([

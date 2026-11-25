@@ -141,7 +141,9 @@ class ListenerFlows:
         update_listener_flow.add(lifecycle_tasks.ListenerToErrorOnRevertTask(
             requires=constants.LISTENER))
         update_listener_flow.add(amphora_driver_tasks.ListenersUpdate(
-            requires=constants.LOADBALANCER_ID))
+            requires=(constants.LOADBALANCER_ID, 'original', 'updates'),
+            rebind={'original': constants.LISTENER,
+                    'updates': constants.UPDATE_DICT}))
         update_listener_flow.add(network_tasks.UpdateVIP(
             requires=constants.LISTENERS))
 

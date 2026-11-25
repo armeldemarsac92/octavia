@@ -2123,6 +2123,42 @@ class TestHaproxyCfg(base.TestCase):
             ' if !literal-path',
         ], lines)
 
+    def test_256_byte_header_config_and_restrictive_withdrawal(self):
+        amp = sample_configs_combined.sample_amphora_tuple()
+        listener = sample_configs_combined.sample_listener_tuple(l7=True)
+        policy = listener.l7policies[0]
+        key = 'X-' + 'a' * 254
+        compare_type = constants.L7RULE_COMPARE_TYPE_EQUAL_TO
+        header_type = constants.L7RULE_TYPE_HTTP_HEADER_EXACT
+        rule = policy.l7rules[0]._replace(
+            id='extended-header', type=header_type, compare_type=compare_type,
+            key=key, value='one, café', invert=True)
+        short_rule = rule._replace(id='short-header', key='X-Version')
+        ordinary = listener.l7policies[1]._replace(l7rules=[short_rule])
+        extended = policy._replace(l7rules=[rule])
+
+        def render(candidate, details=None):
+            frontend = listener._replace(l7policies=[candidate, ordinary])
+            return self.jinja_cfg.build_config(
+                amp, [frontend], None, haproxy_versions=['3', '0', '19'],
+                amp_details=details)
+
+        capability = constants.GATEWAY_CAPABILITY_HTTP_HEADER_NAME_256
+        directive = constants.HAPROXY_HTTP_HEADER_NAME_256_OPTION
+        config = render(extended, {capability: True})
+        self.assertEqual(1, config.splitlines().count(f'    {directive}'))
+        self.assertIn(
+            rf'acl extended-header req.fhdr(\"{key}\") -m bin '
+            '6f6e652c20636166c3a9', config)
+        self.assertIn('if !extended-header', config)
+
+        with self.assertRaises(driver_except.ListenerProvisioningError):
+            render(extended)
+        config = render(extended._replace(enabled=False))
+        self.assertNotIn(directive, config)
+        self.assertNotIn('acl extended-header', config)
+        self.assertIn('acl short-header', config)
+
     def test_haproxy_version_check_ignores_unrendered_fixed_responses(self):
         amp = sample_configs_combined.sample_amphora_tuple()
         listener = sample_configs_combined.sample_listener_tuple(l7=True)

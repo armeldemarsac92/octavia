@@ -178,6 +178,46 @@ class HAProxyCompatTestCase(base.TestCase):
                     if suffix else [], calls)
 
     @mock.patch.object(haproxy_compatibility.subprocess, 'check_output')
+    @mock.patch.object(haproxy_compatibility.os.path, 'isfile',
+                       return_value=True)
+    @mock.patch.object(haproxy_compatibility, '_valid_haproxy_config')
+    def test_256_byte_header_probe_preserves_native_capabilities(
+            self, valid_config, isfile, check_output):
+        compat = haproxy_compatibility
+        native = (
+            'HAProxy version 3.0.19-ade9c1262-octavia-strict-dns-v1'
+            '-h2-alpn-v1-backend-sans-v1-http-policy-v1-http-mirror-v1'
+            '-listener-auth-v1-backend-retry-budget-v1')
+        suffix = '-http-header-name-256-v1'
+        release = ' 2026/03/19\nFeature list : +LUA +OPENSSL'
+        release += '\n    [OCTAVIA] octavia-auth'
+        header_cap = constants.GATEWAY_CAPABILITY_HTTP_HEADER_NAME_256
+        grpc_mirror = constants.GATEWAY_CAPABILITY_GRPC_REQUEST_MIRROR
+        tracing = constants.GATEWAY_CAPABILITY_LISTENER_OTLP_TRACING
+        for otlp in ('', '-listener-otlp-v1'):
+            build = f'{native}{otlp}-route-retry-backoff-v1-grpc-mirror-v1'
+            check_output.return_value = build + release
+            valid_config.return_value = True
+            legacy = compat.get_haproxy_capabilities()
+            self.assertNotIn(header_cap, legacy)
+            self.assertTrue(legacy[grpc_mirror])
+            self.assertEqual(bool(otlp), legacy.get(tracing, False))
+
+            check_output.return_value = build + suffix + release
+            self.assertEqual({**legacy, header_cap: True},
+                             compat.get_haproxy_capabilities())
+            valid_config.assert_any_call(
+                compat.CONF.haproxy_amphora.haproxy_cmd,
+                compat._HTTP_HEADER_NAME_256_PROBE)
+            valid_config.side_effect = (
+                lambda cmd, cfg: cfg != compat._HTTP_HEADER_NAME_256_PROBE)
+            self.assertEqual(legacy, compat.get_haproxy_capabilities())
+            valid_config.side_effect = None
+
+            check_output.return_value = build + suffix + '-extra' + release
+            self.assertNotIn(header_cap, compat.get_haproxy_capabilities())
+
+    @mock.patch.object(haproxy_compatibility.subprocess, 'check_output')
     @mock.patch.object(haproxy_compatibility, '_supports_grpc_external_auth')
     @mock.patch.object(haproxy_compatibility.subprocess, 'run')
     @mock.patch.object(haproxy_compatibility, '_valid_haproxy_config')

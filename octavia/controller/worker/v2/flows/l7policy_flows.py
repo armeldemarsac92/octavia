@@ -94,7 +94,9 @@ class L7PolicyFlows:
         update_l7policy_flow.add(database_tasks.MarkL7PolicyPendingUpdateInDB(
             requires=constants.L7POLICY))
         update_l7policy_flow.add(amphora_driver_tasks.ListenersUpdate(
-            requires=constants.LOADBALANCER_ID))
+            requires=(constants.LOADBALANCER_ID, 'original', 'updates'),
+            rebind={'original': constants.L7POLICY,
+                    'updates': constants.UPDATE_DICT}))
         update_l7policy_flow.add(database_tasks.UpdateL7PolicyInDB(
             requires=[constants.L7POLICY, constants.UPDATE_DICT]))
         update_l7policy_flow.add(database_tasks.MarkL7PolicyActiveInDB(

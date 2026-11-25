@@ -54,6 +54,79 @@ class TestHAProxyAmphoraDriver(base.TestCase):
         super().setUp()
         self.driver = rest_api_driver.HaproxyAmphoraLoadBalancerDriver()
 
+    def test_256_byte_header_preflights_both_peers_before_publication(self):
+        listener = sample_configs_combined.sample_listener_tuple(
+            l7=True, topology=constants.TOPOLOGY_ACTIVE_STANDBY)
+        policy = listener.l7policies[0]
+        rule = policy.l7rules[0]._replace(
+            type=constants.L7RULE_TYPE_HTTP_HEADER_EXACT,
+            compare_type=constants.L7RULE_COMPARE_TYPE_EQUAL_TO,
+            key='X-' + 'a' * 254, value='yes')
+        listener = listener._replace(
+            l7policies=[policy._replace(l7rules=[rule])])
+        ordinary = listener._replace(id='ordinary', protocol_port=81,
+                                     l7policies=[])
+        closed = ordinary._replace(id='closed', protocol_port=82,
+                                   enabled=False)
+        amphorae = [
+            amp._replace(status=constants.AMPHORA_ALLOCATED, role=role)
+            for amp, role in zip(listener.load_balancer.amphorae,
+                                 (constants.ROLE_MASTER,
+                                  constants.ROLE_BACKUP))]
+        loadbalancer = listener.load_balancer._replace(
+            amphorae=amphorae, listeners=[listener, ordinary, closed])
+        companion = loadbalancer._replace(amphorae=amphorae[:1])
+        client = self.driver.clients['1.0'] = mock.Mock()
+        client.get_info.return_value = {'haproxy_version': '3.0.19'}
+        feature = constants.GATEWAY_CAPABILITY_HTTP_HEADER_NAME_256
+        details = {amphorae[0].id: {feature: True},
+                   amphorae[1].id: {}}
+        client.get_details.side_effect = (
+            lambda amp, **_kwargs: details[amp.id])
+        with (mock.patch.object(self.driver, '_process_listener_tls_certs',
+                                return_value={}),
+              mock.patch.object(self.driver, '_process_listener_pool_certs',
+                                return_value={})):
+            with self.assertRaises(driver_except.ListenerProvisioningError):
+                self.driver.update(companion)
+            self.driver.update_amphora_listeners(companion, amphorae[0])
+            client.upload_config.assert_called_once()
+            client.reset_mock()
+
+            with self.assertRaises(driver_except.ListenerProvisioningError):
+                self.driver.update(loadbalancer)
+            client.upload_config.assert_not_called()
+            self.assertEqual(2, client.get_details.call_count)
+
+            statuses = {amp.id: {constants.UNREACHABLE: False}
+                        for amp in amphorae}
+            with self.assertRaises(
+                    driver_except.CoordinatedListenerUpdateError):
+                self.driver.update_failover_listeners(
+                    loadbalancer, 0, statuses)
+            with self.assertRaises(driver_except.ListenerProvisioningError):
+                self.driver.reload(loadbalancer, amphorae[0])
+            client.upload_config.assert_not_called()
+            client.reload_listener.assert_not_called()
+
+            self.driver.update(loadbalancer, http_header_name_withdrawal=True)
+            self.assertEqual(2, client.reload_listener.call_count)
+            for call in client.upload_config.call_args_list:
+                config = call.args[2]
+                self.assertIn('frontend ordinary', config)
+                self.assertNotIn('frontend closed', config)
+                self.assertNotIn(f'frontend {listener.id}', config)
+                self.assertNotIn(constants.HAPROXY_HTTP_HEADER_NAME_256_OPTION,
+                                 config)
+
+            client.reset_mock()
+            details[amphorae[1].id][feature] = True
+            self.driver.update(loadbalancer)
+            self.assertEqual(2, client.reload_listener.call_count)
+            for call in client.upload_config.call_args_list:
+                self.assertIn(constants.HAPROXY_HTTP_HEADER_NAME_256_OPTION,
+                              call.args[2])
+
     def test_http_retry_backoff_failover_and_independent_withdrawal(self):
         listener = sample_configs_combined.sample_listener_tuple(
             l7=True, topology=constants.TOPOLOGY_ACTIVE_STANDBY)

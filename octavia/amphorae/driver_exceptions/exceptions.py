@@ -101,6 +101,12 @@ class ListenerProvisioningError(ProvisioningErrors):
     message = _('couldn\'t provision Listener')
 
 
+class HttpHeaderName256Unsupported(ListenerProvisioningError):
+
+    message = _('Could not qualify 256-byte HTTP header names on the '
+                'required Amphorae.')
+
+
 class CoordinatedListenerUpdateError(ListenerProvisioningError):
 
     message = _('Listener update failed on one or more failover amphorae.')

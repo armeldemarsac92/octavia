@@ -203,7 +203,8 @@ class L7RuleController(base.BaseController):
             tcp_tls_termination = db_l7policy.listener.tcp_tls_termination
             driver_utils.validate_l7rule_context(
                 driver, l7rule.type, protocol,
-                compare_type=l7rule.compare_type, value=l7rule.value,
+                compare_type=l7rule.compare_type, key=l7rule.key,
+                value=l7rule.value,
                 tcp_tls_termination=tcp_tls_termination)
             tcp_policy = driver_utils.uses_tls_sni_policy_path(
                 driver, protocol, tcp_tls_termination)
@@ -326,6 +327,9 @@ class L7RuleController(base.BaseController):
         if rules.has_other_enabled_rules(session, rule):
             listener = self.repositories.listener.get_for_update(
                 session, policy.listener_id, show_deleted=False)
+            if listener.enabled and listener.load_balancer.enabled:
+                driver_utils.require_active_http_header_name_256(
+                    driver, policy_repo, session, policy_id=policy.id)
             if (listener.enabled and listener.protocol ==
                     constants.PROTOCOL_TCP and policy.action ==
                     constants.L7POLICY_ACTION_WEIGHTED_TARGETS):
@@ -416,6 +420,13 @@ class L7RuleController(base.BaseController):
                 field in l7rule_dict and
                 l7rule_dict[field] != getattr(db_l7rule, field)
                 for field in match_fields)
+            listener = db_l7policy.listener
+            if (enabled and match_changed and db_l7rule.enabled and
+                    db_l7policy.enabled and listener.enabled and
+                    listener.load_balancer.enabled and
+                    validate.is_http_header_name_256(
+                        db_l7rule.type, db_l7rule.key)):
+                driver_utils.require_http_header_name_256(driver)
             rule_type = new_l7rule.type
             reactivating = enabled and not db_l7rule.enabled
             if rule_type != db_l7rule.type:
@@ -423,7 +434,7 @@ class L7RuleController(base.BaseController):
                     driver, db_l7rule.type)
             driver_utils.validate_l7rule_context(
                 driver, rule_type, protocol,
-                compare_type=new_l7rule.compare_type,
+                compare_type=new_l7rule.compare_type, key=new_l7rule.key,
                 value=new_l7rule.value,
                 admit_http_l7rule=match_changed or reactivating,
                 reactivating=reactivating,

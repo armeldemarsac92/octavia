@@ -167,8 +167,12 @@ field name of up to 255 ASCII characters, compared case-insensitively. The
 value is a nonempty literal of up to 4096 characters, compared
 case-sensitively against a full field occurrence. Internal whitespace and
 commas are preserved.
-An otherwise valid request for this rule type returns HTTP 501 when the
-capability is unavailable.
+The additional capability ``http_header_name_256_v1`` extends this rule
+to exactly 256 ASCII bytes for the field name with the same comparison.
+This limit applies to the standard L7 rule endpoint, initial policy
+rules and load balancer creation graphs. An otherwise valid request
+that creates, changes or reactivates a match returns HTTP 501 when
+its capability is unavailable. Existing rules stay readable.
 
 .. code-block:: json
 

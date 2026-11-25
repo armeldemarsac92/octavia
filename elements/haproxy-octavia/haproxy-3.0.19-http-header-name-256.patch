@@ -1,0 +1,236 @@
+diff --git a/include/haproxy/global-t.h b/include/haproxy/global-t.h
+index 6e66a1d..5047f19 100644
+--- a/include/haproxy/global-t.h
++++ b/include/haproxy/global-t.h
+@@ -86,4 +86,5 @@
+ #define GTUNE_LISTENER_MQ_ANY    (GTUNE_LISTENER_MQ_FAIR | GTUNE_LISTENER_MQ_OPT)
+ #define GTUNE_QUIC_CC_HYSTART    (1<<29)
++#define GTUNE_OCTAVIA_HDR_NAME_256 (1<<30)
+
+ #define NO_ZERO_COPY_FWD             0x0001 /* Globally disable zero-copy FF */
+diff --git a/include/haproxy/htx-t.h b/include/haproxy/htx-t.h
+index 37d2017..aca05cd 100644
+--- a/include/haproxy/htx-t.h
++++ b/include/haproxy/htx-t.h
+@@ -114,9 +114,9 @@
+  *     - 0001 = response start-line
+  *     - 0010 = header
+- *     - 0011 = pseudo-header ou "special" header
+- *     - 0100 = end-of-headers
+- *     - 0101 = data
+- *     - 0110 = trailer
+- *     - 0111 = end-of-trailers
++ *     - 0011 = end-of-headers
++ *     - 0100 = data
++ *     - 0101 = trailer
++ *     - 0110 = end-of-trailers
++ *     - 0111 = header with a 256-byte name (low 8 bits are zero)
+  *       ...
+  *     - 1111 = unused
+@@ -212,5 +212,6 @@ enum htx_blk_type {
+ 	HTX_BLK_TLR    =  5, /* trailer name/value block */
+ 	HTX_BLK_EOT    =  6, /* end-of-trailers block */
+-	/* 7 .. 14 unused */
++	HTX_BLK_HDR_256 = 7, /* raw encoding, exposed to callers as HTX_BLK_HDR */
++	/* 8 .. 14 unused */
+ 	HTX_BLK_UNUSED = 15, /* unused/removed block */
+ };
+diff --git a/include/haproxy/htx.h b/include/haproxy/htx.h
+index 13180ba..1e77925 100644
+--- a/include/haproxy/htx.h
++++ b/include/haproxy/htx.h
+@@ -27,4 +27,5 @@
+ #include <haproxy/buf.h>
+ #include <haproxy/chunk.h>
++#include <haproxy/global.h>
+ #include <haproxy/http-hdr-t.h>
+ #include <haproxy/http-t.h>
+@@ -156,8 +157,22 @@ static inline struct htx_blk *htx_get_blk(const struct htx *htx, uint32_t pos)
+ }
+
++/* Returns the logical block type from its encoded metadata. */
++static inline enum htx_blk_type htx_decode_blk_type(uint32_t info)
++{
++	enum htx_blk_type type = info >> 28;
++
++	return (type == HTX_BLK_HDR_256 ? HTX_BLK_HDR : type);
++}
++
+ /* Returns the type of the block <blk> */
+ static inline enum htx_blk_type htx_get_blk_type(const struct htx_blk *blk)
+ {
+-	return (blk->info >> 28);
++	return htx_decode_blk_type(blk->info);
++}
++
++/* Returns the name length of a header or trailer block. */
++static inline uint32_t htx_get_blk_name_len(const struct htx_blk *blk)
++{
++	return ((blk->info >> 28) == HTX_BLK_HDR_256 ? 256 : blk->info & 0xff);
+ }
+
+@@ -170,6 +185,5 @@ static inline uint32_t htx_get_blksz(const struct htx_blk *blk)
+ 		case HTX_BLK_HDR:
+ 		case HTX_BLK_TLR:
+-			/*       name.length       +        value.length        */
+-			return ((blk->info & 0xff) + ((blk->info >> 8) & 0xfffff));
++			return htx_get_blk_name_len(blk) + ((blk->info >> 8) & 0xfffff);
+ 		default:
+ 			/*         value.length      */
+@@ -343,5 +357,6 @@ static inline void htx_change_blk_value_len(struct htx *htx, struct htx_blk *blk
+ 		case HTX_BLK_TLR:
+ 			oldlen = (blk->info >> 8) & 0xfffff;
+-			blk->info = (type << 28) + (newlen << 8) + (blk->info & 0xff);
++			/* Keep the raw type, which can encode the name length. */
++			blk->info = (blk->info & 0xf00000ff) | (newlen << 8);
+ 			break;
+ 		default:
+@@ -372,5 +387,5 @@ static inline void htx_set_blk_value_len(struct htx_blk *blk, uint32_t vlen)
+ 		case HTX_BLK_HDR:
+ 		case HTX_BLK_TLR:
+-			blk->info = (type << 28) + (vlen << 8) + (blk->info & 0xff);
++			blk->info = (blk->info & 0xf00000ff) | (vlen << 8);
+ 			break;
+ 		case HTX_BLK_REQ_SL:
+@@ -403,5 +418,5 @@ static inline struct ist htx_get_blk_name(const struct htx *htx, const struct ht
+ 		case HTX_BLK_TLR:
+ 			ret = ist2(htx_get_blk_ptr(htx, blk),
+-				   blk->info & 0xff);
++				   htx_get_blk_name_len(blk));
+ 			break;
+
+@@ -424,5 +439,5 @@ static inline struct ist htx_get_blk_value(const struct htx *htx, const struct h
+ 		case HTX_BLK_HDR:
+ 		case HTX_BLK_TLR:
+-			ret = ist2(htx_get_blk_ptr(htx, blk) + (blk->info & 0xff),
++			ret = ist2(htx_get_blk_ptr(htx, blk) + htx_get_blk_name_len(blk),
+ 				   (blk->info >> 8) & 0xfffff);
+ 			break;
+@@ -475,4 +490,20 @@ static inline struct htx_sl *htx_add_stline(struct htx *htx, enum htx_blk_type t
+ }
+
++/* Header admission is independent of how existing blocks are decoded. */
++static inline int htx_header_fits(const struct ist name, const struct ist value)
++{
++	return (value.len <= 1048575 &&
++	        (name.len <= 255 || (name.len == 256 &&
++	         (global.tune.options & GTUNE_OCTAVIA_HDR_NAME_256))));
++}
++
++/* Encodes header lengths after htx_header_fits() has checked them. */
++static inline uint32_t htx_header_info(uint32_t name_len, uint32_t value_len)
++{
++	uint32_t type = (name_len == 256 ? HTX_BLK_HDR_256 : HTX_BLK_HDR);
++
++	return (type << 28) | (value_len << 8) | (name_len & 0xff);
++}
++
+ /* Adds an HTX block of type HDR in <htx>. It returns the new block on
+  * success. Otherwise, it returns NULL. The header name is always lower cased.
+@@ -483,5 +514,5 @@ static inline struct htx_blk *htx_add_header(struct htx *htx, const struct ist n
+ 	struct htx_blk *blk;
+
+-	if (name.len > 255 || value.len > 1048575)
++	if (!htx_header_fits(name, value))
+ 		return NULL;
+
+@@ -490,5 +521,5 @@ static inline struct htx_blk *htx_add_header(struct htx *htx, const struct ist n
+ 		return NULL;
+
+-	blk->info += (value.len << 8) + name.len;
++	blk->info = htx_header_info(name.len, value.len);
+ 	ist2bin_lc(htx_get_blk_ptr(htx, blk), name);
+ 	memcpy(htx_get_blk_ptr(htx, blk)  + name.len, value.ptr, value.len);
+diff --git a/src/cache.c b/src/cache.c
+index 762266b..5fc9718 100644
+--- a/src/cache.c
++++ b/src/cache.c
+@@ -1480,5 +1480,5 @@ static void http_cache_applet_release(struct appctx *appctx)
+
+
+-static unsigned int htx_cache_dump_blk(struct appctx *appctx, struct htx *htx, enum htx_blk_type type,
++static unsigned int htx_cache_dump_blk(struct appctx *appctx, struct htx *htx,
+ 				       uint32_t info, struct shared_block *shblk, unsigned int offset)
+ {
+@@ -1486,4 +1486,5 @@ static unsigned int htx_cache_dump_blk(struct appctx *appctx, struct htx *htx, e
+ 	struct cache_flt_conf *cconf = appctx->rule->arg.act.p[0];
+ 	struct shared_context *shctx = shctx_ptr(cconf->c.cache);
++	const struct htx_blk cached = { .info = info };
+ 	struct htx_blk *blk;
+ 	char *ptr;
+@@ -1494,11 +1495,9 @@ static unsigned int htx_cache_dump_blk(struct appctx *appctx, struct htx *htx, e
+ 	if (!max)
+ 		return 0;
+-	blksz = ((type == HTX_BLK_HDR || type == HTX_BLK_TLR)
+-		 ? (info & 0xff) + ((info >> 8) & 0xfffff)
+-		 : info & 0xfffffff);
++	blksz = htx_get_blksz(&cached);
+ 	if (blksz > max)
+ 		return 0;
+
+-	blk = htx_add_blk(htx, type, blksz);
++	blk = htx_add_blk(htx, htx_get_blk_type(&cached), blksz);
+ 	if (!blk)
+ 		return 0;
+@@ -1611,7 +1610,7 @@ static size_t htx_cache_dump_msg(struct appctx *appctx, struct htx *htx, unsigne
+
+ 		/* Get payload of the next HTX block and insert it. */
+-		type = (info >> 28);
++		type = htx_decode_blk_type(info);
+ 		if (type != HTX_BLK_DATA)
+-			ret = htx_cache_dump_blk(appctx, htx, type, info, shblk, offset);
++			ret = htx_cache_dump_blk(appctx, htx, info, shblk, offset);
+ 		else {
+ 		  add_data_blk:
+@@ -1713,5 +1712,5 @@ static size_t ff_cache_dump_msg(struct appctx *appctx, struct buffer *buf, unsig
+
+ 		/* Get payload of the next HTX block and insert it. */
+-		type = (info >> 28);
++		type = htx_decode_blk_type(info);
+ 		if (type == HTX_BLK_DATA) {
+ 		  add_data_blk:
+diff --git a/src/cfgparse-global.c b/src/cfgparse-global.c
+index f419da0..bc5ee4c 100644
+--- a/src/cfgparse-global.c
++++ b/src/cfgparse-global.c
+@@ -100,4 +100,9 @@ int cfg_parse_global(const char *file, int linenum, char **args, int kwm)
+ 		global.mode |= MODE_MWORKER;
+ 	}
++	else if (strcmp(args[0], "tune.octavia.http-header-name-256") == 0) {
++		if (alertif_too_many_args(0, file, linenum, args, &err_code))
++			goto out;
++		global.tune.options |= GTUNE_OCTAVIA_HDR_NAME_256;
++	}
+ 	else if (strcmp(args[0], "noepoll") == 0) {
+ 		if (alertif_too_many_args(0, file, linenum, args, &err_code))
+diff --git a/src/htx.c b/src/htx.c
+index c0e9c10..a255b30 100644
+--- a/src/htx.c
++++ b/src/htx.c
+@@ -803,11 +803,10 @@ struct htx_blk *htx_replace_header(struct htx *htx, struct htx_blk *blk,
+ 				   const struct ist name, const struct ist value)
+ {
+-	enum htx_blk_type type;
++	uint32_t info;
+ 	void *ptr;
+ 	int32_t delta;
+ 	int ret;
+
+-	type = htx_get_blk_type(blk);
+-	if (type != HTX_BLK_HDR)
++	if (htx_get_blk_type(blk) != HTX_BLK_HDR || !htx_header_fits(name, value))
+ 		return NULL;
+
+@@ -821,9 +820,10 @@ struct htx_blk *htx_replace_header(struct htx *htx, struct htx_blk *blk,
+ 	 * header (name+value). Only take care to defrag the message if
+ 	 * necessary. */
++	info = htx_header_info(name.len, value.len);
+ 	if (ret == 3)
+-		blk = htx_defrag(htx, blk, (type << 28) + (value.len << 8) + name.len);
++		blk = htx_defrag(htx, blk, info);
+ 	else {
+ 		/* Set the new block size and update HTX message */
+-		blk->info = (type << 28) + (value.len << 8) + name.len;
++		blk->info = info;
+ 		htx->data += delta;
+ 	}

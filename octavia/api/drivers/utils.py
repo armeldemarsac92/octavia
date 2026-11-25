@@ -101,6 +101,19 @@ def http_literal_path_available(driver):
             is True)
 
 
+def _http_header_exact_available(driver):
+    providers = CONF.api_settings.enabled_http_header_exact_providers
+    return (driver.name in providers and
+            getattr(driver, 'supports_http_header_exact', False) is True)
+
+
+def http_header_name_256_available(driver):
+    providers = CONF.api_settings.enabled_http_header_name_256_providers
+    return (driver.name in providers and
+            getattr(driver, 'supports_http_header_name_256', False)
+            is True and _http_header_exact_available(driver))
+
+
 def gateway_capabilities(driver):
     api_settings = CONF.api_settings
     capabilities = []
@@ -312,9 +325,10 @@ def gateway_capabilities(driver):
         capabilities.append(constants.GATEWAY_CAPABILITY_HTTP_LONG_HOSTNAME)
     if http_literal_path_available(driver):
         capabilities.append(constants.GATEWAY_CAPABILITY_HTTP_LITERAL_PATH)
-    if (driver.name in api_settings.enabled_http_header_exact_providers and
-            getattr(driver, 'supports_http_header_exact', False) is True):
+    if _http_header_exact_available(driver):
         capabilities.append(constants.GATEWAY_CAPABILITY_HTTP_HEADER_EXACT)
+    if http_header_name_256_available(driver):
+        capabilities.append(constants.GATEWAY_CAPABILITY_HTTP_HEADER_NAME_256)
     if (driver.name in api_settings.enabled_http_method_match_providers and
             getattr(driver, 'supports_http_method_match', False) is True):
         capabilities.append(constants.GATEWAY_CAPABILITY_HTTP_METHOD_MATCH)
@@ -1137,6 +1151,29 @@ def _unsupported_http_long_hostname(driver):
             'provider.'))
 
 
+def _unsupported_http_header_name_256(driver):
+    return exceptions.ProviderUnsupportedOptionError(
+        prov=driver.name, user_msg=_(
+            '256-byte exact HTTP header names are unavailable for this '
+            'provider.'))
+
+
+def require_http_header_name_256(driver):
+    if not http_header_name_256_available(driver):
+        raise _unsupported_http_header_name_256(driver)
+
+
+def require_active_http_header_name_256(driver, policy_repo, session,
+                                        **parent_filters):
+    min_length = constants.MAX_L7RULE_HTTP_HEADER_EXACT_KEY_LENGTH
+    if (not http_header_name_256_available(driver) and
+            policy_repo.has_enabled_l7rule(
+                session, constants.L7RULE_TYPE_HTTP_HEADER_EXACT,
+                min_key_length=min_length,
+                **parent_filters)):
+        raise _unsupported_http_header_name_256(driver)
+
+
 def require_active_http_l7rule_capabilities(driver, policy_repo, session,
                                             **parent_filters):
     capabilities = gateway_capabilities(driver)
@@ -1151,6 +1188,8 @@ def require_active_http_l7rule_capabilities(driver, policy_repo, session,
                 min_value_length=constants.MAX_LEGACY_L7RULE_VALUE_LENGTH + 1,
                 **parent_filters)):
         raise _unsupported_http_long_hostname(driver)
+    require_active_http_header_name_256(
+        driver, policy_repo, session, **parent_filters)
 
 
 def require_http_l7rule_capability(driver, rule_type):
@@ -1160,7 +1199,7 @@ def require_http_l7rule_capability(driver, rule_type):
 
 
 def validate_l7rule_context(driver, rule_type, protocol, *,
-                            compare_type=None, value=None,
+                            compare_type=None, key=None, value=None,
                             admit_http_l7rule=True, reactivating=False,
                             tcp_tls_termination=False):
     long_http_hostname = validate.is_long_http_hostname_regex(
@@ -1179,6 +1218,8 @@ def validate_l7rule_context(driver, rule_type, protocol, *,
                     'L7 rule values are limited to 255 characters for this '
                     'type.'))
             require_http_l7rule_capability(driver, rule_type)
+            if validate.is_http_header_name_256(rule_type, key):
+                require_http_header_name_256(driver)
     elif rule_type == constants.L7RULE_TYPE_TLS_SNI:
         if protocol != constants.PROTOCOL_TCP:
             raise exceptions.L7RuleValidation(error=_(
