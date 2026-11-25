@@ -78,6 +78,59 @@ provisioning status ``ERROR``. The listener and load balancer also enter
 ``ERROR`` if the worker could not restore their prior configuration. Their
 activation request remains available for a retry of the restoration.
 
+Switch selected policies between gRPC authorization and HTTP 500
+================================================================
+
+.. rest_method:: GET /v2/lbaas/listeners/{listener_id}/l7policy_grpc_auth_transition
+
+Enable the provider in ``[api_settings] enabled_l7policy_grpc_auth_transition_providers``
+after upgrading the API and workers. Discovery then reports
+``l7policy_grpc_auth_transition_v1`` for providers with gRPC authorization
+and fixed HTTP responses. This operation applies to HTTP listeners.
+
+The response uses the ``l7policy_activation`` snapshot described above. When
+preparing a restoration, include the origin and authorizer pool UUIDs in the
+comma-separated ``pool_ids`` query parameter. This includes their configuration
+and members in ``graph_revision`` before a policy references them.
+
+.. rest_method:: POST /v2/lbaas/listeners/{listener_id}/l7policy_grpc_auth_transition
+
+Submit a ``l7policy_grpc_auth_transition`` object with
+``expected_graph_revision``, the full ``expected_order`` and one to 64
+selected ``policies``. Each entry supplies its ``id``, its ``revision``, the
+desired policy ``tags`` and the ``id`` and desired ``tags`` of every rule.
+Omit ``redirect_pool_id`` and ``external_auth`` to switch active gRPC
+policies to fixed HTTP 500 responses. Supply both fields to restore gRPC
+authorization on an active fixed-500 policy. Every entry in the batch must
+request the same direction. The selected policies retain their rank and matches.
+
+HTTP 204 acknowledges submission. Read the policy actions, pools and
+provisioning status to observe the result of the asynchronous Amphora update.
+The API returns HTTP 400 for duplicate tags on a single policy or rule.
+HTTP 409 means the precondition changed or a different operation is in
+progress. Read the listener snapshot again and check current access before
+submitting a new revision. HTTP 501 means the provider cannot perform
+the requested transition on this listener.
+
+.. rest_method:: GET /v2/lbaas/listeners/{listener_id}/l7policy_grpc_auth_transition/recovery
+
+An interrupted transition can require recovery. A successful response has the
+form ``{"operation_id": "<uuid>"}``. HTTP 404 means there is currently no
+recoverable transition for this listener. A new submission has a 15-second
+grace period. An operation already reverting can be recovered immediately.
+
+.. rest_method:: POST /v2/lbaas/listeners/{listener_id}/l7policy_grpc_auth_transition/recovery
+
+Submit the object returned by GET with the same operation UUID. The worker
+recovers towards a restrictive configuration. On an interrupted restoration
+it reinstates the fixed HTTP 500 policies. If the worker cannot confirm the
+restriction after a withdrawal, it can close the listener. HTTP 204 accepts
+recovery or acknowledges an already finished operation with that UUID.
+HTTP 409 means the UUID changed, the active worker holds the render lock,
+or the operation is too recent. Read the recovery resource again before
+retrying. Restoring access requires a new transition based on current
+authorization and a fresh listener snapshot.
+
 List L7 Policies
 ================
 

@@ -1205,6 +1205,9 @@ class ListenersController(base.BaseController):
             return StatisticsController(listener_id=id), remainder[1:]
         if id and remainder and remainder[0] == 'l7policy_activation':
             return l7policy.L7PolicyActivationController(id), remainder[1:]
+        if (id and remainder and
+                remainder[0] == 'l7policy_grpc_auth_transition'):
+            return l7policy.GRPCAuthTransitionController(id), remainder[1:]
         return None
 
 

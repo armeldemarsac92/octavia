@@ -37,6 +37,7 @@ from octavia.common import exceptions
 from octavia.common import l7policy_activation
 from octavia.common import l7policy_removal
 from octavia.common import validate
+from octavia.db import api as db_apis
 from octavia.db import prepare as db_prepare
 from octavia.i18n import _
 
@@ -262,6 +263,7 @@ class L7PolicyRemovalController(base.BaseController):
 
 
 class L7PolicyActivationController(base.BaseController):
+    grpc_auth_transition = False
     RBAC_TYPE = constants.RBAC_L7POLICY
 
     def __init__(self, listener_id):
@@ -294,9 +296,12 @@ class L7PolicyActivationController(base.BaseController):
         return listener, lb, driver
 
     @staticmethod
-    def _require_batch_activation(driver, listener):
-        if not driver_utils.l7policy_batch_activation_available(
-                driver, listener):
+    def _batch_available(driver, listener):
+        return driver_utils.l7policy_batch_activation_available(
+            driver, listener)
+
+    def _require_batch_activation(self, driver, listener):
+        if not self._batch_available(driver, listener):
             raise exceptions.ProviderNotImplementedError(
                 prov=driver.name, user_msg=_(
                     'Grouped L7 policy activation is unavailable for this '
@@ -305,13 +310,19 @@ class L7PolicyActivationController(base.BaseController):
     @wsme_pecan.wsexpose(activation_types.L7PolicyActivationRootResponse)
     def get(self):
         """Read the ordered policies and the backend graph."""
+        return self._observe()
+
+    def _observe(self, additional_pools=()):
         context = pecan_request.context.get('octavia_context')
         lb_id = self._parent_id(context)
         with context.session.begin():
             listener, lb, driver = self._get_listener_and_provider(
                 context, lb_id, constants.RBAC_GET_ONE)
             operation = lb.l7policy_activation or {}
-            if operation.get('listener_id') != listener.id:
+            if (operation.get('listener_id') != listener.id or
+                    self.grpc_auth_transition !=
+                    l7policy_activation.grpc_auth_operation(operation,
+                                                            listener.id)):
                 self._require_batch_activation(driver, listener)
             if (lb.provisioning_status.startswith('PENDING_') and
                     not self.repositories.load_balancer._batch_pending(lb)):
@@ -325,7 +336,8 @@ class L7PolicyActivationController(base.BaseController):
                     context, lb.project_id, constants.RBAC_GET_ONE,
                     rbac_type=resource)
             graph, _policies = l7policy_activation.snapshot(
-                context.session, self.repositories, lb, listener)
+                context.session, self.repositories, lb, listener,
+                additional_pools=additional_pools)
         return activation_types.L7PolicyActivationRootResponse(
             l7policy_activation=graph)
 
@@ -347,21 +359,33 @@ class L7PolicyActivationController(base.BaseController):
             'order': activation.expected_order,
             'policies': revisions,
         }
+        self._submit(request)
 
+    def _submit(self, request):
+        revisions = request['policies']
+        transition = request.get('grpc_auth_transition')
+        additional_pools = l7policy_activation.transition_pools(request)
         context = pecan_request.context.get('octavia_context')
         session = context.session
         lb_id = self._parent_id(context)
         with session.begin():
             listener, lb, driver = self._get_listener_and_provider(
                 context, lb_id, constants.RBAC_PUT)
+            if transition:
+                self._auth_validate_action(
+                    context, lb.project_id, constants.RBAC_PUT,
+                    rbac_type=constants.RBAC_L7RULE)
             operation = lb.l7policy_activation or {}
             replay = (operation.get('listener_id') == listener.id and
                       operation.get('request') == request)
             if operation.get('phase') in l7policy_activation.PENDING:
                 if not replay:
                     raise exceptions.L7PolicyActivationConflict()
-                if not driver_utils.l7policy_batch_activation_available(
-                        driver, listener):
+                if transition:
+                    # A restoration replay cannot establish current access.
+                    # The recovery endpoint only dispatches compensation.
+                    return
+                if not self._batch_available(driver, listener):
                     lb.l7policy_activation = {
                         **operation, 'phase': 'reverting'}
                 self._dispatch(driver, lb.id, operation['id'])
@@ -377,7 +401,8 @@ class L7PolicyActivationController(base.BaseController):
             if listener.request_filter_sections:
                 driver_utils.require_listener_request_filters(driver)
             graph, order = l7policy_activation.snapshot(
-                session, self.repositories, lb, listener)
+                session, self.repositories, lb, listener,
+                additional_pools=additional_pools)
             policies = [policy for policy in order if policy.id in revisions]
             if (replay and operation['phase'] == 'applied' and
                     graph.graph_revision == operation['applied_revision'] and
@@ -391,7 +416,7 @@ class L7PolicyActivationController(base.BaseController):
                     len(policies) != len(revisions)):
                 raise exceptions.L7PolicyActivationConflict()
             for policy in policies:
-                if (policy.enabled or
+                if (policy.enabled != bool(transition) or
                         policy.provisioning_status != constants.ACTIVE or
                         not any(rule.enabled for rule in policy.l7rules) or
                         any(rule.provisioning_status != constants.ACTIVE
@@ -399,7 +424,12 @@ class L7PolicyActivationController(base.BaseController):
                         l7policy_activation.policy_revision(policy) !=
                         revisions[policy.id]):
                     raise exceptions.L7PolicyActivationConflict()
-                self._validate_policy(session, policy, listener, driver)
+                if transition:
+                    l7policy_activation.validate_transition(
+                        session, self.repositories, policy, listener, driver,
+                        transition[policy.id])
+                else:
+                    self._validate_policy(session, policy, listener, driver)
 
             operation_id = uuidutils.generate_uuid()
             lb.tcp_member_batch = None
@@ -409,6 +439,12 @@ class L7PolicyActivationController(base.BaseController):
                 'request': request,
                 'phase': 'pending',
             }
+            if transition:
+                lb.l7policy_activation = {
+                    **lb.l7policy_activation,
+                    'recover_after': (
+                        l7policy_activation.grpc_auth_recovery_deadline()),
+                }
             listener.provisioning_status = constants.PENDING_UPDATE
             lb.provisioning_status = constants.PENDING_UPDATE
             for policy in policies:
@@ -492,6 +528,126 @@ class L7PolicyActivationController(base.BaseController):
             driver_utils.require_no_transform_exposed_by_ordered_redirect(
                 driver, repo, session, listener.id, hostname, policy.position,
                 policy_id=policy.id)
+
+
+class GRPCAuthTransitionController(L7PolicyActivationController):
+    grpc_auth_transition = True
+
+    @staticmethod
+    def _batch_available(driver, listener):
+        return l7policy_activation.grpc_auth_transition_available(
+            driver, listener)
+
+    @wsme_pecan.wsexpose(
+        activation_types.L7PolicyActivationRootResponse, wtypes.text)
+    def get(self, pool_ids=None):
+        pool_ids = pool_ids.split(',') if pool_ids else []
+        if (len(pool_ids) > 2 * constants.MAX_L7POLICY_BATCH_ACTIVATION or
+                any(not uuidutils.is_uuid_like(pool) for pool in pool_ids)):
+            raise exceptions.ValidationException(detail=_(
+                'Expected additional destination pool IDs.'))
+        return self._observe(pool_ids)
+
+    @wsme_pecan.wsexpose(
+        None, body=activation_types.GRPCAuthTransitionRootPOST,
+        status_code=204)
+    def post(self, body):
+        transition = body.l7policy_grpc_auth_transition if body else None
+        if not transition:
+            raise exceptions.ValidationException(detail=_(
+                'Supply an l7policy_grpc_auth_transition object.'))
+        policies = transition.policies
+        revisions = {policy.id: policy.revision for policy in policies}
+        if (len(revisions) != len(policies) or
+                not 1 <= len(policies) <=
+                constants.MAX_L7POLICY_BATCH_ACTIVATION):
+            raise exceptions.ValidationException(detail=_(
+                'Supply one to 64 distinct L7 policy IDs.'))
+        changes = {}
+        for policy in policies:
+            fields = policy.to_dict(render_unsets=False)
+            pool, auth = fields.get('redirect_pool_id'), fields.get(
+                'external_auth')
+            if bool(pool) != bool(auth):
+                raise exceptions.ValidationException(detail=_(
+                    'Forwarding requires an origin and a gRPC authorizer.'))
+            changes[policy.id] = {
+                'tags': policy.tags,
+                'rules': {rule.id: rule.tags for rule in policy.rules},
+                'origin': pool,
+                'external_auth': auth,
+            }
+            if len(changes[policy.id]['rules']) != len(policy.rules):
+                raise exceptions.ValidationException(detail=_(
+                    'Supply unique L7 rule IDs.'))
+            for tags in [policy.tags, *(rule.tags for rule in policy.rules)]:
+                if len(tags) != len(set(tags)):
+                    raise exceptions.ValidationException(detail=_(
+                        'Supply unique tags on each policy and rule.'))
+        if len({bool(change['origin']) for change in changes.values()}) != 1:
+            raise exceptions.ValidationException(detail=_(
+                'Select either withdrawal or restoration for the batch.'))
+        self._submit({
+            'graph_revision': transition.expected_graph_revision,
+            'order': transition.expected_order,
+            'policies': revisions,
+            'grpc_auth_transition': changes,
+        })
+
+    @pecan_expose()
+    def _lookup(self, action, *remainder):
+        if action == 'recovery':
+            return GRPCAuthRecoveryController(self.listener_id), remainder
+        return None
+
+
+class GRPCAuthRecoveryController(L7PolicyActivationController):
+
+    @wsme_pecan.wsexpose(activation_types.GRPCAuthRecovery)
+    def get(self):
+        context = pecan_request.context.get('octavia_context')
+        lb_id = self._parent_id(context)
+        with context.session.begin():
+            listener, lb, _driver = self._get_listener_and_provider(
+                context, lb_id, constants.RBAC_GET_ONE)
+            operation = lb.l7policy_activation or {}
+            if (not l7policy_activation.grpc_auth_operation(
+                    operation, listener.id) or
+                    not l7policy_activation.grpc_auth_recovery_ready(
+                        operation)):
+                raise exceptions.NotFound(resource='gRPC auth recovery',
+                                          id=listener.id)
+            return activation_types.GRPCAuthRecovery(
+                operation_id=operation['id'])
+
+    @wsme_pecan.wsexpose(None, body=activation_types.GRPCAuthRecovery,
+                         status_code=204)
+    def post(self, body):
+        context = pecan_request.context.get('octavia_context')
+        lb_id = self._parent_id(context)
+        # Use the worker's lock order. A controller poll must never interrupt
+        # a live render.
+        with db_apis.listener_render_lock(lb_id) as acquired:
+            if not acquired:
+                raise exceptions.L7PolicyActivationConflict()
+            with context.session.begin():
+                listener, lb, driver = self._get_listener_and_provider(
+                    context, lb_id, constants.RBAC_PUT)
+                self._auth_validate_action(
+                    context, lb.project_id, constants.RBAC_PUT,
+                    rbac_type=constants.RBAC_L7RULE)
+                operation = lb.l7policy_activation or {}
+                if (not body or not l7policy_activation.grpc_auth_operation(
+                        operation, listener.id) or
+                        body.operation_id != operation['id']):
+                    raise exceptions.L7PolicyActivationConflict()
+                if operation['phase'] in ('applied', 'failed'):
+                    return
+                if not l7policy_activation.grpc_auth_recovery_ready(operation):
+                    raise exceptions.L7PolicyActivationConflict()
+                lb.l7policy_activation = {**operation, 'phase': 'reverting'}
+                operation_id = operation['id']
+        self._dispatch(driver, lb_id, operation_id)
 
 
 class L7PolicyController(base.BaseController):

@@ -581,6 +581,239 @@ class TestInitialL7Rules(base.BaseAPITest):
         self.set_lb_status(self.lb_id)
         self.delete(blocker_path)
 
+    def test_grpc_auth_transition_preserves_the_order_and_fixed_barrier(self):
+        enabled = ['amphora']
+        self.conf.config(
+            group='api_settings', enabled_gateway_action_providers=enabled,
+            enabled_backend_h2c_providers=enabled,
+            enabled_backend_tls_hostname_providers=enabled,
+            enabled_l7policy_grpc_external_auth_providers=enabled,
+            enabled_l7policy_grpc_auth_transition_providers=enabled)
+        origin = self.create_pool(self.lb_id, 'HTTP', 'ROUND_ROBIN')['pool']
+        self.set_lb_status(self.lb_id)
+        authorizer = self.create_pool(
+            self.lb_id, 'HTTP', 'ROUND_ROBIN', backend_h2c=True,
+            tags=[constants.GATEWAY_GRPC_AUTH_POOL_TAG])['pool']
+        self.set_lb_status(self.lb_id)
+        certs = self.cert_manager_mock()
+        certs.get_secret.return_value = sample_certs.X509_CA_CERT
+        private = self.create_pool(
+            self.lb_id, 'HTTP', 'ROUND_ROBIN', tls_enabled=True,
+            backend_tls_hostname='private.example.test',
+            ca_tls_container_ref=uuidutils.generate_uuid())['pool']
+        self.set_lb_status(self.lb_id)
+        auth = {'protocol': 'GRPC', 'pool_id': authorizer['id']}
+        for path in ('/protected', '/secure', '/public'):
+            policy = self._post_policy(
+                action='REDIRECT_TO_POOL', redirect_prefix=None,
+                redirect_pool_id=(private if path == '/protected'
+                                  else origin)['id'],
+                external_auth=None if path == '/public' else auth,
+                rules=[{'type': 'PATH', 'compare_type': 'EQUAL_TO',
+                        'value': path}])['l7policy']
+            endpoints.Endpoints().create_l7policy(
+                {}, **self.rpc.cast.call_args.kwargs)
+            self.put(self.L7POLICY_PATH.format(l7policy_id=policy['id']),
+                     {'l7policy': {'admin_state_up': True}})
+            self.set_lb_status(self.lb_id)
+
+        with self.session.begin():
+            self.create_amphora(uuidutils.generate_uuid(), self.lb_id,
+                                role=constants.ROLE_STANDALONE,
+                                lb_network_ip='192.0.2.100')
+        path = (self.LISTENER_PATH.format(listener_id=self.listener_id) +
+                '/l7policy_grpc_auth_transition')
+        graph = self.get(path).json['l7policy_activation']
+        order = [item['policy']['id'] for item in graph['policies']]
+        field = 'l7policy_grpc_auth_transition'
+
+        def request(snapshot, **options):
+            return {
+                'expected_graph_revision': snapshot['graph_revision'],
+                'expected_order': order,
+                'policies': [
+                    {'id': row['policy']['id'], 'revision': row['revision'],
+                     'tags': ['revised-policy'],
+                     'rules': [{'id': rule['id'], 'tags': ['revised-rule']}
+                               for rule in row['policy']['rules']],
+                     **options} for row in snapshot['policies'][:2]],
+            }
+
+        withdrawal = request(graph)
+        stale = {**withdrawal, 'expected_order': list(reversed(order))}
+        self.post(path, {field: stale}, status=409)
+        row = withdrawal['policies'][0]
+        for duplicate in ({**row, 'tags': ['tag', 'tag']},
+                          {**row, 'rules': [{**row['rules'][0],
+                                            'tags': ['tag', 'tag']}]}):
+            invalid = {**withdrawal,
+                       'policies': [duplicate, withdrawal['policies'][1]]}
+            self.post(path, {field: invalid}, status=400)
+        self.post(path, {field: withdrawal}, status=204)
+        delivery = self.rpc.cast.call_args.kwargs
+        caps = {constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME: True}
+        client = rest_api_driver.AmphoraAPIClient1_0
+        self.conf.config(group='controller_worker',
+                         amphora_driver='amphora_haproxy_rest_driver')
+        with (mock.patch.object(certs, 'get_secret',
+                                side_effect=RuntimeError('CA unavailable')),
+              mock.patch.object(rest_api_driver.AmphoraAPIClientBase,
+                                'get_api_version',
+                                return_value={'api_version': '1.0'}),
+              mock.patch.object(client, 'get_info', return_value={
+                  'haproxy_version': '3.0.19'}),
+              mock.patch.object(client, 'get_details', return_value=caps),
+              mock.patch.object(client, 'upload_config') as upload,
+              mock.patch.object(client, '_action') as reload):
+            endpoints.Endpoints().activate_l7policies({}, **delivery)
+        upload.assert_called_once()
+        reload.assert_called_once()
+        config = upload.call_args.args[2]
+        self.assertIn(f'use_backend {origin["id"]}', config)
+        self.assertNotIn(private['id'], config)
+        listener = self.get_listener(self.listener_id)['listener']
+        self.assertTrue(listener['admin_state_up'])
+        self.assertEqual(constants.ACTIVE, listener['provisioning_status'])
+        self.assertEqual(constants.ACTIVE, self.get(self.POOL_PATH.format(
+            pool_id=private['id'])).json['pool']['provisioning_status'])
+        self.conf.config(group='controller_worker',
+                         amphora_driver='amphora_noop_driver')
+        rows = self.get(path).json['l7policy_activation']['policies']
+        first, second, public = [row['policy'] for row in rows]
+        self.assertEqual(order, [first['id'], second['id'], public['id']])
+        self.assertEqual(graph['policies'][2]['policy'], public)
+        for protected in (first, second):
+            self.assertTrue(protected['admin_state_up'])
+            self.assertEqual('FIXED_RESPONSE', protected['action'])
+            self.assertEqual({'status_code': 500}, protected['fixed_response'])
+            self.assertIsNone(protected['external_auth'])
+            self.assertEqual(['revised-rule'], protected['rules'][0]['tags'])
+
+        queried = path + '?pool_ids=' + ','.join([authorizer['id'],
+                                                  private['id']])
+        snapshot = self.get(queried).json['l7policy_activation']
+        restoration = request(snapshot, redirect_pool_id=private['id'],
+                              external_auth=auth)
+        self.post(path, {field: restoration}, status=204)
+        call = self.rpc.cast.call_args
+        with mock.patch.object(amphora_noop.NoopAmphoraLoadBalancerDriver,
+                               'update', side_effect=[
+                                   RuntimeError('reload failed'), None,
+                               ]) as update:
+            self.assertRaises(RuntimeError,
+                              endpoints.Endpoints().activate_l7policies,
+                              {}, **call.kwargs)
+        restored = update.call_args.args[0].listeners[0]
+        candidate = update.call_args_list[0].args[0].listeners[0]
+        self.assertCountEqual([origin['id'], private['id']],
+                              [pool.id for pool in candidate.pools])
+        private_pool = next(pool for pool in candidate.pools
+                            if pool.id == private['id'])
+        self.assertEqual([self.listener_id],
+                         [row.id for row in private_pool.listeners])
+        self.assertTrue(restored.enabled)
+        self.assertEqual(['FIXED_RESPONSE', 'FIXED_RESPONSE',
+                          'REDIRECT_TO_POOL'],
+                         [policy.action for policy in restored.l7policies])
+
+        pending = self.get(path).json['l7policy_activation']['policies']
+        self.assertEqual([constants.ACTIVE] * 3, [
+            row['policy']['provisioning_status'] for row in pending])
+        with self.session.begin():
+            lb = self.lb_repo.get_for_update(self.session, self.lb_id)
+            self.assertEqual('failed', lb.l7policy_activation['phase'])
+
+        # Lose the worker after it reached the rendering phase. Recovery by
+        # the persisted ID is compensation, independent of feature opt-out.
+        self.post(path, {field: restoration}, status=204)
+        delivery = self.rpc.cast.call_args
+        self.rpc.cast.reset_mock()
+        self.post(path, {field: restoration}, status=204)
+        self.rpc.cast.assert_not_called()
+        recovery = path + '/recovery'
+        self.get(recovery, status=404)
+        with self.session.begin():
+            lb = self.lb_repo.get_for_update(self.session, self.lb_id)
+            lb.l7policy_activation = {
+                **lb.l7policy_activation, 'phase': 'rendering',
+                'recover_after': 0,
+            }
+        self.conf.config(group='api_settings',
+                         enabled_l7policy_grpc_auth_transition_providers=[])
+        self.get(path)
+        self.get(path.removesuffix('grpc_auth_transition') + 'activation',
+                 status=501)
+        operation = self.get(recovery).json
+        self.post(recovery, {'operation_id': uuidutils.generate_uuid()},
+                  status=409)
+        self.post(recovery, operation, status=204)
+        self.assertEqual(delivery, self.rpc.cast.call_args)
+        with mock.patch.object(amphora_noop.NoopAmphoraLoadBalancerDriver,
+                               'update') as update:
+            endpoints.Endpoints().activate_l7policies({}, **delivery.kwargs)
+        update.assert_called_once()
+        listener = update.call_args.args[0].listeners[0]
+        self.assertTrue(listener.enabled)
+        self.assertEqual(['FIXED_RESPONSE', 'FIXED_RESPONSE',
+                          'REDIRECT_TO_POOL'],
+                         [policy.action for policy in listener.l7policies])
+        self.rpc.cast.reset_mock()
+        self.post(recovery, operation, status=204)
+        self.rpc.cast.assert_not_called()
+
+        sibling = self.create_listener('HTTP', 81, self.lb_id)['listener']
+        self.set_lb_status(self.lb_id)
+        self.conf.config(
+            group='api_settings',
+            enabled_l7policy_grpc_auth_transition_providers=enabled)
+        snapshot = self.get(queried).json['l7policy_activation']
+        forward_body = request(snapshot, redirect_pool_id=private['id'],
+                               external_auth=auth)
+        forward_body['policies'][1]['external_auth'] = {
+            **auth, 'forward_body_max_size': 4096}
+        body_option = 'enabled_l7policy_external_auth_forward_body_providers'
+
+        def lower_body_limit(_graph, *, l7policy_activation,
+                             l7policy_restoration=False):
+            if not l7policy_restoration:
+                self.conf.config(group='haproxy_amphora',
+                                 external_auth_body_buffer_bytes=2048)
+
+        for render_started in (False, True):
+            with self.subTest(render_started=render_started):
+                self.conf.config(group='api_settings',
+                                 **{body_option: enabled})
+                self.post(path, {field: forward_body}, status=204)
+                delivery = self.rpc.cast.call_args
+                if not render_started:
+                    self.conf.config(group='api_settings', **{body_option: []})
+                with mock.patch.object(
+                        amphora_noop.NoopAmphoraLoadBalancerDriver, 'update',
+                        side_effect=lower_body_limit) as update:
+                    endpoints.Endpoints().activate_l7policies(
+                        {}, **delivery.kwargs)
+                self.assertEqual(2 if render_started else 1,
+                                 update.call_count)
+                self.assertTrue(update.call_args.kwargs.get(
+                    'l7policy_restoration'))
+                listeners = {row.id: row for row in
+                             update.call_args.args[0].listeners}
+                self.assertTrue(listeners[sibling['id']].enabled)
+                protected_listener = listeners[self.listener_id]
+                self.assertTrue(protected_listener.enabled)
+                self.assertEqual(['FIXED_RESPONSE', 'FIXED_RESPONSE',
+                                  'REDIRECT_TO_POOL'],
+                                 [p.action for p in
+                                  protected_listener.l7policies])
+                rows = self._activation_policies(path)
+                self.assertEqual(order, [row['id'] for row in rows])
+                for row in rows[:2]:
+                    self.assertEqual(constants.ACTIVE,
+                                     row['provisioning_status'])
+                    self.assertEqual({'status_code': 500},
+                                     row['fixed_response'])
+                    self.assertIsNone(row['external_auth'])
+
     def _prepare_activation_group(self, **destination):
         self.conf.config(group='api_settings',
                          enabled_l7policy_batch_activation_providers=[

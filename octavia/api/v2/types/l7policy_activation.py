@@ -65,10 +65,39 @@ class L7PolicyActivationReference(types.BaseType):
     revision = wtypes.wsattr(Revision, mandatory=True)
 
 
+class RuleTagUpdate(types.BaseType):
+    id = wtypes.wsattr(wtypes.UuidType(), mandatory=True)
+    tags = wtypes.wsattr([wtypes.StringType(max_length=255)], mandatory=True)
+
+
+class GRPCAuthTransition(types.BaseType):
+    id = wtypes.wsattr(wtypes.UuidType(), mandatory=True)
+    revision = wtypes.wsattr(Revision, mandatory=True)
+    tags = wtypes.wsattr([wtypes.StringType(max_length=255)], mandatory=True)
+    rules = wtypes.wsattr([RuleTagUpdate], mandatory=True)
+    redirect_pool_id = wtypes.wsattr(wtypes.UuidType())
+    external_auth = wtypes.wsattr(l7policy.ExternalAuth())
+
+
 class L7PolicyActivationPOST(types.BaseType):
     expected_graph_revision = wtypes.wsattr(Revision, mandatory=True)
     expected_order = wtypes.wsattr([wtypes.UuidType()], mandatory=True)
     policies = wtypes.wsattr([L7PolicyActivationReference], mandatory=True)
+
+
+class GRPCAuthTransitionPOST(types.BaseType):
+    expected_graph_revision = wtypes.wsattr(Revision, mandatory=True)
+    expected_order = wtypes.wsattr([wtypes.UuidType()], mandatory=True)
+    policies = wtypes.wsattr([GRPCAuthTransition], mandatory=True)
+
+
+class GRPCAuthTransitionRootPOST(types.BaseType):
+    l7policy_grpc_auth_transition = wtypes.wsattr(
+        GRPCAuthTransitionPOST, mandatory=True)
+
+
+class GRPCAuthRecovery(types.BaseType):
+    operation_id = wtypes.wsattr(wtypes.UuidType(), mandatory=True)
 
 
 class L7PolicyActivationRootPOST(types.BaseType):
