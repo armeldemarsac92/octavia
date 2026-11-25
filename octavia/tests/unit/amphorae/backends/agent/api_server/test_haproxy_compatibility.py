@@ -177,9 +177,11 @@ class HAProxyCompatTestCase(base.TestCase):
                 self.assertIn('octavia-http-policy default default 1 503 1',
                               config.kwargs['input'])
 
+    @mock.patch.object(haproxy_compatibility, '_valid_haproxy_config')
     @mock.patch.object(haproxy_compatibility.subprocess, 'check_output')
     @mock.patch.object(haproxy_compatibility.os.path, 'isfile')
-    def test_listener_otlp_tracing_capability(self, isfile, check_output):
+    def test_listener_otlp_tracing_capability(
+            self, isfile, check_output, validate):
         check_output.return_value = (
             'HAProxy version 3.0.19-ade9c1262-octavia-strict-dns-v1'
             '-h2-alpn-v1-backend-sans-v1-http-policy-v1-http-mirror-v1'
@@ -189,6 +191,7 @@ class HAProxyCompatTestCase(base.TestCase):
         tracing = constants.GATEWAY_CAPABILITY_LISTENER_OTLP_TRACING
         sampling = constants.GATEWAY_CAPABILITY_LISTENER_OTLP_SAMPLING
         attrs = constants.GATEWAY_CAPABILITY_LISTENER_OTLP_SPAN_ATTRIBUTES
+        headers = constants.GATEWAY_CAPABILITY_LISTENER_OTLP_EXPORT_HEADERS
         isfile.return_value = False
         self.assertNotIn(tracing,
                          haproxy_compatibility.get_haproxy_capabilities())
@@ -198,18 +201,27 @@ class HAProxyCompatTestCase(base.TestCase):
         self.assertTrue(features[tracing])
         self.assertNotIn(sampling, features)
         self.assertNotIn(attrs, features)
+        self.assertNotIn(headers, features)
         isfile.side_effect = lambda path: path in (
             constants.HAPROXY_OTLP_TRACING_SCRIPT,
             constants.HAPROXY_OTLP_SPAN_ATTRIBUTES_SCRIPT)
         features = haproxy_compatibility.get_haproxy_capabilities()
         self.assertTrue(features[attrs])
         self.assertNotIn(sampling, features)
+        self.assertNotIn(headers, features)
         isfile.side_effect = None
         isfile.return_value = True
+        validate.return_value = False
+        self.assertNotIn(headers,
+                         haproxy_compatibility.get_haproxy_capabilities())
+        validate.return_value = True
         features = haproxy_compatibility.get_haproxy_capabilities()
         self.assertTrue(features[tracing])
         self.assertTrue(features[sampling])
         self.assertTrue(features[attrs])
+        self.assertTrue(features[headers])
+        self.assertIn('listen private-otlp-collector\n    mode tcp',
+                      validate.call_args.args[1])
         self.assertTrue(
             features[constants.GATEWAY_CAPABILITY_BACKEND_RETRY_BUDGET])
 

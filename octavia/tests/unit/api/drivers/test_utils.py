@@ -22,6 +22,7 @@ from octavia.api.drivers import utils
 from octavia.common import constants
 from octavia.common import data_models
 from octavia.common import exceptions
+from octavia.db import models
 from octavia.tests.common import sample_data_models
 from octavia.tests.unit import base
 
@@ -192,6 +193,25 @@ class TestUtils(base.TestCase):
                                                insert_headers={})
         self.assertEqual(ref_provider_list.to_dict(render_unsets=True),
                          provider_list.to_dict(render_unsets=True))
+
+    def test_otlp_export_headers_are_removed_for_amphora_aliases(self):
+        profile = dict(collector_pool_id=uuidutils.generate_uuid(),
+                       service_name='gateway.test', span_name='Gateway HTTP')
+        private = dict(profile, headers=[
+            {'name': 'authorization', 'value': 'Bearer demo'}])
+        for provider in ('amphora', 'amphorav2', 'octavia', 'third-party'):
+            with self.subTest(provider=provider):
+                lb = models.LoadBalancer(
+                    id=uuidutils.generate_uuid(), provider=provider)
+                listener = models.Listener(
+                    id=uuidutils.generate_uuid(), load_balancer=lb,
+                    otlp_tracing=private)
+                direct = utils.db_listener_to_provider_listener(listener)
+                nested = utils.db_loadbalancer_to_provider_loadbalancer(lb)
+                expected = private if provider == 'third-party' else profile
+                self.assertEqual(expected, direct.otlp_tracing)
+                self.assertEqual(expected, nested.listeners[0].otlp_tracing)
+                self.assertEqual(private, listener.otlp_tracing)
 
     @mock.patch('octavia.api.drivers.utils._get_secret_data')
     @mock.patch('octavia.common.tls_utils.cert_parser.load_certificates_data')

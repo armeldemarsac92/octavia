@@ -489,6 +489,15 @@ class HaproxyAmphoraLoadBalancerDriver(
                 if tracing_system_pools:
                     tracing_options['otlp_system_ca_applied'] = (
                         otlp_system_ca_applied)
+                headers_requested = {
+                    listener_id for listener_id, (profile, _) in
+                    tracing_targets.items() if profile and profile.get(
+                        'headers')
+                }
+                otlp_headers_applied = set()
+                if headers_requested:
+                    tracing_options['otlp_headers_applied'] = (
+                        otlp_headers_applied)
                 configured = {listener.id for listener in listeners_to_update}
                 tracing_results = {
                     listener_id: tracing_results[listener_id]
@@ -527,6 +536,9 @@ class HaproxyAmphoraLoadBalancerDriver(
                        if read_http_header_key is not None else {}),
                     **({'weighted_passthrough_degraded': True}
                        if weighted_passthrough_degraded else {}))
+                for listener_id in (tracing_results.keys() &
+                                    headers_requested - otlp_headers_applied):
+                    tracing_results[listener_id] = consts.ERROR
                 for listener_id, pool_id in tracing_system_pools.items():
                     if listener_id not in configured:
                         continue

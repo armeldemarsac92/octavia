@@ -919,7 +919,8 @@ class LoadBalancersController(base.BaseController):
                         driver, sampling=any('sampling' in spec
                                              for spec in tracing),
                         attributes=any('attributes' in spec
-                                       for spec in tracing))
+                                       for spec in tracing),
+                        headers=any('headers' in spec for spec in tracing))
                 if listener_repo.has_enabled_request_filters(
                         context.session, id):
                     driver_utils.require_listener_request_filters(driver)

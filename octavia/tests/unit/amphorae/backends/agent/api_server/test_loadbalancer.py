@@ -13,6 +13,7 @@
 #    under the License.
 import hashlib
 from pathlib import Path
+import socket
 import subprocess
 import tempfile
 from unittest import mock
@@ -25,6 +26,7 @@ from oslo_utils import uuidutils
 from octavia.amphorae.backends.agent.api_server import loadbalancer
 from octavia.amphorae.backends.agent.api_server import util as agent_util
 from octavia.common import constants as consts
+from octavia.common import utils
 from octavia.tests.common import sample_certs
 from octavia.tests.common import utils as test_utils
 import octavia.tests.unit.base as base
@@ -83,6 +85,125 @@ class ListenerTestCase(base.TestCase):
                 (consts.HAPROXY_CONFIG_PUBLICATION_HEADER, 'octavia-config')):
             with self.subTest(header=header):
                 self._check_reload_publication(header, prefix)
+
+    def test_otlp_export_headers_are_redacted_from_agent_responses(self):
+        label = 'cHJvYmU='
+        config = ('listen private-otlp-collector\n'
+                  f'    lua-load octavia.lua id sock service span '
+                  f'export_headers={label}'
+                  f'{consts.HAPROXY_OTLP_EXPORT_HEADER_MARKER}\n')
+        app = flask.Flask(__name__)
+        load_balancer = self.test_loadbalancer
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = self.useFixture(oslo_fixture.Config(CONF))
+            fixture.config(group='haproxy_amphora', base_path=directory)
+            target = Path(agent_util.config_path(LB_ID1))
+            target.parent.mkdir()
+            target.write_text(config)
+            with mock.patch.object(load_balancer, '_check_lb_exists'):
+                response = load_balancer.get_haproxy_config(LB_ID1)
+            self.assertIn('listen private-otlp-collector', response.text)
+            self.assertNotIn(label, response.text)
+            self.assertEqual(config, target.read_text())
+
+            error = subprocess.CalledProcessError(
+                1, 'haproxy', output=f'invalid token near {label}')
+            with (app.test_request_context(data=config),
+                  mock.patch.object(loadbalancer.haproxy_compatibility,
+                                    'process_cfg_for_version_compat',
+                                    side_effect=lambda configuration:
+                                    configuration),
+                  mock.patch.object(loadbalancer.subprocess, 'check_output',
+                                    side_effect=error),
+                  mock.patch.object(loadbalancer.LOG, 'error') as log):
+                response = load_balancer.upload_haproxy_config(
+                    LISTENER_ID1, LB_ID1)
+            self.assertEqual(400, response.status_code)
+            self.assertNotIn(label, response.text)
+            self.assertNotIn(label, str(log.call_args))
+
+    def test_prunes_retired_otlp_sockets_after_publication(self):
+        publication = '1' * 32
+        description = f'octavia-otlp-{publication}'
+        other_lb = uuidutils.generate_uuid()
+        app = flask.Flask(__name__)
+        agent = self.test_loadbalancer
+        fixture = self.useFixture(oslo_fixture.Config(CONF))
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            mock.patch.object(consts, 'HAPROXY_OTLP_TRACING_SOCKET_DIR',
+                              directory),
+            mock.patch.object(agent, '_check_lb_exists'),
+            mock.patch.object(agent, '_check_haproxy_status',
+                              return_value=consts.ACTIVE),
+            mock.patch.object(agent_util, 'run_systemctl_command'),
+            mock.patch.object(agent_util, 'send_vip_advertisements'),
+            mock.patch.object(loadbalancer.time, 'sleep'),
+            mock.patch.object(loadbalancer.haproxy_query,
+                              'HAProxyQuery') as query,
+            socket.socket(socket.AF_UNIX) as previous,
+            socket.socket(socket.AF_UNIX) as current,
+            socket.socket(socket.AF_UNIX) as unrelated,
+        ):
+            fixture.config(group='haproxy_amphora', base_path=directory)
+            prefix = utils.haproxy_otlp_export_socket_prefix(LB_ID1)
+            old_path = Path(directory, prefix + 'a' * 32 + '.sock')
+            new_path = Path(directory, prefix + 'b' * 32 + '.sock')
+            other = utils.haproxy_otlp_export_socket_prefix(other_lb)
+            other_path = Path(directory, other + 'a' * 32 + '.sock')
+            previous.bind(str(old_path))
+            previous.listen()
+            current.bind(str(new_path))
+            current.listen()
+            unrelated.bind(str(other_path))
+            unrelated.close()
+
+            cfg = Path(agent_util.config_path(LB_ID1))
+            cfg.parent.mkdir()
+            cfg.write_text(
+                f'global\n    description {description}\n'
+                f'listen exporter\n    bind {new_path} mode 600\n')
+            info = query.return_value.show_info
+            with app.test_request_context(headers={
+                    consts.HAPROXY_OTLP_PUBLICATION_HEADER: publication}):
+                info.return_value = {'description': 'old', 'Stopping': '0'}
+                self.assertEqual(503, agent.start_stop_lb(
+                    LB_ID1, consts.AMP_ACTION_RELOAD).status_code)
+                self.assertTrue(old_path.exists())
+                # Even a confirmed reload permits an outgoing process
+                # to finish draining an existing socket.
+                info.return_value = {'description': description,
+                                     'Stopping': '0'}
+                self.assertEqual(202, agent.start_stop_lb(
+                    LB_ID1, consts.AMP_ACTION_RELOAD).status_code)
+                self.assertTrue(old_path.exists())
+                previous.close()
+                self.assertEqual(202, agent.start_stop_lb(
+                    LB_ID1, consts.AMP_ACTION_RELOAD).status_code)
+                self.assertFalse(old_path.exists())
+                self.assertTrue(new_path.exists())
+                self.assertTrue(other_path.exists())
+
+            # A regular reload can remove the last exporter while serving
+            # remaining application listeners.
+            current.close()
+            cfg.write_text('frontend app\n    bind 127.0.0.1:81\n')
+            self.assertEqual(202, agent.start_stop_lb(
+                LB_ID1, consts.AMP_ACTION_RELOAD).status_code)
+            self.assertFalse(new_path.exists())
+            self.assertTrue(other_path.exists())
+
+            with socket.socket(socket.AF_UNIX) as retired:
+                retired.bind(str(old_path))
+            with (
+                mock.patch.object(agent, '_cert_dir',
+                                  return_value=str(cfg.parent / 'certs')),
+                mock.patch.object(agent_util, 'init_path',
+                                  return_value=str(cfg.parent / 'service')),
+            ):
+                self.assertEqual(200, agent.delete_lb(LB_ID1).status_code)
+            self.assertFalse(old_path.exists())
+            self.assertTrue(other_path.exists())
 
     def _check_reload_publication(self, header, prefix):
         publication = '1' * 32

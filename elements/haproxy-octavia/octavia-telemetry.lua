@@ -13,8 +13,18 @@ assert(span_name and #span_name <= 256 and span_name:match("^[A-Za-z0-9_.:/ -]+$
        and not span_name:find("  ", 1, true), "invalid telemetry span name")
 
 local function unhex(encoded)
-    assert(#encoded % 2 == 0, "invalid telemetry attribute encoding")
+    assert(#encoded % 2 == 0, "invalid telemetry data encoding")
     return (encoded:gsub("..", function(pair) return string.char(tonumber(pair, 16)) end))
+end
+
+local function load_export_headers(config)
+    local fields = {}
+    for item in config:gmatch("[^,]+") do
+        local name, value = item:match("^([0-9a-f]+):([0-9a-f]+)$")
+        assert(name and value, "invalid telemetry export field encoding")
+        fields[#fields + 1] = unhex(name) .. ": " .. unhex(value) .. "\r\n"
+    end
+    return table.concat(fields)
 end
 
 local function load_attributes(config)
@@ -28,6 +38,12 @@ local function load_attributes(config)
     return result
 end
 
+local export_headers
+local export_prefix = "export_headers="
+if arguments[1] and arguments[1]:sub(1, #export_prefix) == export_prefix then
+    export_headers = load_export_headers(
+        table.remove(arguments, 1):sub(#export_prefix + 1))
+end
 local attributes
 local config_prefix = "attributes="
 if arguments[1] and arguments[1]:sub(1, #config_prefix) == config_prefix then
@@ -54,6 +70,10 @@ assert(base_rate or not parent_rate, "telemetry sampling requires a base rate")
 -- actions use their own registry so registration order cannot change behavior.
 local action_prefix = attributes and "octavia-trace-attributes" or "octavia-trace"
 local namespace = attributes and "octavia_telemetry_attributes" or "octavia_telemetry"
+if export_headers then
+    action_prefix = action_prefix .. "-export-headers"
+    namespace = namespace .. "_export_headers"
+end
 local exporters_key = namespace .. "_exporters"
 local entropy_key = namespace .. "_entropy"
 local exporters = _G[exporters_key] or {}
@@ -299,7 +319,8 @@ local function export(body)
     if client:connect(collector_socket) then
         local request = ("POST /v1/traces HTTP/1.1\r\nHost: otlp.internal\r\n" ..
                          "Content-Type: application/json\r\nContent-Length: %d\r\n" ..
-                         "Connection: close\r\n\r\n%s"):format(#body, body)
+                         "Connection: close\r\n%s\r\n%s"):format(
+                             #body, export_headers or "", body)
         if client:send(request) then
             -- Wait for the status without buffering the collector's response.
             client:receive(12)

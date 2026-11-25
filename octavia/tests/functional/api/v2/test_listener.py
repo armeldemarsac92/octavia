@@ -14,6 +14,7 @@
 #    under the License.
 
 import copy
+import hashlib
 import random
 from unittest import mock
 
@@ -439,6 +440,126 @@ class TestListener(base.BaseAPITest):
         for config in configs.values():
             self.assertIn(constants.HAPROXY_OTLP_TRACING_SCRIPT, config)
             self.assertNotIn(script, config)
+
+    @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
+    def test_otlp_export_headers_publication_and_withdrawal(self, rpc):
+        lb = self.create_load_balancer(
+            uuidutils.generate_uuid(), provider='amphora')['loadbalancer']
+        self.set_lb_status(lb['id'])
+        pool = self.create_pool(lb['id'], 'HTTP', 'ROUND_ROBIN')['pool']
+        self.set_lb_status(lb['id'])
+        base = dict(collector_pool_id=pool['id'],
+                    service_name='test.gateway', span_name='Gateway HTTP')
+        label = "demo's #$%\\tag\tsecond"
+        requested = dict(base, headers=[
+            {'name': 'X-Probe', 'value': label},
+            {'name': 'Authorization', 'value': 'Bearer demo'},
+        ])
+        caps_path = self.PROVIDERS_PATH + '/amphora/gateway_capabilities'
+        cap = constants.GATEWAY_CAPABILITY_LISTENER_OTLP_EXPORT_HEADERS
+        base_cap = constants.GATEWAY_CAPABILITY_LISTENER_OTLP_TRACING
+        opt = 'enabled_listener_otlp_export_headers_providers'
+        self.conf.config(group='api_settings', **{opt: ['amphora']})
+        self.assertNotIn(cap, self.get(caps_path).json['gateway_capabilities'])
+        self.conf.config(group='api_settings',
+                         enabled_listener_otlp_tracing_providers=['amphora'],
+                         **{opt: []})
+        args = ('HTTP', 8050, lb['id'])
+        self.create_listener(*args, status=501, otlp_tracing=requested)
+        self.conf.config(group='api_settings', **{opt: ['amphora']})
+        self.assertIn(cap, self.get(caps_path).json['gateway_capabilities'])
+        listener = self.create_listener(*args, otlp_tracing=requested)[
+            'listener']
+        path = self.LISTENER_PATH.format(listener_id=listener['id'])
+        canonical = (
+            f'authorization\0Bearer demo\0x-probe\0{label}\0'.encode('ascii'))
+        readback = dict(base, headers_sha256=hashlib.sha256(
+            canonical).hexdigest())
+        self.assertEqual(readback, listener['otlp_tracing'])
+        self.assertEqual(base, rpc.return_value.cast.call_args.kwargs[
+            constants.LISTENER]['otlp_tracing'])
+        self.assertEqual(readback, self.get(path).json['listener'][
+            'otlp_tracing'])
+        self.assertEqual(readback, next(
+            item['otlp_tracing'] for item in self.get(
+                self.LISTENERS_PATH).json['listeners']
+            if item['id'] == listener['id']))
+
+        with db_api.session().begin() as session:
+            self.amphora_repo.create(
+                session, id=uuidutils.generate_uuid(),
+                role=constants.ROLE_STANDALONE, status=constants.ACTIVE,
+                load_balancer_id=lb['id'], lb_network_ip='192.0.2.1')
+        details = {base_cap: True}
+        driver, client, _ = self._otlp_driver(details)
+
+        def render(status):
+            with db_api.session().begin() as session:
+                lb_state = self.lb_repo.get(session, id=lb['id'])
+            driver.update(lb_state)
+            self.assertEqual(status, self.get(path).json['listener'][
+                'otlp_tracing_status'])
+            config = client.upload_config.call_args.args[2]
+            self.assertIn(f"frontend {listener['id']}", config)
+            self.assertNotIn(label, config)
+            return config
+
+        self.assertNotIn('octavia-trace-', render(constants.ERROR))
+        details[cap] = True
+        config = render(constants.ACTIVE)
+        encoded = label.encode('ascii').hex()
+        private = config.split(f"listen octavia-otlp-{pool['id']}:", 1)[1]
+        self.assertIn('mode tcp', private)
+        self.assertIn(f'{b"x-probe".hex()}:{encoded}', config)
+        self.assertEqual(1, config.count(encoded))
+        self.assertNotIn('tune.bufsize', config)
+        original_socket = next(line for line in private.splitlines()
+                               if 'bind /run/octavia/telemetry/' in line)
+
+        self.set_lb_status(lb['id'])
+        rotated = dict(base, headers=[{'name': 'X-Probe', 'value': 'rotated'}])
+        response = self.put(path, {'listener': {'otlp_tracing': rotated}})
+        self.assertEqual(dict(
+            base, headers_sha256=hashlib.sha256(
+                b'x-probe\0rotated\0').hexdigest()),
+            response.json['listener']['otlp_tracing'])
+        self.assertEqual(base, rpc.return_value.cast.call_args.kwargs[
+            constants.LISTENER_UPDATES]['otlp_tracing'])
+        replacement = render(constants.ACTIVE)
+        self.assertNotIn(encoded, replacement)
+        self.assertNotIn(original_socket, replacement)
+
+        self.conf.config(group='api_settings', **{opt: []})
+        self.assertNotIn('octavia-trace-', render(constants.ERROR))
+        self.set_lb_status(lb['id'], status=constants.ERROR)
+        response = self.put(path, {'listener': {
+            'otlp_tracing': dict(base, headers=[])}})
+        self.assertEqual(base, response.json['listener']['otlp_tracing'])
+        config = render(constants.ACTIVE)
+        self.assertIn(constants.HAPROXY_OTLP_TRACING_SCRIPT, config)
+        self.assertNotIn(constants.HAPROXY_OTLP_EXPORT_HEADER_MARKER, config)
+
+    def test_otlp_export_header_validation_redacts_errors(self):
+        label = 'fixture-only'
+        first = {'name': 'X-Custom', 'value': label}
+        tracing = dict(collector_pool_id=self.pool_id,
+                       service_name='test.gateway', span_name='Gateway HTTP')
+        invalid = (
+            dict(tracing, headers_sha256=label),
+            dict(tracing, headers=[first, dict(first, name='x-custom')]),
+            dict(tracing, headers=[dict(first, name='CONTENT-Length')]),
+            dict(tracing, headers=[dict(first, value=label + '\n')]),
+            dict(tracing, headers=[dict(first, value=label + '  extra')]),
+            dict(tracing, headers=[dict(first, value=label + 'é')]),
+            dict(tracing, headers=[dict(first, value=label * 410)]),
+            dict(tracing, headers=[dict(first, name='q' * 257)]),
+            dict(tracing, headers=[first] * 17),
+        )
+        for spec in invalid:
+            response = self.post(self.LISTENERS_PATH, {'listener': {
+                'loadbalancer_id': self.lb_id, 'protocol': 'HTTP',
+                'protocol_port': 8050, 'otlp_tracing': spec}}, status=400)
+            self.assertNotIn(label, response.text)
 
     @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
     def test_otlp_withdrawal_holds_collectors_until_matching_reload(self, rpc):
