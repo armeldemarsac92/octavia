@@ -546,8 +546,8 @@ backend {{ pool.id }}:{{ listener.id }}
 {% macro frontend_macro(constants, lib_consts, listener, lb_vip_address, additional_vips) %}
 frontend {{ listener.id }}
     {% if listener.otlp_tracing is defined %}
-    http-request lua.octavia-trace-start {{ listener.id }}
-    http-after-response lua.octavia-trace-finish
+    http-request lua.{{ listener.otlp_tracing.action_prefix }}-start {{ listener.id }}
+    http-after-response lua.{{ listener.otlp_tracing.action_prefix }}-finish
     {% endif %}
     {% if listener.connection_limit is defined %}
     maxconn {{ listener.connection_limit }}
@@ -1136,7 +1136,7 @@ backend {{ pool.id }}:{{ listener.id }}
       {% endif %}
     {% endif %}
     {% if listener.otlp_tracing is defined and (pool.protocol == 'http' or pool.proxy_protocol is not none) %}
-    http-request lua.octavia-trace-propagate
+    http-request lua.{{ listener.otlp_tracing.action_prefix }}-propagate
     {% endif %}
     {% if pool.get(constants.HTTP_REUSE, False) and (
           pool.protocol.lower() == constants.PROTOCOL_HTTP.lower() or

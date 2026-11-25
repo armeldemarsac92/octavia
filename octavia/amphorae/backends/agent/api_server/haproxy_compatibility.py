@@ -220,6 +220,10 @@ def get_haproxy_capabilities():
         if os.path.isfile(constants.HAPROXY_OTLP_SAMPLING_SCRIPT):
             capabilities[
                 constants.GATEWAY_CAPABILITY_LISTENER_OTLP_SAMPLING] = True
+        if os.path.isfile(constants.HAPROXY_OTLP_SPAN_ATTRIBUTES_SCRIPT):
+            capabilities[
+                constants.GATEWAY_CAPABILITY_LISTENER_OTLP_SPAN_ATTRIBUTES
+            ] = True
     return capabilities
 
 

@@ -180,6 +180,10 @@ api_opts = [
                 help=_('Providers with qualified listener OTLP sampling. '
                        'Enable alongside listener OTLP tracing after updating '
                        'the API, workers and all eligible Amphora images.')),
+    cfg.ListOpt('enabled_listener_otlp_span_attributes_providers', default=[],
+                help=_('Providers with qualified OTLP span attributes. Enable '
+                       'alongside listener OTLP tracing after updating the '
+                       'API, workers and all eligible Amphora images.')),
     cfg.ListOpt('enabled_http_request_mirror_providers', default=[],
                 help=_('Providers whose regional fleets support HTTP request '
                        'mirroring. Enable after upgrading the database, '

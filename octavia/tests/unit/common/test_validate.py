@@ -34,6 +34,32 @@ class TestValidations(base.TestCase):
         super().setUp()
         self.conf = oslo_fixture.Config(cfg.CONF)
 
+    def test_otlp_span_attribute_validation(self):
+        tracing = dict(collector_pool_id=uuidutils.generate_uuid(),
+                       service_name='test.gateway', span_name='Gateway HTTP')
+        literal = dict(name='region', source_type='Literal',
+                       literal_value='測試 "value"\nnext line')
+        self.assertEqual(tracing, validate.otlp_tracing(
+            dict(tracing, attributes=[])))
+        self.assertEqual(dict(tracing, attributes=[literal]),
+                         validate.otlp_tracing(
+                             dict(tracing, attributes=[literal])))
+        for attributes in (
+                None, {}, [literal, literal],
+                [dict(literal, literal_value='')],
+                [dict(literal, literal_value='🍋' * 1025)],
+                [dict(literal, literal_value='\ud800')],
+                [dict(literal, header_name='X-Test')],
+                [dict(literal, name='http.response.status_code')],
+                [dict(name='header', source_type='Header',
+                      header_name=':path')],
+                [dict(name='builtin', source_type='Attribute',
+                      attribute_key='http.request.body.size')]):
+            with self.subTest(attributes=attributes):
+                self.assertRaises(exceptions.ValidationException,
+                                  validate.otlp_tracing,
+                                  dict(tracing, attributes=attributes))
+
     def test_validate_url(self):
         ret = validate.url('http://example.com')
         self.assertTrue(ret)
