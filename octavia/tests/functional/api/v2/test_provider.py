@@ -127,6 +127,26 @@ class TestGatewayCapabilities(base.BaseAPITest):
         self.assertEqual([], self.get(self.capabilities_path('noop_driver'))
                          .json['gateway_capabilities'])
 
+    def test_grpc_binary_request_metadata_capability(self):
+        path = self.capabilities_path()
+        name = 'grpc_binary_request_metadata_v1'
+        self.conf.config(group='api_settings',
+                         enabled_grpc_content_type_providers=['amphora'])
+        self.assertNotIn(name, self.get(path).json['gateway_capabilities'])
+        self.conf.config(
+            group='api_settings',
+            enabled_request_header_operation_providers=['amphora'])
+        self.assertIn(name, self.get(path).json['gateway_capabilities'])
+        self.conf.config(
+            group='api_settings',
+            enabled_request_header_operation_providers=[],
+            enabled_gateway_action_providers=['amphora'],
+            enabled_weighted_target_request_filter_providers=['amphora'])
+        self.assertIn(name, self.get(path).json['gateway_capabilities'])
+        self.conf.config(group='api_settings',
+                         enabled_grpc_content_type_providers=[])
+        self.assertNotIn(name, self.get(path).json['gateway_capabilities'])
+
     def test_http_request_redirect_capability_requires_compatible_opt_in(self):
         empty = {'gateway_capabilities': []}
         self.assertEqual(empty, self.get(self.capabilities_path()).json)

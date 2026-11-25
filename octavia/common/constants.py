@@ -92,6 +92,8 @@ GATEWAY_CAPABILITY_WEIGHTED_TARGET_FILTERS = (
     'weighted_http_target_request_filters_v1')
 GATEWAY_CAPABILITY_REQUEST_HEADER_OPERATIONS = 'request_header_operations_v1'
 GATEWAY_CAPABILITY_RESPONSE_HEADER_OPERATIONS = 'response_header_operations_v1'
+GATEWAY_CAPABILITY_GRPC_BINARY_REQUEST_METADATA = (
+    'grpc_binary_request_metadata_v1')
 GATEWAY_CAPABILITY_GRPC_BINARY_RESPONSE_METADATA = (
     'grpc_binary_response_metadata_v1')
 GATEWAY_CAPABILITY_HTTP_REQUEST_REDIRECT = 'http_request_redirect_v1'

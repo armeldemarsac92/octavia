@@ -151,6 +151,12 @@ def validate_policy_options_on_create(
             continue
         checked = validate.sanitize_l7policy_api_args(
             policy.copy(), create=True)
+        if any(rule.get('enabled', True) and
+               rule['type'] == constants.L7RULE_TYPE_GRPC_CONTENT_TYPE
+               for rule in checked.get('rules') or []):
+            driver_utils.require_grpc_request_metadata(
+                driver, protocol, checked.get('request_header_operations'),
+                checked.get('targets'))
         if creating_load_balancer and validate.request_mirror_pool_ids(
                 checked.get('request_mirrors'), checked.get('targets')):
             raise exceptions.ValidationException(

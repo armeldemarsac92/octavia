@@ -1758,13 +1758,16 @@ class JinjaTemplater:
                    for rule in self._active_l7rules(l7policy)]
         ret_value['l7rules'] = l7rules
         if l7policy.enabled and l7rules:
+            grpc_policy_id = l7policy.id if any(
+                rule['type'] == constants.L7RULE_TYPE_GRPC_CONTENT_TYPE
+                for rule in l7rules) else None
             if l7policy.action == constants.L7POLICY_ACTION_FIXED_RESPONSE:
                 ret_value['fixed_http_status_code'] = (
                     validate.fixed_http_status_code(l7policy.fixed_response))
             elif l7policy.action == constants.L7POLICY_ACTION_WEIGHTED_TARGETS:
                 targets, total = self._transform_weighted_targets(
                     l7policy.targets, available_pool_ids,
-                    available_mirror_pool_ids)
+                    available_mirror_pool_ids, grpc_policy_id=grpc_policy_id)
                 ret_value['weighted_targets'] = targets
                 ret_value['total_weight'] = total
             elif l7policy.action == constants.L7POLICY_ACTION_REDIRECT_REQUEST:
@@ -1792,16 +1795,10 @@ class JinjaTemplater:
                     (constants.L7POLICY_ACTION_REDIRECT_TO_POOL,
                      constants.L7POLICY_ACTION_WEIGHTED_TARGETS)):
                 ret_value['request_cors'] = self._transform_request_cors(cors)
-            grpc_policy = any(
-                rule['type'] == constants.L7RULE_TYPE_GRPC_CONTENT_TYPE
-                for rule in l7rules)
             for field in ('request_header_operations',
                           'response_header_operations'):
                 operations = getattr(l7policy, field)
                 if operations:
-                    grpc_policy_id = (l7policy.id if grpc_policy and
-                                      field == 'response_header_operations'
-                                      else None)
                     ret_value[field] = self._transform_header_operations(
                         operations, field, grpc_policy_id=grpc_policy_id)
         return ret_value
@@ -1999,12 +1996,18 @@ class JinjaTemplater:
 
         operations = validate.header_operations(operations, field)
         if (grpc_policy_id is not None and
-                validate.grpc_response_header_field_count(operations) >
+                validate.grpc_metadata_field_count(operations) >
                 constants.MAX_L7POLICY_HEADER_OPERATIONS):
-            LOG.warning('Omitting response metadata for gRPC L7 policy %s '
-                        'because its expanded field count exceeds the limit.',
-                        grpc_policy_id)
-            return []
+            if field == 'response_header_operations':
+                LOG.warning('Omitting response metadata for gRPC policy %s: '
+                            'too many expanded fields.', grpc_policy_id)
+                return []
+            # Existing request modifiers may also remove or replace headers.
+            # Retain their literal values until the operator updates the list.
+            LOG.warning('Retaining request metadata as literal fields for '
+                        'gRPC L7 policy %s because its expanded field count '
+                        'exceeds the limit.', grpc_policy_id)
+            grpc_policy_id = None
 
         transformed = []
         for operation in operations:
@@ -2017,7 +2020,7 @@ class JinjaTemplater:
             values = [value]
             if (grpc_policy_id is not None and
                     operation['name'].endswith('-bin') and ',' in value):
-                # gRPC clients decode each binary metadata field separately.
+                # Some gRPC implementations decode each field separately.
                 values = [item.strip(' \t') for item in value.split(',')]
             for value in values:
                 # HAProxy parses a log-format expression after the config
@@ -2046,7 +2049,8 @@ class JinjaTemplater:
                 phases['after_headers'] + rewrites + phases['after_rewrite'])
 
     def _transform_weighted_targets(self, targets, available_pool_ids,
-                                    available_mirror_pool_ids=()):
+                                    available_mirror_pool_ids=(), *,
+                                    grpc_policy_id=None):
         intervals = []
         total = 0
         for target in targets:
@@ -2064,7 +2068,8 @@ class JinjaTemplater:
                 interval['pool_id'] = target['pool_id']
                 operations = target.get('request_header_operations', [])
                 headers = self._transform_header_operations(
-                    operations, 'request_header_operations')
+                    operations, 'request_header_operations',
+                    grpc_policy_id=grpc_policy_id)
                 rewrites = []
                 if 'request_url_rewrite' in target:
                     rewrites = self._transform_request_url_rewrite(

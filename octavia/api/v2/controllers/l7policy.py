@@ -81,6 +81,22 @@ def _expands_retry_backoff(previous_policy, policy):
                               set(previous_retry.get('codes', []))))
 
 
+def _weighted_draws(targets):
+    total = sum(target['weight'] for target in targets)
+    start = 0
+    for target in targets:
+        end = start + target['weight']
+        yield target, start, end, total
+        start = end
+
+
+def _extends_draw(previous, current):
+    _, old_start, old_end, old_total = previous
+    _, start, end, total = current
+    return (start * old_total < old_start * total or
+            end * old_total > old_end * total)
+
+
 def _requires_target_filter_capability(previous, targets, expands_scope,
                                        *, mirrors=False):
     """Allow removal of existing filters after regional withdrawal."""
@@ -90,13 +106,12 @@ def _requires_target_filter_capability(previous, targets, expands_scope,
 
     # The draw selects an occurrence by its ordered weight. An unchanged
     # positive filter may remain in the same or a narrower selection interval.
-    previous_total = sum(target['weight'] for target in previous)
-    total = sum(target['weight'] for target in targets)
-    previous_start = start = 0
-    for index, target in enumerate(targets):
-        old = previous[index] if index < len(previous) else {}
-        previous_end = previous_start + old.get('weight', 0)
-        end = start + target['weight']
+    old_draws = list(_weighted_draws(previous))
+    missing = ({}, 0, 0, old_draws[-1][-1] if old_draws else 0)
+    for index, draw in enumerate(_weighted_draws(targets)):
+        target = draw[0]
+        previous_draw = old_draws[index] if index < len(old_draws) else missing
+        old = previous_draw[0]
         filters = validate.target_request_filters(target)
         copies = target.get('request_mirrors', [])
         has_filters = bool(copies if mirrors else filters)
@@ -111,12 +126,54 @@ def _requires_target_filter_capability(previous, targets, expands_scope,
             if (target.get('pool_id') != old.get('pool_id') or
                     changed):
                 return True
-            extends_draw = (start * previous_total < previous_start * total or
-                            end * previous_total > previous_end * total)
-            if target['weight'] and (expands_scope or extends_draw):
+            if target['weight'] and (
+                    expands_scope or _extends_draw(previous_draw, draw)):
                 return True
-        previous_start, start = previous_end, end
     return False
+
+
+def _expands_grpc_binary_target_metadata(previous, targets, expands_scope):
+    if previous == targets and not expands_scope:
+        return False
+    # Match each retained occurrence once, including when a sibling was
+    # removed. An occurrence cannot inherit a wider share of the draw.
+    retained = [
+        (draw, validate.grpc_binary_metadata_lists(
+            draw[0].get('request_header_operations')))
+        for draw in _weighted_draws(previous or [])]
+    draws = sorted(_weighted_draws(targets or []),
+                   key=lambda draw: draw[0]['weight'] == 0)
+    for draw in draws:
+        target = draw[0]
+        metadata = validate.grpc_binary_metadata_lists(
+            target.get('request_header_operations'))
+        if not metadata:
+            continue
+        if target['weight'] and expands_scope:
+            return True
+        for index, (old, old_metadata) in enumerate(retained):
+            same_pool = old[0].get('pool_id') == target.get('pool_id')
+            retains_metadata = all(op in old_metadata for op in metadata)
+            draw_fits = not target['weight'] or (
+                old[0]['weight'] and not _extends_draw(old, draw))
+            if same_pool and retains_metadata and draw_fits:
+                retained.pop(index)
+                break
+        else:
+            return True
+    return False
+
+
+def _expands_weighted_forwarding(previous, targets):
+    old_pools = {target['pool_id'] for target in previous
+                 if 'pool_id' in target and target['weight']}
+    pools = {target['pool_id'] for target in targets
+             if 'pool_id' in target and target['weight']}
+    return bool(pools - old_pools) or (
+        sum(target['weight'] for target in targets if 'pool_id' in target) *
+        sum(target['weight'] for target in previous) >
+        sum(target['weight'] for target in previous if 'pool_id' in target) *
+        sum(target['weight'] for target in targets))
 
 
 class L7PolicyActivationController(base.BaseController):
@@ -305,6 +362,12 @@ class L7PolicyActivationController(base.BaseController):
                 if protocol == constants.PROTOCOL_TCP:
                     driver_utils.require_tls_sni_rule_comparison(
                         driver, rule.compare_type)
+        if any(rule.enabled and
+               rule.type == constants.L7RULE_TYPE_GRPC_CONTENT_TYPE
+               for rule in policy.l7rules):
+            driver_utils.require_grpc_request_metadata(
+                driver, protocol, policy.request_header_operations,
+                policy.targets)
         driver_utils.require_gateway_policy_action(
             driver, policy.action, protocol,
             tcp_tls_termination=listener.tcp_tls_termination,
@@ -564,6 +627,13 @@ class L7PolicyController(base.BaseController):
                     driver_utils.require_tls_sni_rule_comparison(
                         driver, rule['compare_type'],
                         listener.tcp_tls_termination and not passthrough)
+            if any(rule['enabled'] and
+                   rule['type'] == constants.L7RULE_TYPE_GRPC_CONTENT_TYPE
+                   for rule in rules):
+                driver_utils.require_grpc_request_metadata(
+                    driver, listener.protocol,
+                    l7policy_dict.get('request_header_operations'),
+                    l7policy_dict.get('targets'))
             db_l7policy = self._validate_create_l7policy(
                 lock_session, l7policy_dict)
             if rules:
@@ -833,11 +903,48 @@ class L7PolicyController(base.BaseController):
             validate_policy_headers(
                 l7policy_dict, listener.protocol, driver,
                 old_policy=db_l7policy)
+            old_request_ops = db_l7policy.request_header_operations
+            request_ops = l7policy_dict.get('request_header_operations',
+                                            old_request_ops)
+            changed_request_ops = (request_ops
+                                   if request_ops != old_request_ops else None)
             response_ops = l7policy_dict.get('response_header_operations')
-            if response_ops and policy_repo.has_enabled_l7rule(
-                    lock_session, constants.L7RULE_TYPE_GRPC_CONTENT_TYPE,
-                    policy_id=id):
-                validate.validate_grpc_response_header_fields(response_ops)
+            updated_targets = l7policy_dict.get('targets')
+            binary_scope_expanded = enabled and (
+                reopening or position < db_l7policy.position or
+                hostname != db_l7policy.https_listener_hostname)
+            binary_ops = validate.grpc_binary_metadata_lists(request_ops)
+            new_binary_ops = changed_request_ops and any(
+                op not in (old_request_ops or [])
+                for op in binary_ops)
+            binary_forwarding_expanded = binary_ops and enabled and (
+                binary_scope_expanded or routing_changed_or_disabled or
+                adds_mirrors or (action == weighted_action and
+                                 _expands_weighted_forwarding(
+                                     old_targets, targets)))
+            requires_binary_metadata = (
+                new_binary_ops or binary_forwarding_expanded or
+                _expands_grpc_binary_target_metadata(
+                    old_targets, targets, binary_scope_expanded))
+            if ((requires_binary_metadata or changed_request_ops or
+                 response_ops or updated_targets) and
+                    policy_repo.has_enabled_l7rule(
+                        lock_session, constants.L7RULE_TYPE_GRPC_CONTENT_TYPE,
+                        policy_id=id)):
+                if requires_binary_metadata:
+                    driver_utils.require_grpc_binary_request_metadata(
+                        driver, listener.protocol)
+                # An existing occurrence can retain a legacy literal list.
+                # A duplicate in the new array consumes a separate occurrence.
+                retained = list(old_targets or [])
+                added = []
+                for target in updated_targets or []:
+                    if target in retained:
+                        retained.remove(target)
+                    else:
+                        added.append(target)
+                validate.validate_grpc_metadata_fields(
+                    changed_request_ops, response_ops, added)
 
             # Prepare the data for the driver data model
             provider_l7policy_dict = (
