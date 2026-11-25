@@ -45,7 +45,8 @@ class TestValidations(base.TestCase):
                                        'forward_body_max_size': invalid})
         self.assertRaises(exceptions.ValidationException,
                           validate.http_external_auth,
-                          {**auth, 'forward_body_max_size': 4096})
+                          {**auth, 'protocol': 'GRPC',
+                           'forward_body_max_size': 4096})
 
     # Note that particularly complex validation testing is handled via
     # functional tests elsewhere (ex. repository tests)

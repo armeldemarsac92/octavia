@@ -89,6 +89,10 @@ class GatewayCapabilitiesController(base.BaseController):
         response = provider_types.GatewayCapabilitiesResponse(
             gateway_capabilities=capabilities)
         if (constants.GATEWAY_CAPABILITY_L7POLICY_EXTERNAL_AUTH_FORWARD_BODY
+                in capabilities or
+                constants.GATEWAY_CAPABILITY_LISTENER_AUTH_BODY
+                in capabilities or
+                constants.GATEWAY_CAPABILITY_HTTPS_LISTENER_AUTH_BODY
                 in capabilities):
             response.l7policy_external_auth_max_body_bytes = (
                 validate.l7policy_external_auth_max_body_bytes())

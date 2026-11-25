@@ -68,6 +68,25 @@ def pool_ids(sections):
             for request in section.get('requests', ())}
 
 
+def body_authorizers(sections):
+    return (request['http'] for section in sections or ()
+            for request in section.get('requests', ())
+            if validate.l7policy_external_auth_forwards_body(request['http']))
+
+
+def is_withdrawal(current, sections):
+    """Match retained sections in order, allowing removal or local denial."""
+    if not current or sections is None or sections == current:
+        return False
+    previous = iter(current)
+    for section in sections:
+        old = next((old for old in previous
+                    if old['hostname'] == section['hostname']), None)
+        if old is None or (old != section and not section.get('reject')):
+            return False
+    return True
+
+
 def validate_listener(protocol, sections):
     if sections and protocol not in (constants.PROTOCOL_HTTP,
                                      constants.PROTOCOL_TERMINATED_HTTPS):
