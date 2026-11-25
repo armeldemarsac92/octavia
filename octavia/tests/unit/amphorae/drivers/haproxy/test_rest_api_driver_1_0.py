@@ -392,7 +392,7 @@ class TestHaproxyAmphoraLoadBalancerDriverTest(base.TestCase):
 
         def acknowledgements(capabilities):
             votes = {}
-            self.driver._record_staged_grpc_system_ca(
+            self.driver._record_staged_auth_system_ca(
                 lb, lb.listeners, certs, capabilities, votes)
             return votes
 
@@ -411,6 +411,49 @@ class TestHaproxyAmphoraLoadBalancerDriverTest(base.TestCase):
             external_auth={'protocol': 'GRPC', 'pool_id': pool.id})]
         # Once attached, only the rendered private transport can attest trust.
         self.assertEqual({}, acknowledgements(details))
+
+    def test_detached_http_rule_authorizer_attests_system_ca(self):
+        pool = data_models.Pool(
+            id=FAKE_UUID_1, project_id='project', load_balancer_id='lb',
+            protocol=constants.PROTOCOL_HTTP, enabled=True, tls_enabled=True,
+            backend_tls_system_ca=True,
+            backend_tls_hostname='authz.example.test',
+            tags=[constants.GATEWAY_HTTP_AUTH_TLS_POOL_TAG])
+        listener = data_models.Listener(
+            id='listener', enabled=False, project_id='project',
+            protocol=constants.PROTOCOL_HTTP, pools=[], l7policies=[])
+        lb = data_models.LoadBalancer(
+            id='lb', project_id='project', enabled=True, pools=[pool],
+            listeners=[listener])
+        self.assertEqual((True, {pool.id: (listener, pool)}),
+                         self.driver._backend_tls_pools(lb))
+        details = {
+            constants.GATEWAY_CAPABILITY_LISTENER_REQUEST_FILTERS: True,
+            constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME: True,
+        }
+        certs = {pool.id: {'system_ca_sha256': 'a' * 64}}
+        votes = {}
+        self.driver._record_staged_auth_system_ca(
+            lb, lb.listeners, certs, details, votes)
+        self.assertEqual({}, votes)
+
+        config = self.useFixture(oslo_fixture.Config(cfg.CONF))
+        for name in ('enabled_l7policy_http_external_auth_providers',
+                     'enabled_l7policy_http_external_auth_tls_providers',
+                     'enabled_backend_tls_hostname_providers'):
+            config.config(group='api_settings', **{name: ['amphora']})
+        self.driver._record_staged_auth_system_ca(
+            lb, lb.listeners, certs, details, votes)
+        self.assertEqual({pool.id: 'a' * 64}, votes)
+
+        listener.enabled = True
+        listener.l7policies = [data_models.L7Policy(
+            id='policy', enabled=True, project_id='project',
+            external_auth={'pool_id': pool.id})]
+        votes.clear()
+        self.driver._record_staged_auth_system_ca(
+            lb, lb.listeners, certs, details, votes)
+        self.assertEqual({}, votes)
 
     def test_protected_pool_preflights_every_amphora(self):
         capability = constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME
