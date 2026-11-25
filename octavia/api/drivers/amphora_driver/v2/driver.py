@@ -92,6 +92,7 @@ class AmphoraProviderDriver(driver_base.ProviderDriver):
     supports_l7policy_external_auth_forward_body = True
     supports_l7policy_initial_rules = True
     supports_l7policy_batch_activation = True
+    supports_l7policy_grpc_auth_transition = True
     supports_l7policy_conditional_removal = True
     supports_tcp_connection_rejection = True
     supports_udp_packet_drop = True

@@ -255,6 +255,15 @@ def gateway_capabilities(driver):
             is True):
         capabilities.append(
             constants.GATEWAY_CAPABILITY_L7POLICY_BATCH_ACTIVATION)
+    if (driver.name in
+            api_settings.enabled_l7policy_grpc_auth_transition_providers and
+            getattr(driver, 'supports_l7policy_grpc_auth_transition', False)
+            is True and
+            constants.GATEWAY_CAPABILITY_L7POLICY_GRPC_EXTERNAL_AUTH
+            in capabilities and
+            constants.GATEWAY_CAPABILITY_FIXED_HTTP_RESPONSES in capabilities):
+        capabilities.append(
+            constants.GATEWAY_CAPABILITY_L7POLICY_GRPC_AUTH_TRANSITION)
     if l7policy_conditional_removal_available(driver):
         capabilities.append(
             constants.GATEWAY_CAPABILITY_L7POLICY_CONDITIONAL_REMOVAL)

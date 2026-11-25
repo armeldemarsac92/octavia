@@ -14,6 +14,7 @@
 
 import hashlib
 import json
+import time
 
 from wsme.rest import json as wsme_json
 
@@ -29,6 +30,18 @@ from octavia.common import validate
 
 
 PENDING = ('pending', 'rendering', 'reverting')
+GRPC_AUTH_RECOVERY_DELAY = 15
+
+
+def grpc_auth_operation(operation, listener_id):
+    return (operation.get('listener_id') == listener_id and
+            bool(operation.get('request', {}).get('grpc_auth_transition')))
+
+
+def grpc_auth_recovery_ready(operation):
+    return (operation.get('phase') == 'reverting' or
+            (operation.get('phase') in PENDING and
+             time.time() >= operation.get('recover_after', 0)))
 
 
 # The enabled flag is part of the precondition. An applied operation
@@ -70,21 +83,25 @@ def _digest(data):
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
-def _configuration(value):
+def _configuration(value, *, bind_system_ca):
     if isinstance(value, dict):
         return {key: sorted(item or []) if key == 'tags' else
-                _configuration(item) for key, item in value.items()
-                if key not in ('created_at', 'updated_at', 'operating_status',
-                               'backend_tls_system_ca_sha256')}
+                _configuration(item, bind_system_ca=bind_system_ca)
+                for key, item in value.items()
+                if key not in ('created_at', 'updated_at', 'operating_status')
+                if bind_system_ca or key != 'backend_tls_system_ca_sha256'}
     if isinstance(value, list):
         if value and all(isinstance(item, dict) and set(item) == {'id'}
                          for item in value):
             value = sorted(value, key=lambda item: item['id'])
-        return [_configuration(item) for item in value]
+        return [_configuration(item, bind_system_ca=bind_system_ca)
+                for item in value]
     return value
 
 
-def snapshot(session, repositories, lb, listener, *, pending=False):
+def snapshot(session, repositories, lb, listener, *, pending=False,
+             additional_pools=()):
+    """Read the graph used by the renderer, including new destinations."""
     repo = repositories.l7policy
     policies = repo.get_listener_policies_for_update(session, listener.id)
     repo.load_activation_references(session, policies)
@@ -92,7 +109,7 @@ def snapshot(session, repositories, lb, listener, *, pending=False):
         pool_id: {constants.PROTOCOL_HTTP}
         for pool_id in listener_request_filters.pool_ids(
             listener.request_filter_sections)}
-    pool_ids = {listener.default_pool_id}
+    pool_ids = {listener.default_pool_id, *additional_pools}
     snapshots = []
     for policy in policies:
         if (policy.project_id != lb.project_id or
@@ -158,5 +175,91 @@ def snapshot(session, repositories, lb, listener, *, pending=False):
             if status == constants.PENDING_UPDATE:
                 graph[parent]['provisioning_status'] = constants.ACTIVE
     result.graph_revision = _digest(
-        [lb.l7policy_graph_generation, _configuration(graph)])
+        [lb.l7policy_graph_generation,
+         _configuration(graph, bind_system_ca=bool(additional_pools))])
     return result, policies
+
+
+def grpc_auth_transition_available(driver, listener):
+    from octavia.api.drivers import utils as driver_utils
+
+    return (
+        listener.protocol == constants.PROTOCOL_HTTP and
+        constants.GATEWAY_CAPABILITY_L7POLICY_GRPC_AUTH_TRANSITION in
+        driver_utils.gateway_capabilities(driver)
+    )
+
+
+def transition_pools(request):
+    changes = request.get('grpc_auth_transition', {})
+    return {pool for change in changes.values() if change['origin']
+            for pool in (change['origin'], change['external_auth']['pool_id'])}
+
+
+def grpc_auth_recovery_deadline():
+    return time.time() + GRPC_AUTH_RECOVERY_DELAY
+
+
+def withdraws_grpc_auth(request):
+    return any(change['origin'] is None for change in
+               request.get('grpc_auth_transition', {}).values())
+
+
+def validate_transition(session, repositories, policy, listener, driver,
+                        change):
+    from octavia.api.drivers import utils as driver_utils
+
+    if (listener.default_pool_id or listener.request_filter_sections or
+            policy.https_listener_hostname or policy.targets or
+            policy.request_mirrors or policy.request_url_rewrite or
+            policy.http_request_policy or policy.request_cors or
+            policy.request_header_operations or
+            policy.response_header_operations or
+            set(change['rules']) != {rule.id for rule in policy.l7rules} or
+            any(not rule.enabled or rule.type not in (
+                constants.L7RULE_TYPE_HOST_NAME, constants.L7RULE_TYPE_PATH)
+                for rule in policy.l7rules)):
+        raise exceptions.L7PolicyActivationConflict()
+    driver_utils.require_fixed_http_responses(driver)
+    origin = change['origin']
+    if not origin:
+        if (policy.action != constants.L7POLICY_ACTION_REDIRECT_TO_POOL or
+                not validate.is_grpc_external_auth(policy.external_auth)):
+            raise exceptions.L7PolicyActivationConflict()
+        return
+    if (policy.action != constants.L7POLICY_ACTION_FIXED_RESPONSE or
+            policy.fixed_response != {'status_code': 500} or
+            policy.external_auth is not None or
+            not validate.is_grpc_external_auth(change['external_auth']) or
+            origin == change['external_auth']['pool_id']):
+        raise exceptions.L7PolicyActivationConflict()
+    driver_utils.require_l7policy_external_auth(
+        driver, listener.protocol, change['external_auth'])
+    pool = repositories.l7policy.get_redirect_pool_for_update(
+        session, listener, origin)
+    validate.validate_listener_pool_protocol(listener.protocol, pool.protocol)
+    auth_id = change['external_auth']['pool_id']
+    repositories.listener.validate_external_auth_pools(
+        session, {auth_id}, listener.load_balancer_id, listener.project_id,
+        protocol='GRPC')
+    auth_pool = repositories.l7policy.get_redirect_pool_for_update(
+        session, listener, auth_id)
+    if (auth_pool.backend_tls_system_ca and
+            not wire.ActivationPool.from_db_obj(
+                auth_pool).backend_tls_system_ca_sha256):
+        raise exceptions.L7PolicyActivationConflict()
+
+
+def apply_transition(policy, change, pool):
+    policy.redirect_pool_id = change['origin']
+    policy.redirect_pool = pool
+    policy.external_auth = change['external_auth']
+    policy.tags = change['tags']
+    for rule in policy.l7rules:
+        rule.tags = change['rules'][rule.id]
+    if pool is None:
+        policy.action = constants.L7POLICY_ACTION_FIXED_RESPONSE
+        policy.fixed_response = {'status_code': 500}
+    else:
+        policy.action = constants.L7POLICY_ACTION_REDIRECT_TO_POOL
+        policy.fixed_response = None

@@ -215,6 +215,10 @@ api_opts = [
                 help=_('Provider driver names that can create a disabled HTTP '
                        'L7 policy with its initial rules in one operation. '
                        'Enable after upgrading the API and all workers.')),
+    cfg.ListOpt('enabled_l7policy_grpc_auth_transition_providers', default=[],
+                help=_('Providers qualified to switch active L7 policies '
+                       'between gRPC authorization and fixed HTTP 500. '
+                       'Enable after upgrading the API and all workers.')),
     cfg.ListOpt('enabled_l7policy_batch_activation_providers', default=[],
                 help=_('Provider drivers that can activate a group of '
                        'prepared HTTP L7 policies in one operation. Enable '
