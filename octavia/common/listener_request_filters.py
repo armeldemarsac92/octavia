@@ -54,24 +54,67 @@ def normalize(sections):
 
 def _normalize_external_auth(request):
     if (not isinstance(request, dict) or
-            request.keys() != {'type', 'http'} or
+            request.keys() not in ({'type', 'http'}, {'type', 'grpc'}) or
             request['type'] != 'ExternalAuth' or
-            not isinstance(request['http'], dict)):
+            not isinstance(request.get('http', request.get('grpc')), dict)):
         raise exceptions.ValidationException(detail=_(
-            'Only HTTP ExternalAuth listener request filters are supported.'))
-    return {'type': 'ExternalAuth',
-            'http': validate.http_external_auth(request['http'])}
+            'A listener ExternalAuth filter requires exactly one of http '
+            'or grpc.'))
+    if 'http' in request:
+        return {'type': 'ExternalAuth',
+                'http': validate.http_external_auth(request['http'])}
+    grpc = request['grpc']
+    if 'protocol' in grpc:
+        raise exceptions.ValidationException(detail=_(
+            'Listener gRPC ExternalAuth selects its protocol via grpc.'))
+    grpc = validate.l7policy_external_auth({**grpc, 'protocol': 'GRPC'})
+    del grpc['protocol']
+    return {'type': 'ExternalAuth', 'grpc': grpc}
+
+
+def authorizer(request):
+    if 'grpc' in request:
+        return {**request['grpc'], 'protocol': 'GRPC'}
+    return request['http']
+
+
+def authorizers(sections):
+    return (authorizer(request) for section in sections or ()
+            for request in section.get('requests', ()))
+
+
+def pool_protocols(sections):
+    result = {}
+    for auth in authorizers(sections):
+        result.setdefault(auth['pool_id'], set()).add(
+            auth.get('protocol', constants.PROTOCOL_HTTP))
+    return result
 
 
 def pool_ids(sections):
-    return {request['http']['pool_id'] for section in sections or ()
-            for request in section.get('requests', ())}
+    return set(pool_protocols(sections))
 
 
-def body_authorizers(sections):
-    return (request['http'] for section in sections or ()
-            for request in section.get('requests', ())
-            if validate.l7policy_external_auth_forwards_body(request['http']))
+def transport_capabilities(auth, pool):
+    required = set()
+    if validate.is_grpc_external_auth(auth):
+        required.add(constants.GATEWAY_CAPABILITY_LISTENER_GRPC_EXTERNAL_AUTH)
+        required.add(constants.GATEWAY_CAPABILITY_BACKEND_TLS_H2_ALPN
+                     if pool.tls_enabled else
+                     constants.GATEWAY_CAPABILITY_BACKEND_H2C)
+    elif not pool.tls_enabled:
+        return required
+    else:
+        required.add(
+            constants.GATEWAY_CAPABILITY_LISTENER_HTTP_EXTERNAL_AUTH_TLS)
+    if pool.tls_enabled:
+        required.add(constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME)
+        if pool.backend_tls_system_ca:
+            required.add(constants.GATEWAY_CAPABILITY_BACKEND_TLS_SYSTEM_CA)
+        if pool.backend_tls_subject_alt_names:
+            required.add(
+                constants.GATEWAY_CAPABILITY_BACKEND_TLS_SUBJECT_ALT_NAMES)
+    return required
 
 
 def is_withdrawal(current, sections):
@@ -103,12 +146,12 @@ def is_http_tls_authorizer(pool):
 def require_non_http_tls_authorizer(tags):
     if constants.GATEWAY_HTTP_AUTH_TLS_POOL_TAG in (tags or ()):
         raise exceptions.ValidationException(detail=_(
-            'An HTTP TLS authorizer pool is reserved for L7 policy '
+            'An HTTP TLS authorizer pool is reserved for ExternalAuth '
             'authorization.'))
 
 
 def valid_pool(pool, protocol=constants.PROTOCOL_HTTP, *, tags=None,
-               changes=None, rule=False):
+               changes=None):
     """Check the authorizer role and transport, including a pending edit."""
     if pool.protocol != constants.PROTOCOL_HTTP:
         return False
@@ -125,7 +168,7 @@ def valid_pool(pool, protocol=constants.PROTOCOL_HTTP, *, tags=None,
     tls_tag = constants.GATEWAY_HTTP_AUTH_TLS_POOL_TAG
     collector_tag = constants.GATEWAY_OTLP_COLLECTOR_POOL_TAG
     if tls_tag in tags:
-        if (not rule or protocol != constants.PROTOCOL_HTTP or
+        if (protocol != constants.PROTOCOL_HTTP or
                 tags.intersection({http_tag, grpc_tag, collector_tag})):
             return False
         ca_ref = bool(field('ca_tls_certificate_id'))

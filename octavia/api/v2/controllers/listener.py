@@ -900,10 +900,10 @@ class ListenersController(base.BaseController):
                 'request_filter_sections must be an array.'))
         if sections:
             listener_request_filters.validate_listener(protocol, sections)
-            driver_utils.require_listener_request_filters(
-                driver, protocol, sections, validate_body=not withdrawing)
-            self.repositories.listener.validate_request_filter_pools(
-                session, sections, lb_id, project_id)
+            if not withdrawing:
+                driver_utils.require_listener_request_filters(
+                    driver, protocol, sections, session=session, lb_id=lb_id,
+                    project_id=project_id)
 
     def _validate_https_listener_update(
             self, session, driver, db_listener, updates):

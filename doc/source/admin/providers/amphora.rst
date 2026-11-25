@@ -107,6 +107,41 @@ and reactivation of stored operations. Patched workers keep rendering
 live configurations while operators clear or retire those policies.
 
 
+Listener authorization transports
+---------------------------------
+
+Upgrade the API, workers, provider library and Amphora images before enabling
+listener authorization transports. Verify the installed patched HAProxy
+and, for gRPC, the installed Lua action and Envoy v3 authorization adapter
+on existing, new and replacement Amphorae. Set the provider on every API
+replica and worker. The opt-ins default to empty.
+
+.. code-block:: ini
+
+   [api_settings]
+   enabled_listener_request_filter_providers = amphora
+   enabled_listener_grpc_external_auth_providers = amphora
+   enabled_listener_http_external_auth_tls_providers = amphora
+
+Enable the appropriate existing backend transport for each authorizer pool.
+Use ``enabled_backend_h2c_providers`` for cleartext gRPC. Use
+``enabled_backend_tls_hostname_providers`` for verified TLS and
+``enabled_backend_tls_h2_alpn_providers`` for gRPC over TLS. Configure the
+existing system CA profile when a pool relies on system trust. Enable the
+listener body opt-in for each frontend protocol that forwards bodies, then
+qualify the corresponding authorization action with the configured body
+limit.
+
+The provider endpoint returns ``listener_grpc_external_auth_v1`` and
+``listener_http_external_auth_tls_v1`` alongside
+``listener_request_filters_v1`` when the corresponding profiles are enabled.
+The separate L7 policy settings control rule-level authorization. An
+Amphora that cannot run a configured transport returns 503 on its protected
+section. To withdraw unavailable filters, disable the listener, remove the
+affected sections or replace them with local rejection, then re-enable the
+listener with the retained configuration.
+
+
 Response header operations in L7 policies
 -----------------------------------------
 

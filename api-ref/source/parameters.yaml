@@ -1189,8 +1189,8 @@ l7policy-external-auth:
     or ``backend_tls_system_ca``. The pool can use the existing backend
     TLS SAN and client-certificate options. The connection speaks
     HTTP/1.1. An explicit ALPN list must include ``http/1.1``. The tag
-    is set at pool creation and reserves the pool for L7 policy
-    authorization. TLS validation or trust preparation failures return
+    is set at pool creation and reserves the pool for ExternalAuth.
+    TLS validation or trust preparation failures return
     HTTP 503 on the protected rule.
 
     Set ``protocol`` to ``GRPC`` for Envoy v3 authorization with
@@ -2310,9 +2310,14 @@ request_filter_sections:
     TERMINATED_HTTPS listener. Available with the regional
     listener_request_filters_v1 capability. Omit on update to retain the
     current value or send [] to clear it.
-    A positive forward_body_max_size in an ExternalAuth HTTP request
-    filter also requires listener_http_external_auth_forward_body_v1 and
-    an HTTP listener. The size must fit l7policy_external_auth_max_body_bytes.
+    Each ExternalAuth request filter has either http or grpc options.
+    Envoy v3 gRPC requires listener_grpc_external_auth_v1. HTTP over
+    verified TLS requires listener_http_external_auth_tls_v1.
+    A positive forward_body_max_size requires
+    listener_http_external_auth_forward_body_v1 on an HTTP frontend or
+    listener_https_external_auth_forward_body_v1 on a TERMINATED_HTTPS
+    frontend. The size must fit l7policy_external_auth_max_body_bytes
+    and the limit of the authorization protocol.
   in: body
   required: false
   type: array

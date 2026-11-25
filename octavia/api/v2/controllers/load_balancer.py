@@ -925,7 +925,8 @@ class LoadBalancersController(base.BaseController):
                     context.session, id)
                 for protocol, sections in filters:
                     driver_utils.require_listener_request_filters(
-                        driver, protocol, sections)
+                        driver, protocol, sections, session=context.session,
+                        lb_id=id, project_id=db_lb.project_id)
                 if listener_repo.has_enabled_frontend_client_auth_fallback(
                         context.session, id):
                     driver_utils.require_frontend_client_auth_fallback(driver)

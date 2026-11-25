@@ -22,6 +22,7 @@ local allowed_var = "txn.octavia_grpc_auth_allowed"
 local denied_var = "txn.octavia_grpc_auth_denied"
 local decision_count_var = "txn.octavia_grpc_auth_decision_chunks"
 local decision_chunk_var = "txn.octavia_grpc_auth_decision_"
+local response_count_var = "txn.octavia_grpc_auth_response_decisions"
 local response_applied_var = "txn.octavia_grpc_auth_response_applied"
 
 local protected = {
@@ -264,36 +265,36 @@ local function denial_headers(result)
     return size <= max_denial_headers and headers or nil
 end
 
-local function store_decision(txn, raw)
+local function store_decision(txn, slot, raw)
     local index = 0
     for first = 1, #raw, decision_chunk_size do
         index = index + 1
-        if not txn:set_var(decision_chunk_var .. index,
+        if not txn:set_var(decision_chunk_var .. slot .. "_" .. index,
                            raw:sub(first, first + decision_chunk_size - 1)) then
             return false
         end
     end
-    return txn:set_var(decision_count_var, index)
+    return txn:set_var(decision_count_var .. slot, index)
 end
 
-local function take_decision(txn)
-    local count = txn:get_var(decision_count_var)
+local function take_decision(txn, slot)
+    local count = txn:get_var(decision_count_var .. slot)
     if not count then
-        return nil, false
+        return nil
     end
-    txn:unset_var(decision_count_var)
+    txn:unset_var(decision_count_var .. slot)
     local parts = {}
     for index = 1, count do
-        local name = decision_chunk_var .. index
+        local name = decision_chunk_var .. slot .. "_" .. index
         parts[index] = txn:get_var(name)
         txn:unset_var(name)
     end
     for index = 1, count do
         if not parts[index] then
-            return nil, true
+            return nil
         end
     end
-    return table.concat(parts), true
+    return table.concat(parts)
 end
 
 local function post_form(path, form)
@@ -430,7 +431,6 @@ end
 local function authorize(txn, pool, allowlist, body_limit)
     txn:unset_var(allowed_var)
     txn:unset_var(denied_var)
-    take_decision(txn)
     txn:unset_var(response_applied_var)
 
     -- HAProxy's rule immediately after this action returns 503 if Lua fails
@@ -440,7 +440,7 @@ local function authorize(txn, pool, allowlist, body_limit)
         return
     end
     if not result.allowed then
-        if denial_headers(result) and store_decision(txn, raw) then
+        if denial_headers(result) and store_decision(txn, 0, raw) then
             txn:set_var(denied_var, true)
         end
         return
@@ -473,15 +473,25 @@ local function authorize(txn, pool, allowlist, body_limit)
             return
         end
     end
-    if #result.response ~= 0 and not store_decision(txn, raw) then
-        return
+    if #result.response ~= 0 then
+        -- Listener and policy actions share this transaction. Apply their
+        -- successful response mutations in execution order.
+        local slot = (txn:get_var(response_count_var) or 0) + 1
+        if not store_decision(txn, slot, raw) or
+           not txn:set_var(response_count_var, slot) then
+            return
+        end
     end
     txn:set_var(allowed_var, true)
 end
 
 local function authorize_response(txn)
-    local raw, had_decision = take_decision(txn)
-    if had_decision then
+    local count = txn:get_var(response_count_var) or 0
+    if count < 0 or not txn:set_var(response_count_var, -1) then
+        return
+    end
+    for slot = 1, count do
+        local raw = take_decision(txn, slot)
         local result = raw and parse_decision(raw)
         if not result or not result.allowed then
             return
@@ -499,7 +509,7 @@ local function authorize_response(txn)
 end
 
 local function deny(applet)
-    local raw = take_decision(applet)
+    local raw = take_decision(applet, 0)
     local result = raw and parse_decision(raw)
     local headers = result and not result.allowed and denial_headers(result)
     if not headers then
@@ -527,3 +537,4 @@ core.register_action("octavia-grpc-auth", { "http-req" }, authorize, 2)
 core.register_action("octavia-grpc-auth-body", { "http-req" }, authorize, 3)
 core.register_action("octavia-grpc-auth-response", { "http-res", "http-after-res" }, authorize_response)
 core.register_service("octavia-grpc-auth-denial", "http", deny)
+core.register_fetches("octavia-grpc-auth-chain", function() return true end)

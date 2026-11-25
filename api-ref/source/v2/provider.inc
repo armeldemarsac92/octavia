@@ -173,9 +173,15 @@ any available capabilities returns ``{"gateway_capabilities": []}``.
 
 ``l7policy_external_auth_forward_body_v1`` enables an L7 policy to forward
 the request body to its authorizer.
+``listener_grpc_external_auth_v1`` enables Envoy v3 gRPC listener authorizers
+over a separately enabled h2c or verified HTTP/2 TLS backend transport.
+``listener_http_external_auth_tls_v1`` enables listener HTTP authorizers
+over verified backend TLS. Both require ``listener_request_filters_v1``.
 ``listener_http_external_auth_forward_body_v1`` enables the same behavior
-for HTTP listener request filters and requires independent regional opt-in.
-Either capability includes ``l7policy_external_auth_max_body_bytes``
+for HTTP listener frontends. Use
+``listener_https_external_auth_forward_body_v1`` for terminated HTTPS
+frontends. Both require independent regional opt-in.
+Any body forwarding capability includes ``l7policy_external_auth_max_body_bytes``
 in the response. It is the regional
 ``[haproxy_amphora] external_auth_body_buffer_bytes`` setting capped at
 2147483647 bytes. The setting defaults to 67108864 bytes (64 MiB) and sets

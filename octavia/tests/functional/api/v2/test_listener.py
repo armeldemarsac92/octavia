@@ -849,6 +849,96 @@ class TestListener(base.BaseAPITest):
         self.put(lb_path, {'loadbalancer': {'admin_state_up': True}})
 
     @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
+    def test_listener_authorizer_transport_profiles(self, rpc):
+        self.conf.config(
+            group='api_settings',
+            enabled_listener_request_filter_providers=['amphora'],
+            enabled_backend_h2c_providers=['amphora'],
+            enabled_backend_tls_hostname_providers=['amphora'])
+        self.cert_manager_mock().get_secret.return_value = (
+            sample_certs.X509_CA_CERT)
+        lb = self.create_load_balancer(
+            uuidutils.generate_uuid(), provider='amphora')['loadbalancer']
+        lb_id = lb['id']
+        self.set_lb_status(lb_id)
+        grpc = self.create_pool(
+            lb_id, 'HTTP', 'ROUND_ROBIN', backend_h2c=True,
+            tags=[constants.GATEWAY_GRPC_AUTH_POOL_TAG])['pool']['id']
+        self.set_lb_status(lb_id)
+        tls_options = dict(
+            tls_enabled=True, ca_tls_container_ref=uuidutils.generate_uuid(),
+            backend_tls_hostname='authorizer.example',
+            tags=[constants.GATEWAY_HTTP_AUTH_TLS_POOL_TAG])
+        self.create_pool(lb_id, 'HTTP', 'ROUND_ROBIN', status=501,
+                         **tls_options)
+        self.conf.config(
+            group='api_settings',
+            enabled_listener_http_external_auth_tls_providers=['amphora'])
+        tls = self.create_pool(lb_id, 'HTTP', 'ROUND_ROBIN',
+                               **tls_options)['pool']['id']
+        self.set_lb_status(lb_id)
+
+        field = 'request_filter_sections'
+        grpc_auth = {'type': 'ExternalAuth', 'grpc': {
+            'pool_id': grpc, 'allowed_request_headers': [':authority']}}
+        http_auth = {'type': 'ExternalAuth', 'http': {'pool_id': tls}}
+        sections = [
+            {'hostname': 'protected.example',
+             'requests': [grpc_auth, http_auth]},
+            {'hostname': 'public.example'}]
+        caps_path = self.PROVIDERS_PATH + '/amphora/gateway_capabilities'
+        grpc_cap = constants.GATEWAY_CAPABILITY_LISTENER_GRPC_EXTERNAL_AUTH
+        tls_cap = constants.GATEWAY_CAPABILITY_LISTENER_HTTP_EXTERNAL_AUTH_TLS
+        caps = self.get(caps_path).json['gateway_capabilities']
+        self.assertNotIn(grpc_cap, caps)
+        args = ('HTTP', 8050, lb_id)
+        self.create_listener(*args, status=501, **{field: sections})
+        self.conf.config(
+            group='api_settings',
+            enabled_listener_grpc_external_auth_providers=['amphora'])
+        capabilities = self.get(caps_path).json['gateway_capabilities']
+        self.assertIn(grpc_cap, capabilities)
+        self.assertIn(tls_cap, capabilities)
+        route_caps = (
+            constants.GATEWAY_CAPABILITY_L7POLICY_GRPC_EXTERNAL_AUTH,
+            constants.GATEWAY_CAPABILITY_L7POLICY_HTTP_EXTERNAL_AUTH_TLS)
+        self.assertFalse(set(route_caps).intersection(capabilities))
+        invalid = copy.deepcopy(sections)
+        invalid[0]['requests'][0]['http'] = http_auth['http']
+        self.create_listener(*args, status=400, **{field: invalid})
+        invalid[0]['requests'][0] = {**grpc_auth, 'grpc': {'pool_id': tls}}
+        self.create_listener(*args, status=400, **{field: invalid})
+        invalid[0]['requests'][0] = {**grpc_auth, 'grpc': {
+            **grpc_auth['grpc'], 'forward_body_max_size': 4096}}
+        self.create_listener(*args, status=501, **{field: invalid})
+
+        listener = self.create_listener(*args, **{field: sections})['listener']
+        self.assertEqual(sections, listener[field])
+        self.assertEqual(sections, rpc.return_value.cast.call_args.kwargs[
+            constants.LISTENER][field])
+        self.set_lb_status(lb_id)
+        for pool_id, edit in ((grpc, {'tags': []}),
+                              (tls, {'alpn_protocols': ['h2']})):
+            path = self.POOL_PATH.format(pool_id=pool_id)
+            self.assertEqual([{'id': listener['id']}],
+                             self.get(path).json['pool']['listeners'])
+            self.put(path, {'pool': edit}, status=409)
+            self.delete(path, status=409)
+
+        path = self.LISTENER_PATH.format(listener_id=listener['id'])
+        self.put(path, {'listener': {'admin_state_up': False}})
+        self.set_lb_status(lb_id)
+        self.conf.config(group='api_settings',
+                         enabled_listener_grpc_external_auth_providers=[])
+        self.put(path, {'listener': {'admin_state_up': True}}, status=501)
+        reduced = [{'hostname': 'protected.example', 'reject': True},
+                   sections[1]]
+        result = self.put(path, {'listener': {field: reduced}})
+        self.assertEqual(reduced, result.json['listener'][field])
+        self.set_lb_status(lb_id)
+        self.put(path, {'listener': {'admin_state_up': True}})
+
+    @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
     def test_closed_listener_filters_can_withdraw_one_stale_section(self, rpc):
         api_settings = 'api_settings'
         self.conf.config(
