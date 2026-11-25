@@ -203,6 +203,7 @@ class L7RuleController(base.BaseController):
                     request_url_rewrite=db_l7policy.request_url_rewrite,
                     request_cors=db_l7policy.request_cors,
                     http_request_policy=db_l7policy.http_request_policy,
+                    request_mirrors=db_l7policy.request_mirrors,
                     targets=db_l7policy.targets,
                     tcp_tls_termination=tcp_tls_termination)
             if l7rule_dict['enabled']:
@@ -393,6 +394,7 @@ class L7RuleController(base.BaseController):
                     request_url_rewrite=db_l7policy.request_url_rewrite,
                     request_cors=db_l7policy.request_cors,
                     http_request_policy=db_l7policy.http_request_policy,
+                    request_mirrors=db_l7policy.request_mirrors,
                     targets=db_l7policy.targets,
                     tcp_tls_termination=tcp_tls_termination)
                 if enabled:

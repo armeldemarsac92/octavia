@@ -64,7 +64,13 @@ def validate_policy_headers(policy, protocol, driver, old_policy=None):
             validate.validate_header_protocol(protocol)
 
 
-def _requires_target_filter_capability(previous, targets, expands_scope):
+def _only_removes_mirrors(previous, mirrors):
+    remaining = iter(previous or [])
+    return all(mirror in remaining for mirror in mirrors or [])
+
+
+def _requires_target_filter_capability(previous, targets, expands_scope,
+                                       *, mirrors=False):
     """Allow removal of existing filters after regional withdrawal."""
     previous, targets = previous or [], targets or []
     if previous == targets and not expands_scope:
@@ -80,10 +86,18 @@ def _requires_target_filter_capability(previous, targets, expands_scope):
         previous_end = previous_start + old.get('weight', 0)
         end = start + target['weight']
         filters = validate.target_request_filters(target)
-        if filters:
+        copies = target.get('request_mirrors', [])
+        has_filters = bool(copies if mirrors else filters)
+        if has_filters:
+            if mirrors:
+                changed = (not _only_removes_mirrors(
+                    old.get('request_mirrors'), copies) or
+                    filters != validate.target_request_filters(old))
+            else:
+                changed = any(old.get(field) != value
+                              for field, value in filters.items())
             if (target.get('pool_id') != old.get('pool_id') or
-                    any(old.get(field) != value
-                        for field, value in filters.items())):
+                    changed):
                 return True
             extends_draw = (start * previous_total < previous_start * total or
                             end * previous_total > previous_end * total)
@@ -254,7 +268,10 @@ class L7PolicyActivationController(base.BaseController):
             response_header_operations=policy.response_header_operations,
             request_url_rewrite=policy.request_url_rewrite,
             request_cors=policy.request_cors, targets=policy.targets,
-            http_request_policy=policy.http_request_policy)
+            http_request_policy=policy.http_request_policy,
+            request_mirrors=policy.request_mirrors)
+        repo.validate_mirror_pools(
+            session, listener, policy.request_mirrors, policy.targets)
         if policy.redirect_pool_id:
             pool = repo.get_redirect_pool_for_update(
                 session, listener, policy.redirect_pool_id)
@@ -451,6 +468,11 @@ class L7PolicyController(base.BaseController):
             if l7policy_dict.get('http_request_policy') is not None:
                 driver_utils.require_http_request_policy(
                     driver, listener.protocol)
+            if validate.request_mirror_pool_ids(
+                    l7policy_dict.get('request_mirrors'),
+                    l7policy_dict.get('targets')):
+                driver_utils.require_http_request_mirror(
+                    driver, listener.protocol)
             passthrough = l7policy_dict.get('tcp_tls_passthrough', False)
             driver_utils.validate_tcp_tls_policy_mode(
                 driver, listener.tcp_tls_mixed_mode, passthrough)
@@ -600,6 +622,11 @@ class L7PolicyController(base.BaseController):
             request_policy_changed = request_policy != previous_request_policy
             if request_policy is not None and request_policy_changed:
                 https_routing_changed.add('http_request_policy')
+            previous_mirrors = db_l7policy.request_mirrors
+            mirrors = l7policy_dict.get('request_mirrors', previous_mirrors)
+            adds_mirrors = not _only_removes_mirrors(previous_mirrors, mirrors)
+            if adds_mirrors:
+                https_routing_changed.add('request_mirrors')
             if (hostname is not None and
                     (reopening or
                      https_routing_changed.intersection(l7policy_dict))):
@@ -657,6 +684,14 @@ class L7PolicyController(base.BaseController):
             if _requires_target_filter_capability(
                     old_targets, targets, expands_filter_scope):
                 driver_utils.require_weighted_target_request_filters(
+                    driver, listener.protocol)
+            if (adds_mirrors or
+                    (mirrors and enabled and
+                     (expands_filter_scope or routing_changed_or_disabled)) or
+                    _requires_target_filter_capability(
+                        old_targets, targets, expands_filter_scope,
+                        mirrors=True)):
+                driver_utils.require_http_request_mirror(
                     driver, listener.protocol)
             position = l7policy_dict.get('position') or db_l7policy.position
             if routing_changed_or_disabled or (
@@ -718,6 +753,7 @@ class L7PolicyController(base.BaseController):
                 for policy_action in (action, db_l7policy.action)) or
                 'request_url_rewrite' in l7policy_dict or
                 'request_cors' in l7policy_dict or
+                'request_mirrors' in l7policy_dict or
                 'http_request_policy' in l7policy_dict)
             if persist_before_dispatch:
                 # Validate target pool references before sending them to a

@@ -24,6 +24,7 @@ from octavia.api.v2.types import listener as listener_types
 from octavia.api.v2.types import load_balancer
 from octavia.common import constants
 from octavia.common import exceptions
+from octavia.common import validate
 
 
 PENDING = ('pending', 'rendering', 'reverting')
@@ -52,6 +53,9 @@ def policy_revision(policy):
     request_policy = getattr(policy, 'http_request_policy', None)
     if request_policy is not None:
         data['http_request_policy'] = request_policy
+    request_mirrors = getattr(policy, 'request_mirrors', None)
+    if request_mirrors:
+        data['request_mirrors'] = request_mirrors
     data['rules'] = [values(rule, ACTIVATION_RULE_FIELDS) for rule in
                      sorted(policy.l7rules, key=lambda rule: rule.id)]
     return _digest(data)
@@ -88,6 +92,8 @@ def snapshot(session, repositories, lb, listener, *, pending=False):
             raise exceptions.L7PolicyActivationConflict()
         pool_ids.add(policy.redirect_pool_id)
         pool_ids.update(target.get('pool_id') for target in policy.targets)
+        pool_ids.update(validate.request_mirror_pool_ids(
+            policy.request_mirrors, policy.targets))
         snapshots.append(wire.L7PolicyActivationSnapshot(
             revision=policy_revision(policy),
             policy=l7policy.L7PolicyFullResponse.from_db_obj(policy)))

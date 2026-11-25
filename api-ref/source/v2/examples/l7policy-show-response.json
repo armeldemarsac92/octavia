@@ -22,6 +22,7 @@
             "id": "8a1412f0-4c32-4257-8b07-af4770b604fd",
             "operating_status": "ONLINE",
             "name": "redirect-example.com",
+            "request_mirrors": [],
             "tags": ["test_tag"]
         }
 }
