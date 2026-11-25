@@ -132,6 +132,10 @@ class Endpoints:
         self.worker.batch_update_members(
             old_members, new_members, updated_members)
 
+    def apply_tcp_member_batch(self, context, loadbalancer_id, pool_id,
+                               batch_id):
+        self.worker.apply_tcp_member_batch(loadbalancer_id, pool_id, batch_id)
+
     def delete_member(self, context, member):
         LOG.info('Deleting member \'%s\'...', member.get(constants.MEMBER_ID))
         self.worker.delete_member(member)

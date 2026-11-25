@@ -388,6 +388,8 @@ class Pool(base_models.BASE, base_models.IdMixin, base_models.ProjectMixin,
     backend_tls_hostname = sa.Column(sa.String(253), nullable=True)
     backend_tls_subject_alt_names = sa.Column(sa.JSON(none_as_null=True))
     backend_retry_budget = sa.Column(sa.JSON(none_as_null=True))
+    tcp_connection_rejection = sa.Column(sa.JSON(none_as_null=True))
+    tcp_member_batch_id = sa.Column(sa.String(36))
     backend_tls_require_h2 = sa.Column(
         sa.Boolean, nullable=False, default=False, server_default=sa.false())
     backend_h2c = sa.Column(sa.Boolean, nullable=False, default=False,

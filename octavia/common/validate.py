@@ -823,6 +823,25 @@ def _valid_cors_origin(origin):
     return port is None or 1 <= int(port) <= constants.MAX_PORT_NUMBER
 
 
+def tcp_connection_rejection(rejection):
+    """Validate the fraction without coercing JSON types."""
+    if (not isinstance(rejection, dict) or
+            rejection.keys() != {'reject_weight', 'total_weight'}):
+        raise exceptions.ValidationException(detail=_(
+            'tcp_connection_rejection requires reject_weight and '
+            'total_weight.'))
+    reject = rejection['reject_weight']
+    total = rejection['total_weight']
+    if (type(reject) is not int or type(total) is not int or
+            not 1 <= total <= constants.MAX_TCP_CONNECTION_REJECTION_WEIGHT or
+            not 0 <= reject <= total):
+        raise exceptions.ValidationException(detail=_(
+            'tcp_connection_rejection requires integer weights with '
+            '0 <= reject_weight <= total_weight and '
+            '1 <= total_weight <= 16000000.'))
+    return rejection
+
+
 def backend_retry_budget(budget):
     """Validate the complete pool-level Service budget without coercion."""
     bounds = {

@@ -573,6 +573,8 @@ class ControllerWorker:
             CONF.haproxy_amphora.api_db_commit_retry_attempts))
     def batch_update_members(self, old_members, new_members,
                              updated_members):
+        if not (old_members or new_members or updated_members):
+            return
         session = db_apis.get_session()
         with session.begin():
             db_new_members = [
@@ -632,6 +634,13 @@ class ControllerWorker:
             flow_utils.get_batch_update_members_flow,
             provider_old_members, new_members, updated_members,
             store=store)
+
+    def apply_tcp_member_batch(self, loadbalancer_id, pool_id, batch_id):
+        self.run_flow(flow_utils.get_apply_tcp_member_batch_flow, store={
+            constants.LOADBALANCER_ID: loadbalancer_id,
+            constants.POOL_ID: pool_id,
+            'batch_id': batch_id,
+        })
 
     def update_member(self, member, member_updates):
         """Updates a pool member.

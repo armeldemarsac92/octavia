@@ -20,6 +20,7 @@ from typing import Optional
 from oslo_config import cfg
 from oslo_log import log as logging
 from stevedore import driver as stevedore_driver
+from taskflow import engines
 from taskflow import retry
 from taskflow import task
 from taskflow.types import failure
@@ -228,6 +229,90 @@ class ListenersUpdate(BaseAmphoraTask):
         for listener in loadbalancer.listeners:
             self.task_utils.mark_listener_prov_status_error(
                 listener.id)
+
+
+class ApplyTCPMemberBatch(BaseAmphoraTask):
+    """Apply one committed TCP batch and fence stale or duplicate delivery."""
+
+    def __init__(self, network_flow, **kwargs):
+        super().__init__(**kwargs)
+        self.network_flow = network_flow
+        self.pool_repo = repo.PoolRepository()
+        self.member_repo = repo.MemberRepository()
+        self.az_repo = repo.AvailabilityZoneRepository()
+
+    def execute(self, loadbalancer_id, pool_id, batch_id):
+        _serialize_render(self._apply, loadbalancer_id, pool_id, batch_id)
+
+    def _owned(self, session, lb_id, pool_id, batch_id):
+        # The API casts while holding this row. A worker arriving early
+        # waits for commit and an API rollback leaves no matching batch.
+        lb = self.loadbalancer_repo.get_for_update(session, lb_id)
+        if lb is None or lb.provisioning_status != constants.PENDING_UPDATE:
+            return None, None
+        pool = self.pool_repo.get_orm(session, id=pool_id,
+                                      load_balancer_id=lb_id,
+                                      show_deleted=False)
+        if pool is None or pool.tcp_member_batch_id != batch_id:
+            return None, None
+        return lb, pool
+
+    def _apply(self, lb_id, pool_id, batch_id):
+        with db_apis.session().begin() as session:
+            lb, pool = self._owned(session, lb_id, pool_id, batch_id)
+            if pool is None:
+                return
+            az = (self.az_repo.get_availability_zone_metadata_dict(
+                session, lb.availability_zone)
+                if lb.availability_zone else {})
+            graph = lb.to_data_model()
+
+        try:
+            engines.run(self.network_flow, store={
+                constants.LOADBALANCER_ID: lb_id,
+                constants.LOADBALANCER: {
+                    constants.LOADBALANCER_ID: lb_id,
+                    constants.VIP_SUBNET_ID: graph.vip.subnet_id,
+                    constants.VIP_NETWORK_ID: graph.vip.network_id,
+                },
+                constants.AVAILABILITY_ZONE: az,
+            })
+            if graph.listeners and not any(
+                    amphora.status != constants.DELETED
+                    for amphora in graph.amphorae):
+                raise driver_except.ListenerProvisioningError()
+            self.amphora_driver.update(graph)
+            self._finish(lb_id, pool_id, batch_id, applied=True)
+        except Exception:
+            self._finish(lb_id, pool_id, batch_id, applied=False)
+            raise
+
+    def _finish(self, lb_id, pool_id, batch_id, *, applied):
+        with db_apis.session().begin() as session:
+            lb, pool = self._owned(session, lb_id, pool_id, batch_id)
+            if pool is None:
+                return
+            if (applied and
+                    pool.provisioning_status == constants.PENDING_UPDATE):
+                pool.provisioning_status = constants.ACTIVE
+                pool.tcp_member_batch_id = None
+                for member in self.member_repo.get_batch_for_update(
+                        session, pool_id):
+                    if member.provisioning_status == constants.PENDING_DELETE:
+                        session.delete(member)
+                    elif member.provisioning_status in (
+                            constants.PENDING_CREATE,
+                            constants.PENDING_UPDATE):
+                        member.provisioning_status = constants.ACTIVE
+            else:
+                # Keep both desired values for a replacement after a failed
+                # or partial reload. Never acknowledge the pool as ACTIVE.
+                pool.provisioning_status = constants.ERROR
+                pool.tcp_member_batch_id = constants.TCP_MEMBER_BATCH_FAILED
+            for listener in pool.listeners:
+                if listener.provisioning_status == constants.PENDING_UPDATE:
+                    listener.provisioning_status = pool.provisioning_status
+            lb.provisioning_status = constants.ACTIVE
 
 
 class ApplyL7PolicyWithInitialRules(BaseAmphoraTask):

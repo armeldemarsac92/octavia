@@ -124,6 +124,7 @@ class PoolResponse(BasePoolType):
     backend_tls_subject_alt_names = wtypes.wsattr(
         BackendTLSSubjectAltNames())
     backend_retry_budget = wtypes.wsattr(BackendRetryBudget())
+    tcp_connection_rejection = wtypes.wsattr(types.TCPConnectionRejection())
     tls_ciphers = wtypes.wsattr(wtypes.StringType())
     tls_versions = wtypes.wsattr(wtypes.ArrayType(wtypes.StringType()))
     alpn_protocols = wtypes.wsattr(wtypes.ArrayType(types.AlpnProtocolType()))
@@ -135,6 +136,12 @@ class PoolResponse(BasePoolType):
             result.backend_tls_subject_alt_names = wtypes.Unset
         if result.backend_retry_budget is None:
             result.backend_retry_budget = wtypes.Unset
+        provider = getattr(db_obj.load_balancer, 'provider', None)
+        if (result.tcp_connection_rejection is None and
+                (db_obj.protocol != constants.PROTOCOL_TCP or
+                 provider not in (None, constants.AMPHORA, constants.AMPHORAV2,
+                                  constants.OCTAVIA))):
+            result.tcp_connection_rejection = wtypes.Unset
 
         result.listeners = [
             types.IdOnlyType.from_db_obj(listener)

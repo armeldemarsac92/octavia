@@ -920,6 +920,15 @@ backend {{ pool.id }}:{{ listener.id }}
     {% else %}
     mode {{ pool.protocol }}
     {% endif %}
+    {% set rejection = pool.get('tcp_connection_rejection') %}
+    {% if rejection and rejection.reject_weight %}
+      {% if rejection.reject_weight == rejection.total_weight %}
+    tcp-request content reject
+      {% else %}
+    tcp-request content set-var(sess.octavia_tcp_reject_draw,ifnotexists) rand({{ rejection.total_weight }})
+    tcp-request content reject if { var(sess.octavia_tcp_reject_draw) -m int lt {{ rejection.reject_weight }} }
+      {% endif %}
+    {% endif %}
     {% if listener.otlp_tracing is defined and (pool.protocol == 'http' or pool.proxy_protocol is not none) %}
     http-request lua.octavia-trace-propagate
     {% endif %}

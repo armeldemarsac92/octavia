@@ -384,6 +384,20 @@ The optional parameter ``additive_only`` when defined as ``true`` will skip
 deletions for members missing from the provided list. If this were set in the
 above example, the member '192.0.2.15:80' would have remained in the pool.
 
+On an Amphora TCP pool with the regional ``tcp_connection_rejection_v1``
+capability, a full batch can set ``tcp_connection_rejection`` alongside
+``members``. The new fraction and complete member list are provisioned
+together. This field requires pool update permission and cannot be used with
+``additive_only``. Omission preserves the current fraction. Explicit null
+clears it even if the operator has disabled advertisement of the capability.
+
+For example, submit ``{"members": [], "tcp_connection_rejection":
+{"reject_weight": 4, "total_weight": 4}}`` to reject every new connection
+without a backend member. A successful 202 schedules the change. Check the
+pool's ``provisioning_status`` and rejection fraction to confirm provisioning.
+A failed activation leaves the desired graph visible with pool status
+``ERROR`` and permits a subsequent full replacement with the field present.
+
 If the request is valid, the service returns the ``Accepted (202)``
 response code. To confirm the updates, check that the member provisioning
 statuses are ``ACTIVE`` for new or updated members, and that any unspecified
@@ -422,6 +436,7 @@ Request
    - request_sriov: request_sriov
    - subnet_id: subnet_id-optional
    - tags: tags-optional
+   - tcp_connection_rejection: tcp-connection-rejection-request
    - weight: weight-optional
 
 Request Example

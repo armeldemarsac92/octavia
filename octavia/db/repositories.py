@@ -1210,6 +1210,10 @@ class MemberRepository(BaseRepository):
     model_class = models.Member
     activation_parent = ('pool', 'load_balancer')
 
+    def get_batch_for_update(self, session, pool_id):
+        return (session.query(self.model_class).filter_by(pool_id=pool_id)
+                .populate_existing().with_for_update().all())
+
     def get_routing_for_update(self, session, pool_id, member_ids):
         if not member_ids:
             return {}

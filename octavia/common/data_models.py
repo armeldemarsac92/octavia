@@ -85,7 +85,8 @@ class ToDictMixin:
                 continue
             if attr in ('tags', 'https_virtual_hosts',
                         'request_filter_sections',
-                        'backend_tls_subject_alt_names'):
+                        'backend_tls_subject_alt_names',
+                        'tcp_connection_rejection'):
                 # Preserve JSON attributes in shallow payloads.
                 ret[attr] = value
                 continue
@@ -317,7 +318,8 @@ class Pool(BaseDataModel):
                  alpn_protocols=None, backend_h2c=False,
                  backend_tls_hostname=None, backend_tls_require_h2=False,
                  backend_tls_subject_alt_names=None,
-                 backend_retry_budget=None):
+                 backend_retry_budget=None, tcp_connection_rejection=None,
+                 tcp_member_batch_id=None):
         self.id = id
         self.project_id = project_id
         self.name = name
@@ -349,6 +351,8 @@ class Pool(BaseDataModel):
         self.backend_tls_require_h2 = backend_tls_require_h2
         self.backend_tls_subject_alt_names = backend_tls_subject_alt_names
         self.backend_retry_budget = backend_retry_budget
+        self.tcp_connection_rejection = tcp_connection_rejection
+        self.tcp_member_batch_id = tcp_member_batch_id
 
     def update(self, update_dict):
         for key, value in update_dict.items():
