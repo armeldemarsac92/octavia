@@ -2650,6 +2650,8 @@ class TestPool(base.BaseAPITest):
         self.assertNotIn(mode, cast.call_args.kwargs['pool_updates'][field])
 
         # A late result for Session must not change the Permanent policy.
+        permanent_policy = {pool_id: (named['cookie_name'], 0,
+                                      timed['cookie_scope'], True)}
         with db_api.session().begin() as session:
             repo = repositories.PoolRepository()
             stale = {pool_id: (named['cookie_name'], 0,
@@ -2658,6 +2660,21 @@ class TestPool(base.BaseAPITest):
                 session, stale, failed={pool_id}, recovered=set())
             self.assertFalse(repo.get(session, id=pool_id).session_persistence
                              .cookie_absolute_timeout_error)
+            repo.set_http_cookie_pool_statuses(
+                session, permanent_policy, failed={pool_id}, recovered=set())
+
+        self.conf.config(group='api_settings',
+                         enabled_http_cookie_permanent_providers=[])
+        self.set_lb_status(lb_id)
+        self.assertEqual(constants.ERROR,
+                         self.get(path).json['pool']['provisioning_status'])
+        replacement = dict(timed, cookie_name='replacement',
+                           cookie_absolute_timeout_ms=9000,
+                           cookie_scope='b' * 64)
+        self.put(path, self._build_body({field: replacement}), status=501)
+        stored = self.get(path).json['pool'][field]
+        self.assertEqual(policy, {key: stored[key] for key in policy})
+        self.assertIs(update(named)[mode], True)
 
         self.conf.config(group='api_settings',
                          enabled_http_cookie_permanent_providers=[],
@@ -2680,7 +2697,16 @@ class TestPool(base.BaseAPITest):
         self.assertFalse(cast.call_args.kwargs['pool_updates'][field][mode])
         self.assertNotIn(mode, update(timed))
         self.assertIs(update({mode: True})[mode], True)
+        self.set_lb_status(lb_id)
+        with db_api.session().begin() as session:
+            repo.set_http_cookie_pool_statuses(
+                session, permanent_policy, failed={pool_id}, recovered=set())
+        self.assertEqual(constants.ERROR,
+                         self.get(path).json['pool']['provisioning_status'])
         self.assertIsNone(update(None))
+        self.set_lb_status(lb_id)
+        self.assertEqual(constants.ACTIVE,
+                         self.get(path).json['pool']['provisioning_status'])
         self.assertNotIn(mode, update(timed))
 
     @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')

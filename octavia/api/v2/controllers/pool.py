@@ -765,7 +765,15 @@ class PoolsController(base.BaseController):
             driver_utils.require_http_cookie_name(driver, current.protocol)
         if enrolling_timeout:
             driver_utils.require_http_cookie_absolute_timeout(driver)
-        if changes.cookie_permanent is True:
+        # Omission preserves the stored lifetime. Replacing the policy
+        # still enrolls the new name, scope or deadline in Permanent.
+        replacing_permanent = (
+            changes.cookie_permanent is wtypes.Unset and
+            old_timed and old.cookie_permanent and enrolling_timeout and
+            (not keep_name or old.cookie_scope != changes.cookie_scope or
+             old.cookie_absolute_timeout_ms !=
+             changes.cookie_absolute_timeout_ms))
+        if changes.cookie_permanent is True or replacing_permanent:
             _validate_http_cookie_permanent(
                 driver, enrolling_timeout or
                 (keep_name and

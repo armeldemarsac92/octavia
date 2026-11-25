@@ -270,6 +270,8 @@ to be replaced on the next request.
 Omitting ``cookie_permanent`` in an update preserves the mode while the
 absolute timeout remains set. Set it to ``false`` to return to a browser
 session cookie, including after permanent cookie discovery is disabled.
+Replacing the name, scope or timeout of a permanent cookie requires the
+provider to advertise permanent cookie support.
 Clearing the timeout or removing session persistence clears this setting.
 Pool GET includes ``cookie_permanent`` only when it is ``true``.
 
