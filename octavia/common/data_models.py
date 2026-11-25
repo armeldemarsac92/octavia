@@ -183,13 +183,14 @@ class SessionPersistence(BaseDataModel):
 
     def __init__(self, pool_id=None, type=None, cookie_name=None,
                  pool=None, persistence_timeout=None,
-                 persistence_granularity=None):
+                 persistence_granularity=None, http_cookie_name_enabled=False):
         self.pool_id = pool_id
         self.type = type
         self.cookie_name = cookie_name
         self.pool = pool
         self.persistence_timeout = persistence_timeout
         self.persistence_granularity = persistence_granularity
+        self.http_cookie_name_enabled = http_cookie_name_enabled
 
     def delete(self):
         self.pool.session_persistence = None
@@ -293,6 +294,14 @@ class HealthMonitor(BaseDataModel):
 
     def delete(self):
         self.pool.health_monitor = None
+
+
+def is_unenrolled_amphora_http_cookie(persistence_type, name_enabled,
+                                      provider):
+    # Historical load balancers with no provider used Amphora.
+    return (persistence_type == constants.SESSION_PERSISTENCE_HTTP_COOKIE and
+            name_enabled is False and provider in
+            (None, constants.AMPHORA, constants.AMPHORAV2, constants.OCTAVIA))
 
 
 class Pool(BaseDataModel):
