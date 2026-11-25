@@ -391,7 +391,8 @@ class L7RuleController(base.BaseController):
 
             # Clear an inherited key when converting to a keyless predicate.
             if (l7rule.type in (constants.L7RULE_TYPE_HTTP_METHOD,
-                                constants.L7RULE_TYPE_GRPC_CONTENT_TYPE) and
+                                constants.L7RULE_TYPE_GRPC_CONTENT_TYPE,
+                                constants.L7RULE_TYPE_HTTP_PATH_LITERAL) and
                     l7rule.key is wtypes.Unset):
                 l7rule.key = None
 

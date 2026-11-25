@@ -1336,7 +1336,9 @@ l7rule-type:
     or ``SSL_DN_FIELD``. The Amphora provider additionally accepts ``TLS_SNI``
     for TCP passthrough, ``HTTP_HEADER_EXACT`` for full HTTP header
     values, and ``HTTP_METHOD`` for exact HTTP methods when enabled by the
-    region. ``HTTP_QUERY_PARAM_EXACT`` requires the regional provider
+    region. ``HTTP_PATH_LITERAL`` requires ``http_literal_path_v1`` for
+    exact or segment-prefix HTTP path matching.
+    ``HTTP_QUERY_PARAM_EXACT`` requires the regional provider
     capability ``http_query_param_exact_v1`` for exact query parameter matches.
     ``GRPC_CONTENT_TYPE`` requires ``grpc_content_type_v1`` for native gRPC
     media type matching.
@@ -1350,7 +1352,9 @@ l7rule-type-optional:
     or ``SSL_DN_FIELD``. The Amphora provider additionally accepts ``TLS_SNI``
     for TCP passthrough, ``HTTP_HEADER_EXACT`` for full HTTP header
     values, and ``HTTP_METHOD`` for exact HTTP methods when enabled by the
-    region. ``HTTP_QUERY_PARAM_EXACT`` requires the regional provider
+    region. ``HTTP_PATH_LITERAL`` requires ``http_literal_path_v1`` for
+    exact or segment-prefix HTTP path matching.
+    ``HTTP_QUERY_PARAM_EXACT`` requires the regional provider
     capability ``http_query_param_exact_v1`` for exact query parameter matches.
     ``GRPC_CONTENT_TYPE`` requires ``grpc_content_type_v1`` for native gRPC
     media type matching.
@@ -1362,6 +1366,7 @@ l7rule-value:
     The value to use for the comparison. For example, the file type to compare.
     ``HOST_NAME`` values for ``REGEX`` can be up to 512 characters on HTTP
     and terminated HTTPS listeners when ``http_long_hostname_v1`` is enabled.
+    ``HTTP_PATH_LITERAL`` values can be up to 1024 ASCII bytes.
   in: body
   required: true
   type: string
@@ -1370,6 +1375,7 @@ l7rule-value-optional:
     The value to use for the comparison. For example, the file type to compare.
     ``HOST_NAME`` values for ``REGEX`` can be up to 512 characters on HTTP
     and terminated HTTPS listeners when ``http_long_hostname_v1`` is enabled.
+    ``HTTP_PATH_LITERAL`` values can be up to 1024 ASCII bytes.
   in: body
   required: false
   type: string

@@ -72,6 +72,17 @@ class TestGatewayCapabilities(base.BaseAPITest):
         self.assertEqual(empty,
                          self.get(self.capabilities_path('noop_driver')).json)
 
+    def test_literal_http_path_capability_requires_compatible_opt_in(self):
+        empty = {'gateway_capabilities': []}
+        self.assertEqual(empty, self.get(self.capabilities_path()).json)
+        self.conf.config(
+            group='api_settings',
+            enabled_http_literal_path_providers=['amphora', 'noop_driver'])
+        self.assertEqual({'gateway_capabilities': ['http_literal_path_v1']},
+                         self.get(self.capabilities_path()).json)
+        self.assertEqual(empty,
+                         self.get(self.capabilities_path('noop_driver')).json)
+
     def test_full_header_exact_capability_requires_compatible_opt_in(self):
         empty = {'gateway_capabilities': []}
         self.assertEqual(empty, self.get(self.capabilities_path()).json)
