@@ -208,6 +208,52 @@ def http_auth_tls_supported(loadbalancer, amp_details):
             constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME)))
 
 
+def listener_authorizer_capabilities(loadbalancer, amp_details):
+    provider = getattr(loadbalancer, 'provider', None) or 'amphora'
+    settings = CONF.api_settings
+    details = amp_details or {}
+    base = constants.GATEWAY_CAPABILITY_LISTENER_REQUEST_FILTERS
+    capabilities = set()
+    if details.get(base) is True:
+        capabilities.add(base)
+    if (base not in capabilities or provider not in
+            settings.enabled_listener_request_filter_providers):
+        return capabilities
+    backend_profiles = (
+        (constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME,
+         settings.enabled_backend_tls_hostname_providers),
+        (constants.GATEWAY_CAPABILITY_BACKEND_TLS_H2_ALPN,
+         settings.enabled_backend_tls_h2_alpn_providers),
+        (constants.GATEWAY_CAPABILITY_BACKEND_TLS_SUBJECT_ALT_NAMES,
+         settings.enabled_backend_tls_subject_alt_names_providers),
+    )
+    for capability, providers in backend_profiles:
+        if provider in providers and details.get(capability) is True:
+            capabilities.add(capability)
+    if (validate.backend_tls_system_ca_profile(provider) and
+            details.get(
+                constants.GATEWAY_CAPABILITY_BACKEND_TLS_SYSTEM_CA) is True):
+        capabilities.add(constants.GATEWAY_CAPABILITY_BACKEND_TLS_SYSTEM_CA)
+    if provider in settings.enabled_backend_h2c_providers:
+        capabilities.add(constants.GATEWAY_CAPABILITY_BACKEND_H2C)
+    grpc = constants.GATEWAY_CAPABILITY_LISTENER_GRPC_EXTERNAL_AUTH
+    if (provider in settings.enabled_listener_grpc_external_auth_providers and
+            details.get(grpc) is True):
+        capabilities.add(grpc)
+    if provider in settings.enabled_listener_http_external_auth_tls_providers:
+        capabilities.add(
+            constants.GATEWAY_CAPABILITY_LISTENER_HTTP_EXTERNAL_AUTH_TLS)
+    http_body_providers = (
+        settings.enabled_listener_external_auth_forward_body_providers)
+    https_body_providers = (
+        settings.enabled_https_listener_external_auth_forward_body_providers)
+    if provider in http_body_providers:
+        capabilities.add(constants.GATEWAY_CAPABILITY_LISTENER_AUTH_BODY)
+    if provider in https_body_providers:
+        capabilities.add(constants.GATEWAY_CAPABILITY_HTTPS_LISTENER_AUTH_BODY)
+    return capabilities
+
+
 class JinjaTemplater:
 
     def __init__(self,
@@ -409,6 +455,8 @@ class JinjaTemplater:
         feature_compatibility[
             constants.GATEWAY_CAPABILITY_L7POLICY_HTTP_EXTERNAL_AUTH_TLS
         ] = http_auth_tls_supported(loadbalancer_obj, amp_details)
+        feature_compatibility['listener_authorizer_capabilities'] = (
+            listener_authorizer_capabilities(loadbalancer_obj, amp_details))
         loadbalancer = self._transform_loadbalancer(
             host_amphora,
             loadbalancer_obj,
@@ -502,10 +550,6 @@ class JinjaTemplater:
                         is not True):
                     raise driver_except.AmpVersionUnsupported(
                         version='HAProxy lacks HTTP request policy support')
-                if (listener.get('request_filter_sections') and
-                        (amp_details or {}).get(auth_capability) is not True):
-                    raise driver_except.AmpVersionUnsupported(
-                        version='HAProxy lacks listener HTTP authorization')
                 if (listener.get('request_mirror_pools') and
                         supports_mirrors is not True):
                     raise driver_except.AmpVersionUnsupported(
@@ -749,13 +793,14 @@ class JinjaTemplater:
             for listener in listener_transforms if listener['enabled']
             for policy in listener['l7policies']
             if policy.get('external_auth', {}).get('available')]
-        http_auth = [
+        listener_auth = [
             auth for listener in listener_transforms if listener['enabled']
             for section in listener.get('request_filter_sections', ())
             for auth in section['requests'] if auth['available']]
-        http_auth.extend(auth for auth in policy_auth
-                         if auth.get('protocol') != 'GRPC')
-        grpc_auth = [auth for auth in policy_auth
+        authorizers = listener_auth + policy_auth
+        http_auth = [auth for auth in authorizers
+                     if auth.get('protocol') != 'GRPC']
+        grpc_auth = [auth for auth in authorizers
                      if auth.get('protocol') == 'GRPC']
         for requests, grpc, field in (
                 (http_auth, False, 'listener_auth_pools'),
@@ -1097,7 +1142,7 @@ class JinjaTemplater:
             if policy_auth_supported and
             (allow_tls_authorizers or
              not listener_request_filters.is_http_tls_authorizer(pool)) and
-            self._auth_pool_available(pool, listener, rule=True)}
+            self._auth_pool_available(pool, listener)}
         grpc_auth_supported = feature_compatibility.get(
             constants.GATEWAY_CAPABILITY_L7POLICY_GRPC_EXTERNAL_AUTH, False)
         grpc_auth_pool_ids = {pool.id for pool in loadbalancer.pools
@@ -1354,20 +1399,39 @@ class JinjaTemplater:
             listener.request_filter_sections)
         listener_request_filters.validate_listener(listener.protocol, sections)
         pool_ids = listener_request_filters.pool_ids(sections)
-        available = {
-            pool.id for pool in loadbalancer.pools
-            if pool.id in pool_ids and
-            self._auth_pool_available(pool, listener)
-        }
+        pools = {pool.id: pool for pool in loadbalancer.pools
+                 if pool.id in pool_ids}
+        capabilities = feature_compatibility[
+            'listener_authorizer_capabilities']
+        body_cap = (constants.GATEWAY_CAPABILITY_HTTPS_LISTENER_AUTH_BODY
+                    if listener.protocol == constants.PROTOCOL_TERMINATED_HTTPS
+                    else constants.GATEWAY_CAPABILITY_LISTENER_AUTH_BODY)
+
+        def encode_step(step):
+            auth = listener_request_filters.authorizer(step)
+            protocol = auth.get('protocol', constants.PROTOCOL_HTTP)
+            pool = pools.get(auth['pool_id'])
+            available = ()
+            if (pool is not None and
+                    constants.GATEWAY_CAPABILITY_LISTENER_REQUEST_FILTERS
+                    in capabilities and
+                    self._auth_pool_available(pool, listener, protocol) and
+                    self._auth_body_ready(auth, feature_compatibility)):
+                required = listener_request_filters.transport_capabilities(
+                    auth, pool)
+                if required and 'forward_body_max_size' in auth:
+                    required.add(body_cap)
+                if required.issubset(capabilities):
+                    available = (pool.id,)
+            return self._encode_auth(auth, available)
+
         ordered_sections = sorted(
             sections, key=lambda section: self._https_hostname_priority(
                 section['hostname']))
         return [
             {'id': index, 'hostname': section['hostname'],
              'reject': section.get('reject', False),
-             'requests': [self._encode_auth(
-                 step['http'], available if self._auth_body_ready(
-                     step['http'], feature_compatibility) else ())
+             'requests': [encode_step(step)
                           for step in section.get('requests', ())]}
             for index, section in enumerate(ordered_sections, start=1)]
 
@@ -1383,14 +1447,12 @@ class JinjaTemplater:
                 not validate.external_auth_body_over_limit(auth))
 
     @staticmethod
-    def _auth_pool_available(pool, listener, protocol=constants.PROTOCOL_HTTP,
-                             *, rule=False):
+    def _auth_pool_available(pool, listener, protocol=constants.PROTOCOL_HTTP):
         return (pool.enabled and pool.project_id == listener.project_id and
                 pool.load_balancer_id == listener.load_balancer_id and
                 pool.provisioning_status not in (
                     constants.PENDING_DELETE, constants.DELETED) and
-                listener_request_filters.valid_pool(
-                    pool, protocol, rule=rule))
+                listener_request_filters.valid_pool(pool, protocol))
 
     @staticmethod
     def _auth_tls_ready(pool, material, details, *, grpc):

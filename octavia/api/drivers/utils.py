@@ -427,6 +427,23 @@ def gateway_capabilities(driver):
             in capabilities):
         capabilities.append(
             constants.GATEWAY_CAPABILITY_L7POLICY_HTTP_EXTERNAL_AUTH_TLS)
+    if constants.GATEWAY_CAPABILITY_LISTENER_REQUEST_FILTERS in capabilities:
+        tls = constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME in capabilities
+        h2 = constants.GATEWAY_CAPABILITY_BACKEND_TLS_H2_ALPN in capabilities
+        h2c = constants.GATEWAY_CAPABILITY_BACKEND_H2C in capabilities
+        if ((h2c or (tls and h2)) and driver.name in
+                api_settings.enabled_listener_grpc_external_auth_providers and
+                getattr(driver, 'supports_listener_grpc_external_auth',
+                        False) is True):
+            capabilities.append(
+                constants.GATEWAY_CAPABILITY_LISTENER_GRPC_EXTERNAL_AUTH)
+        listener_tls_providers = (
+            api_settings.enabled_listener_http_external_auth_tls_providers)
+        if (tls and driver.name in listener_tls_providers and
+                getattr(driver, 'supports_listener_http_external_auth_tls',
+                        False) is True):
+            capabilities.append(
+                constants.GATEWAY_CAPABILITY_LISTENER_HTTP_EXTERNAL_AUTH_TLS)
     return capabilities
 
 
@@ -686,8 +703,18 @@ def _require_l7policy_external_auth(driver, protocol, capability, name):
                 'provider.') % {'name': name})
 
 
-def require_listener_request_filters(driver, protocol, sections, *,
-                                     validate_body=True):
+def require_http_tls_authorizer_pool(driver):
+    capabilities = gateway_capabilities(driver)
+    if not set(capabilities).intersection({
+            constants.GATEWAY_CAPABILITY_L7POLICY_HTTP_EXTERNAL_AUTH_TLS,
+            constants.GATEWAY_CAPABILITY_LISTENER_HTTP_EXTERNAL_AUTH_TLS}):
+        raise exceptions.ProviderUnsupportedOptionError(
+            prov=driver.name, user_msg=_(
+                'HTTP authorization over verified TLS is unavailable.'))
+
+
+def require_listener_request_filters(driver, protocol, sections, *, session,
+                                     lb_id, project_id):
     capabilities = gateway_capabilities(driver)
     if (constants.GATEWAY_CAPABILITY_LISTENER_REQUEST_FILTERS not in
             capabilities):
@@ -695,13 +722,22 @@ def require_listener_request_filters(driver, protocol, sections, *,
             prov=driver.name, user_msg=_(
                 'HTTP listener request filters are unavailable for '
                 'this provider.'))
-    if not validate_body:
-        return
+    pools = repositories.ListenerRepository().validate_request_filter_pools(
+        session, sections, lb_id, project_id)
     body_capability = (
         constants.GATEWAY_CAPABILITY_HTTPS_LISTENER_AUTH_BODY
         if protocol == constants.PROTOCOL_TERMINATED_HTTPS else
         constants.GATEWAY_CAPABILITY_LISTENER_AUTH_BODY)
-    for auth in listener_request_filters.body_authorizers(sections):
+    for auth in listener_request_filters.authorizers(sections):
+        pool = pools[auth['pool_id']]
+        required = listener_request_filters.transport_capabilities(auth, pool)
+        if not required.issubset(capabilities):
+            raise exceptions.ProviderUnsupportedOptionError(
+                prov=driver.name, user_msg=_(
+                    'The listener ExternalAuth transport is unavailable '
+                    'for this provider.'))
+        if not validate.l7policy_external_auth_forwards_body(auth):
+            continue
         if body_capability not in capabilities:
             raise exceptions.ProviderUnsupportedOptionError(
                 prov=driver.name, user_msg=_(

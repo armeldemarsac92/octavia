@@ -401,7 +401,8 @@ class L7PolicyActivationController(base.BaseController):
             if listener.request_filter_sections:
                 driver_utils.require_listener_request_filters(
                     driver, listener.protocol,
-                    listener.request_filter_sections)
+                    listener.request_filter_sections, session=session,
+                    lb_id=lb.id, project_id=listener.project_id)
             graph, order = l7policy_activation.snapshot(
                 session, self.repositories, lb, listener,
                 additional_pools=additional_pools)
