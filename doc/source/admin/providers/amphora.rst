@@ -618,3 +618,33 @@ failures remain visible. The load balancer's previously loaded
 configuration remains in use until a reload. Explicitly clear both fields
 with ``null`` to return to named affinity without a timeout, or set
 ``session_persistence`` to ``null`` to remove affinity entirely.
+
+Permanent HTTP affinity cookies
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Apply database revision ``b3d57e9a2c41`` and update the regional API,
+workers and Amphora agents. Qualify the same HAProxy profile and provision
+the shared signing key described above. Then enable the provider for all
+three cookie capabilities.
+
+.. code-block:: ini
+
+   [api_settings]
+   enabled_http_cookie_name_providers = amphora
+   enabled_http_cookie_absolute_timeout_providers = amphora
+   enabled_http_cookie_permanent_providers = amphora
+
+The provider advertises ``http_cookie_permanent_v1``. When
+``session_persistence.cookie_permanent`` is ``true``, the load balancer
+issues ``Path=/`` and ``Max-Age``, rounded up from the configured
+millisecond timeout. A zero timeout gives ``Max-Age=0``. Server-side expiry
+uses the exact timeout. Use the same cookie mode across pools that
+share an affinity scope. Cookies signed for one mode are replaced when
+the mode changes, and existing browser session cookie signatures remain
+compatible.
+
+When an Amphora agent cannot advertise permanent cookie support, the
+worker renders the affected pool without affinity. The acknowledged
+reload and recovery rules for the absolute timeout profile also apply
+here. To return to a browser session cookie while retaining the existing
+absolute timeout, send ``session_persistence: {cookie_permanent: false}``.

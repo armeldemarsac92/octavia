@@ -139,6 +139,11 @@ api_opts = [
                        'database, API, workers and Amphora agents, qualifying '
                        'Amphora HAProxy builds and provisioning the shared '
                        'worker signing key.')),
+    cfg.ListOpt('enabled_http_cookie_permanent_providers', default=[],
+                help=_('Providers with a qualified permanent HTTP cookie '
+                       'profile. Requires named HTTP cookies and absolute '
+                       'timeouts. Enable after upgrading the database, API, '
+                       'workers and Amphora agents.')),
     cfg.ListOpt('enabled_backend_retry_budget_providers', default=[],
                 help=_('Providers whose regional fleets support Service '
                        'retry budgets. Enable after upgrading the database, '

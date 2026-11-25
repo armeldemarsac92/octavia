@@ -58,6 +58,7 @@ class SessionPersistenceResponse(types.BaseType):
     persistence_granularity = wtypes.wsattr(types.IPAddressType())
     cookie_absolute_timeout_ms = wtypes.wsattr(HTTPAbsoluteCookieTimeout())
     cookie_scope = wtypes.wsattr(HTTPCookieScope())
+    cookie_permanent = types.StrictBooleanAttribute()
 
     @classmethod
     def from_db_obj(cls, db_obj):
@@ -65,6 +66,8 @@ class SessionPersistenceResponse(types.BaseType):
         if result.cookie_absolute_timeout_ms is None:
             result.cookie_absolute_timeout_ms = wtypes.Unset
             result.cookie_scope = wtypes.Unset
+        if result.cookie_permanent is not True:
+            result.cookie_permanent = wtypes.Unset
         return result
 
 
@@ -82,6 +85,7 @@ class SessionPersistencePOST(types.BaseType):
                                             default=None)
     cookie_absolute_timeout_ms = wtypes.wsattr(HTTPAbsoluteCookieTimeout())
     cookie_scope = wtypes.wsattr(HTTPCookieScope())
+    cookie_permanent = types.StrictBooleanAttribute()
 
 
 class SessionPersistencePUT(types.BaseType):
@@ -96,6 +100,7 @@ class SessionPersistencePUT(types.BaseType):
                                             default=None)
     cookie_absolute_timeout_ms = wtypes.wsattr(HTTPAbsoluteCookieTimeout())
     cookie_scope = wtypes.wsattr(HTTPCookieScope())
+    cookie_permanent = types.StrictBooleanAttribute()
 
 
 class BackendTLSSubjectAltNames(wtypes.UserType):

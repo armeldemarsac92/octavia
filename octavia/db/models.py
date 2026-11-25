@@ -146,6 +146,8 @@ class SessionPersistence(base_models.BASE):
         sa.Boolean(), nullable=False, server_default=sa.false())
     cookie_absolute_timeout_ms = sa.Column(sa.BigInteger(), nullable=True)
     cookie_scope = sa.Column(sa.String(64), nullable=True)
+    cookie_permanent = sa.Column(
+        sa.Boolean(), nullable=False, default=False, server_default=sa.false())
     cookie_absolute_timeout_error = sa.Column(
         sa.Boolean(), nullable=False, server_default=sa.false())
     persistence_timeout = sa.Column(sa.Integer(), nullable=True)

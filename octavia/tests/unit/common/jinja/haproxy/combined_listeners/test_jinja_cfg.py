@@ -2921,6 +2921,29 @@ class TestHaproxyCfg(base.TestCase):
                 if line.startswith('    server '))
             self.assertNotIn(' cookie ', server_lines)
 
+            pool.session_persistence.cookie_permanent = True
+            permanent = constants.GATEWAY_CAPABILITY_HTTP_COOKIE_PERMANENT
+            amp_details = {capability: True, permanent: True}
+            incompatible = self.jinja_cfg.render_loadbalancer_obj(
+                amphora, [listener], amp_details={capability: True},
+                http_cookie_results=results)
+            self.assertEqual({pool.id: constants.ERROR}, results)
+            self.assertNotIn('octavia_cookie_signing_key', incompatible)
+            self.assertNotRegex(incompatible, r'(?m)^    server .* cookie ')
+
+            for timeout, max_age in ((0, 0), (1500, 2)):
+                with self.subTest(timeout=timeout):
+                    pool.session_persistence.cookie_absolute_timeout_ms = (
+                        timeout)
+                    persistent_config = self.jinja_cfg.render_loadbalancer_obj(
+                        amphora, [listener], amp_details=amp_details,
+                        http_cookie_results=results)
+                    self.assertEqual({pool.id: constants.ACTIVE}, results)
+                    self.assertTrue(
+                        f'; Path=/; Max-Age={max_age}"' in persistent_config)
+                    self.assertTrue(
+                        f' -m int lt {timeout * 1000}' in persistent_config)
+
         old_amphora = self.jinja_cfg.render_loadbalancer_obj(
             amphora, [listener], amp_details={})
         self.assertNotIn('octavia_cookie_signing_key', old_amphora)

@@ -168,6 +168,7 @@ class HAProxyCompatTestCase(base.TestCase):
         capabilities = {
             fallback,
             constants.GATEWAY_CAPABILITY_HTTP_COOKIE_ABSOLUTE_TIMEOUT,
+            constants.GATEWAY_CAPABILITY_HTTP_COOKIE_PERMANENT,
         }
         for version, feature, supported in (
                 ('3.0.19', '+OPENSSL', True),
