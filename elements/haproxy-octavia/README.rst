@@ -33,6 +33,29 @@ leave the upgraded workers and Amphora binaries in place while traffic drains
 from protected pools. A package upgrade that replaces the patched HAProxy
 requires a new verified build before that image can serve protected pools.
 
+Listener OTLP/HTTP tracing
+==========================
+
+Build the tracing variant with the pinned Lua 5.4.9 source archive as the
+third argument to the existing build command::
+
+    ./elements/haproxy-octavia/build-haproxy.sh \
+        /path/to/haproxy-3.0.19.tar.gz /path/to/haproxy \
+        /path/to/lua-5.4.9.tar.gz
+
+The script verifies and statically links Lua. With
+``DIB_OCTAVIA_HAPROXY_BINARY`` set to this variant, the element installs the
+Lua instrumentation and a tmpfiles entry for the private Unix sockets. The
+Amphora agent checks the build marker, Lua support and presence of the
+instrumentation file before reporting ``listener_otlp_tracing_v1``.
+
+Run the local wire check using the built binary and an OpenTelemetry Collector
+binary with the OTLP receiver and file exporter. From the Octavia checkout,
+with its Python dependencies installed::
+
+    PYTHONPATH=. python3 elements/haproxy-octavia/test-telemetry-wire.py \
+        /path/to/haproxy /path/to/otelcol /path/to/evidence-directory
+
 The ``backend_tls_h2_alpn_v1`` pool capability additionally verifies negotiated
 HTTP/2 before sending application data, including TLS health checks. HTTP
 health probes on these pools send HTTP/2 with the monitor's configured domain

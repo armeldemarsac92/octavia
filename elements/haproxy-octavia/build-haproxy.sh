@@ -1,8 +1,8 @@
 #!/bin/bash
 set -eu
 
-if [[ $# != 2 ]]; then
-    echo "Usage: $0 <HAProxy 3.0.19 source tarball> <output binary>" >&2
+if [[ $# != 2 && $# != 3 ]]; then
+    echo "Usage: $0 <HAProxy 3.0.19 source tarball> <output binary> [Lua 5.4.9 source tarball]" >&2
     exit 2
 fi
 
@@ -11,6 +11,21 @@ tarball=$(realpath -- "$1")
 binary=$(realpath -m -- "$2")
 work_dir=$(mktemp -d)
 trap 'rm -rf -- "$work_dir"' EXIT
+build_suffix=-octavia-strict-dns-v1-h2-alpn-v1-backend-sans-v1-http-policy-v1-http-mirror-v1-listener-auth-v1-backend-retry-budget-v1
+lua_options=()
+if [[ $# == 3 ]]; then
+    lua_tarball=$(realpath -- "$3")
+    printf '%s  %s\n' \
+        2335b6c582a52654f94612bf10d2f4672805d05329aa6568b1d8cd9e5c6fb8e6 \
+        "$lua_tarball" | sha256sum --check --strict
+    tar -xzf "$lua_tarball" -C "$work_dir"
+    lua_source="$work_dir/lua-5.4.9/src"
+    LC_ALL=C SOURCE_DATE_EPOCH=1773936536 make -C "$lua_source" \
+        linux MYCFLAGS=-fPIC
+    lua_options=(USE_LUA=1 "LUA_INC=$lua_source" "LUA_LIB=$lua_source"
+                 LUA_LIB_NAME=lua)
+    build_suffix+=-listener-otlp-v1
+fi
 
 printf '%s  %s
 ' \
@@ -39,5 +54,5 @@ done
 
 LC_ALL=C SOURCE_DATE_EPOCH=1773936536 make \
     TARGET=linux-glibc USE_OPENSSL=1 USE_SYSTEMD=1 \
-    EXTRAVERSION=-octavia-strict-dns-v1-h2-alpn-v1-backend-sans-v1-http-policy-v1-http-mirror-v1-listener-auth-v1-backend-retry-budget-v1
+    "${lua_options[@]}" "EXTRAVERSION=$build_suffix"
 install -m 0755 haproxy "$binary"

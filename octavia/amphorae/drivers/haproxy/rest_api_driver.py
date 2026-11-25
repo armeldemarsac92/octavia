@@ -12,6 +12,7 @@
 # WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 # License for the specific language governing permissions and limitations
 # under the License.
+import contextlib
 import functools
 import hashlib
 import json
@@ -139,22 +140,57 @@ class HaproxyAmphoraLoadBalancerDriver(
 
         opted_in, protected = self._backend_tls_pools(loadbalancer)
         fallback, withdrawn = self._frontend_fallback_listeners(loadbalancer)
-        if opted_in or fallback or withdrawn:
-            peers = {amp.id: amp for amp in loadbalancer.amphorae
-                     if amp.status != consts.DELETED}
-            peers[amphora.id] = amphora
-            self._update_protected_tls_listeners(
-                loadbalancer, [amphora], peers.values(), protected, fallback,
-                withdrawn, timeout_dict=timeout_dict)
-        else:
-            self._update_amphora_listeners(
-                loadbalancer, amphora, timeout_dict=timeout_dict)
+        with self._otlp_render_results(loadbalancer) as tracing_options:
+            if opted_in or fallback or withdrawn:
+                peers = {amp.id: amp for amp in loadbalancer.amphorae
+                         if amp.status != consts.DELETED}
+                peers[amphora.id] = amphora
+                self._update_protected_tls_listeners(
+                    loadbalancer, [amphora], peers.values(), protected,
+                    fallback, withdrawn, timeout_dict=timeout_dict,
+                    **tracing_options)
+            else:
+                self._update_amphora_listeners(
+                    loadbalancer, amphora, timeout_dict=timeout_dict,
+                    **tracing_options)
+
+    @staticmethod
+    @contextlib.contextmanager
+    def _otlp_render_results(loadbalancer):
+        listeners = {
+            listener.id: listener.otlp_tracing
+            for listener in loadbalancer.listeners
+            if (loadbalancer.enabled and listener.enabled and
+                isinstance(getattr(listener, 'otlp_tracing', None), dict))
+        }
+        if not listeners:
+            yield {}
+            return
+        results = {}
+        expected = {amp.id for amp in loadbalancer.amphorae
+                    if amp.status != consts.DELETED}
+        try:
+            yield {'otlp_observed': results}
+        finally:
+            statuses = {}
+            for listener_id, tracing in listeners.items():
+                votes = {amp: result[listener_id]
+                         for amp, result in results.items()
+                         if listener_id in result}
+                if consts.ERROR in votes.values():
+                    statuses[listener_id] = (tracing, consts.ERROR)
+                elif expected and expected.issubset(votes):
+                    statuses[listener_id] = (tracing, consts.ACTIVE)
+            if statuses:
+                listener_repo = repo.ListenerRepository()
+                with db_api.session().begin() as session:
+                    listener_repo.set_otlp_tracing_statuses(session, statuses)
 
     def _update_amphora_listeners(
             self, loadbalancer, amphora, timeout_dict=None, *,
             amp_details=None, backend_tls_certs=None,
             frontend_tls_certs=None, closed_frontend=(),
-            l7policy_activation=False):
+            l7policy_activation=False, otlp_observed=None):
         if not loadbalancer.listeners:
             LOG.debug('No listeners found to update.')
             return set()
@@ -166,6 +202,7 @@ class HaproxyAmphoraLoadBalancerDriver(
         self._populate_amphora_api_version(amphora)
 
         has_tcp = False
+        otlp_tls_certs = {}
         certs = dict(backend_tls_certs or {})
         frontend_tls_certs = frontend_tls_certs or {}
         listeners_to_update = []
@@ -202,6 +239,14 @@ class HaproxyAmphoraLoadBalancerDriver(
                     listeners_to_update.append(listener)
                     continue
 
+                tracing = getattr(listener, 'otlp_tracing', None)
+                if (listener.enabled and loadbalancer.enabled and
+                        isinstance(tracing, dict)):
+                    pool_id = tracing['collector_pool_id']
+                    if pool_id not in otlp_tls_certs:
+                        otlp_tls_certs[pool_id] = (
+                            self._process_otlp_collector_certs(
+                                listener, loadbalancer, amphora, pool_id))
                 try:
                     if client_auth_fallback:
                         certs.update(frontend_tls_certs[listener.id])
@@ -231,16 +276,32 @@ class HaproxyAmphoraLoadBalancerDriver(
                 if amp_details is None:
                     client = self.clients[amphora.api_version]
                     amp_details = client.get_details(amphora)
+                tracing_options = {}
+                if otlp_tls_certs:
+                    tracing_options['otlp_tls_certs'] = otlp_tls_certs
                 config = self.jinja_combo.build_config(
                     host_amphora=amphora, listeners=listeners_to_update,
                     tls_certs=certs,
                     haproxy_versions=haproxy_versions,
-                    amp_details=amp_details)
+                    amp_details=amp_details, **tracing_options)
                 self.clients[amphora.api_version].upload_config(
                     amphora, loadbalancer.id, config,
                     timeout_dict=timeout_dict)
                 self.clients[amphora.api_version].reload_listener(
                     amphora, loadbalancer.id, timeout_dict=timeout_dict)
+                if otlp_observed is not None:
+                    results = otlp_observed.setdefault(amphora.id, {})
+                    for listener in listeners_to_update:
+                        tracing = getattr(listener, 'otlp_tracing', None)
+                        if (not tracing or not listener.enabled or
+                                listener.provisioning_status in (
+                                    consts.PENDING_DELETE, consts.DELETED)):
+                            continue
+                        pool_id = tracing['collector_pool_id']
+                        material = otlp_tls_certs[pool_id]
+                        results[listener.id] = (
+                            consts.ERROR if material.get('closed') else
+                            consts.ACTIVE)
             else:
                 # If we aren't updating any listeners, make sure there are
                 # no listeners hanging around. For example if this update
@@ -274,16 +335,17 @@ class HaproxyAmphoraLoadBalancerDriver(
             raise driver_except.ListenerProvisioningError()
         opted_in, protected = self._backend_tls_pools(loadbalancer)
         fallback, withdrawn = self._frontend_fallback_listeners(loadbalancer)
-        if (opted_in or fallback or withdrawn) and amphorae:
-            return self._update_protected_tls_listeners(
-                loadbalancer, amphorae, amphorae, protected, fallback, withdrawn,
-                l7policy_activation=l7policy_activation,
-                l7policy_restoration=l7policy_restoration)
-        else:
+        with self._otlp_render_results(loadbalancer) as tracing_options:
+            if (opted_in or fallback or withdrawn) and amphorae:
+                return self._update_protected_tls_listeners(
+                    loadbalancer, amphorae, amphorae, protected, fallback,
+                    withdrawn, l7policy_activation=l7policy_activation,
+                    l7policy_restoration=l7policy_restoration,
+                    **tracing_options)
             for amphora in amphorae:
                 self._update_amphora_listeners(
                     loadbalancer, amphora,
-                    l7policy_activation=l7policy_activation)
+                    l7policy_activation=l7policy_activation, **tracing_options)
 
     def update_failover_listeners(self, loadbalancer, amphora_index,
                                   amphorae_status, timeout_dict=None):
@@ -296,12 +358,14 @@ class HaproxyAmphoraLoadBalancerDriver(
             unreachable = {amp.id for amp in peers
                            if amphorae_status.get(amp.id, {}).get(
                                consts.UNREACHABLE)}
-            self._update_protected_tls_listeners(
-                loadbalancer, [amp for amp in peers
-                               if amp.id not in unreachable],
-                peers, protected, fallback, withdrawn,
-                timeout_dict=timeout_dict,
-                unreachable=unreachable, coordinating_failover=True)
+            with self._otlp_render_results(loadbalancer) as tracing_options:
+                self._update_protected_tls_listeners(
+                    loadbalancer, [amp for amp in peers
+                                   if amp.id not in unreachable],
+                    peers, protected, fallback, withdrawn,
+                    timeout_dict=timeout_dict,
+                    unreachable=unreachable, coordinating_failover=True,
+                    **tracing_options)
         return coordinated
 
     @staticmethod
@@ -340,9 +404,11 @@ class HaproxyAmphoraLoadBalancerDriver(
         return fallback, withdrawn
 
     def _update_protected_tls_listeners(
-            self, loadbalancer, amphorae, peers, protected, fallback, withdrawn,
-            timeout_dict=None, unreachable=(), l7policy_activation=False,
-            coordinating_failover=False, l7policy_restoration=False):
+            self, loadbalancer, amphorae, peers, protected, fallback,
+            withdrawn, timeout_dict=None, unreachable=(),
+            l7policy_activation=False,
+            coordinating_failover=False, l7policy_restoration=False,
+            otlp_observed=None):
         # Preflight the pair and stage the TLS material before any reload.
         details = {}
         for amphora in peers if protected or fallback else amphorae:
@@ -405,6 +471,9 @@ class HaproxyAmphoraLoadBalancerDriver(
 
         reload_errors = {}
         reloaded_listeners = []
+        tracing_options = {}
+        if otlp_observed is not None:
+            tracing_options['otlp_observed'] = otlp_observed
         for amphora in amphorae:
             try:
                 configured = self._update_amphora_listeners(
@@ -413,7 +482,8 @@ class HaproxyAmphoraLoadBalancerDriver(
                     backend_tls_certs=certs[amphora.id],
                     frontend_tls_certs=frontend_certs[amphora.id],
                     closed_frontend=closed_frontend,
-                    l7policy_activation=l7policy_activation)
+                    l7policy_activation=l7policy_activation,
+                    **tracing_options)
                 reloaded_listeners.append(configured)
             except Exception as error:
                 LOG.warning('Could not reload listeners on amphora %s (%s).',
@@ -777,6 +847,30 @@ class HaproxyAmphoraLoadBalancerDriver(
             self._upload_cert(
                 amphora, obj_id, pem=secret, md5sum=md5sum, name=name)
         return name
+
+    def _process_otlp_collector_certs(
+            self, listener, loadbalancer, amphora, pool_id):
+        pool = next((pool for pool in loadbalancer.pools
+                     if pool.id == pool_id), None)
+        if (pool is None or not pool.enabled or not pool.tls_enabled or
+                pool.provisioning_status in (consts.PENDING_DELETE,
+                                             consts.DELETED)):
+            return {}
+        try:
+            material = self._process_pool_certs(
+                listener, pool, amphora, loadbalancer.id)
+            required = {'client_cert': pool.tls_certificate_id,
+                        'ca_cert': pool.ca_tls_certificate_id,
+                        'crl': pool.crl_container_id}
+            if any(ref and not material.get(name)
+                   for name, ref in required.items()):
+                raise exceptions.ValidationException(detail=(
+                    'Missing OTLP collector TLS material.'))
+            return material
+        except Exception as error:
+            LOG.warning('OTLP collector pool %s TLS setup failed (%s).',
+                        pool_id, type(error).__name__)
+            return {'closed': True}
 
     def _process_listener_pool_certs(self, listener, amphora, obj_id):
         #     {'POOL-ID': {

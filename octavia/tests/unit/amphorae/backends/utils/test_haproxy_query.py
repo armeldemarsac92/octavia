@@ -129,7 +129,7 @@ class QueryTestCase(base.TestCase):
             'status': constants.UP, 'members': {},
         }}, self.q.get_pool_status())
 
-    def test_mirror_pools_and_public_listener_counters(self):
+    def test_private_pools_and_public_listener_counters(self):
         self.q._query = mock.Mock(return_value=(
             '# pxname,svname,status,weight\n'
             'listener-id,FRONTEND,OPEN,\n'
@@ -138,6 +138,10 @@ class QueryTestCase(base.TestCase):
             'octavia-mirror-copy-only,BACKEND,UP,1\n'
             'octavia-mirror-shared,shared-member,DOWN,1\n'
             'octavia-mirror-shared,BACKEND,DOWN,1\n'
+            'octavia-otlp-collector:listener-id,FRONTEND,OPEN,\n'
+            'octavia-otlp-collector:listener-id,collector-member,UP,1\n'
+            'octavia-otlp-collector:listener-id,BACKEND,UP,1\n'
+            'octavia-otlp-shared:listener-id,BACKEND,DOWN,1\n'
             'shared:listener-id,shared-member,UP,0\n'
             'shared:listener-id,BACKEND,UP,1\n'))
         self.assertEqual(['listener-id'], [
@@ -146,6 +150,8 @@ class QueryTestCase(base.TestCase):
         self.assertEqual({
             'copy-only': {'pool_uuid': 'copy-only', 'status': constants.UP,
                           'members': {'copy-member': constants.UP}},
+            'collector': {'pool_uuid': 'collector', 'status': constants.UP,
+                          'members': {'collector-member': constants.UP}},
             'shared:listener-id': {
                 'pool_uuid': 'shared', 'listener_uuid': 'listener-id',
                 'status': constants.UP,

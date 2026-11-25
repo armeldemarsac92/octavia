@@ -490,6 +490,10 @@ backend {{ pool.id }}:{{ listener.id }}
 
 {% macro frontend_macro(constants, lib_consts, listener, lb_vip_address, additional_vips) %}
 frontend {{ listener.id }}
+    {% if listener.otlp_tracing is defined %}
+    http-request lua.octavia-trace-start {{ listener.id }}
+    http-after-response lua.octavia-trace-finish
+    {% endif %}
     {% if listener.connection_limit is defined %}
     maxconn {{ listener.connection_limit }}
     {% endif %}
@@ -831,6 +835,33 @@ backend {{ reject }}
 {% endmacro %}
 
 
+{% macro otlp_tracing_delivery_macro(constants, lib_consts, listener, state_file) %}
+listen {{ constants.HAPROXY_OTLP_TRACING_PROXY_PREFIX }}{{ listener.otlp_tracing.collector_pool_id }}:{{ listener.id }}
+    bind {{ listener.otlp_tracing.socket }} user nobody mode 600
+    mode http
+    no log
+    maxconn 1
+    retries 0
+    no option redispatch
+    http-request disable-l7-retry
+    option abortonclose
+    timeout client 1s
+    timeout connect 1s
+    timeout server 1s
+    {% set pool = listener.otlp_tracing.get('pool') %}
+    {% if pool %}
+    balance {{ pool.lb_algorithm }}
+    option allbackups
+{{ pool_health_monitor(constants, pool, state_file) -}}
+        {% for member in pool.members %}
+            {{- member_macro(constants, lib_consts, pool, member, persistence=False) -}}
+        {% endfor %}
+    {% else %}
+    http-request return status 503
+    {% endif %}
+{% endmacro %}
+
+
 {% macro listener_auth_delivery_macro(constants, lib_consts, pool, state_file) %}
 listen octavia-auth-{{ pool.id }}
     bind /run/octavia/listener-auth/{{ pool.id }}.sock user nobody mode 600 octavia-auth-socket
@@ -888,6 +919,9 @@ backend {{ pool.id }}:{{ listener.id }}
     mode {{ listener.protocol_mode }}
     {% else %}
     mode {{ pool.protocol }}
+    {% endif %}
+    {% if listener.otlp_tracing is defined and (pool.protocol == 'http' or pool.proxy_protocol is not none) %}
+    http-request lua.octavia-trace-propagate
     {% endif %}
     {% if pool.get(constants.HTTP_REUSE, False) and (
           pool.protocol.lower() == constants.PROTOCOL_HTTP.lower() or

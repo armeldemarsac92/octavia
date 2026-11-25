@@ -1570,7 +1570,8 @@ class TestDatabaseTasks(base.TestCase):
         update_listener = database_tasks.UpdateListenerInDB()
         listener_dict = {constants.LISTENER_ID: LISTENER_ID}
         update_listener.execute(listener_dict,
-                                {'name': 'test', 'description': 'test2'})
+                                {'name': 'test', 'description': 'test2',
+                                 'otlp_tracing': None})
 
         mock_session = mock_get_session().begin().__enter__()
 

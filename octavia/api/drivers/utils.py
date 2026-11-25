@@ -45,6 +45,8 @@ HTTP_REQUEST_POLICY_PAYLOAD_AVAILABLE = hasattr(
     driver_dm.L7Policy(), 'http_request_policy')
 HTTP_REQUEST_MIRROR_PAYLOAD_AVAILABLE = hasattr(
     driver_dm.L7Policy(), 'request_mirrors')
+LISTENER_OTLP_TRACING_PAYLOAD_AVAILABLE = hasattr(
+    driver_dm.Listener(), 'otlp_tracing')
 LISTENER_REQUEST_FILTERS_PAYLOAD_AVAILABLE = hasattr(
     driver_dm.Listener(), 'request_filter_sections')
 WEIGHTED_TARGET_PAYLOAD_AVAILABLE = hasattr(driver_dm.L7Policy(), 'targets')
@@ -129,6 +131,12 @@ def gateway_capabilities(driver):
             driver.name in mirror_providers and
             getattr(driver, 'supports_http_request_mirror', False) is True):
         capabilities.append(constants.GATEWAY_CAPABILITY_HTTP_REQUEST_MIRROR)
+    if (LISTENER_OTLP_TRACING_PAYLOAD_AVAILABLE and driver.name in
+            api_settings.enabled_listener_otlp_tracing_providers and
+            getattr(driver, 'supports_listener_otlp_tracing', False)
+            is True):
+        capabilities.append(
+            constants.GATEWAY_CAPABILITY_LISTENER_OTLP_TRACING)
     if (LISTENER_REQUEST_FILTERS_PAYLOAD_AVAILABLE and driver.name in
             api_settings.enabled_listener_request_filter_providers and
             getattr(driver, 'supports_listener_request_filters',
@@ -247,6 +255,14 @@ def require_https_listener_isolation(driver):
         raise exceptions.ProviderUnsupportedOptionError(
             prov=driver.name, user_msg=_(
                 'HTTPS listener isolation is unavailable for this provider.'))
+
+
+def require_listener_otlp_tracing(driver):
+    if (constants.GATEWAY_CAPABILITY_LISTENER_OTLP_TRACING not in
+            gateway_capabilities(driver)):
+        raise exceptions.ProviderUnsupportedOptionError(
+            prov=driver.name, user_msg=_(
+                'Listener OTLP tracing is unavailable for this provider.'))
 
 
 def require_fixed_http_responses(driver):
@@ -772,7 +788,7 @@ def db_listener_to_provider_listener(db_listener, for_delete=False):
     new_listener_dict = listener_dict_to_provider_dict(
         db_listener.to_dict(recurse=True), for_delete=for_delete)
     for attribute in ('default_http_response', 'https_virtual_hosts',
-                      'request_filter_sections'):
+                      'request_filter_sections', 'otlp_tracing'):
         if new_listener_dict.get(attribute) is None:
             new_listener_dict.pop(attribute, None)
     if ('default_pool' in new_listener_dict and
@@ -821,6 +837,9 @@ def listener_dict_to_provider_dict(listener_dict, for_delete=False,
 
     # Preserve the existing driver payload for ordinary listeners.
     new_listener_dict.pop('frontend_fallback_owns_error', None)
+    new_listener_dict.pop('otlp_tracing_status', None)
+    if not LISTENER_OTLP_TRACING_PAYLOAD_AVAILABLE:
+        new_listener_dict.pop('otlp_tracing', None)
     if not LISTENER_REQUEST_FILTERS_PAYLOAD_AVAILABLE:
         new_listener_dict.pop('request_filter_sections', None)
     if not new_listener_dict.get('tcp_tls_termination'):

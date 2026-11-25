@@ -51,6 +51,47 @@ _ListenerPUT = 'octavia.api.v2.types.listener.ListenerPUT'
 INVALID_URL_CHARS_RE = re.compile(r'[\x00-\x20\x7f-\x9f]')
 
 
+def otlp_tracing(value):
+    if value is None:
+        return None
+    if not isinstance(value, dict) or value.keys() != {
+            'collector_pool_id', 'service_name', 'span_name'}:
+        raise exceptions.ValidationException(detail=_(
+            'otlp_tracing requires collector_pool_id, service_name, and '
+            'span_name.'))
+    pool_id = value['collector_pool_id']
+    try:
+        if not isinstance(pool_id, str):
+            raise ValueError
+        pool_id = str(uuid.UUID(pool_id))
+    except ValueError as exc:
+        raise exceptions.ValidationException(detail=_(
+            'collector_pool_id must be a UUID.')) from exc
+    service = value['service_name']
+    if not isinstance(service, str) or not re.fullmatch(
+            r'[A-Za-z0-9_.:/-]{1,253}', service):
+        raise exceptions.ValidationException(detail=_(
+            'Invalid OTLP service_name.'))
+    span = value['span_name']
+    if (not isinstance(span, str) or not 1 <= len(span) <= 256 or
+            not re.fullmatch(r'[A-Za-z0-9_.:/-]+(?: [A-Za-z0-9_.:/-]+)*',
+                             span)):
+        raise exceptions.ValidationException(
+            detail=_('Invalid OTLP span_name.'))
+    return dict(collector_pool_id=pool_id, service_name=service,
+                span_name=span)
+
+
+def validate_otlp_collector_transport(protocol, backend_h2c, require_h2,
+                                      tls_enabled, alpn_protocols):
+    if (protocol != constants.PROTOCOL_HTTP or backend_h2c or require_h2 or
+            (tls_enabled and alpn_protocols and
+             'http/1.1' not in alpn_protocols)):
+        raise exceptions.ValidationException(detail=_(
+            'An OTLP collector requires an HTTP pool with HTTP/1.1 '
+            'transport.'))
+
+
 def url(url, require_scheme=True):
     """Raises an error if the url doesn't look like a URL."""
     if INVALID_URL_CHARS_RE.search(url):

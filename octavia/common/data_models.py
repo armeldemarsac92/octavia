@@ -439,7 +439,8 @@ class Listener(BaseDataModel):
                  tcp_tls_termination=False, tcp_tls_mixed_mode=False,
                  client_authentication_insecure_fallback=None,
                  frontend_fallback_owns_error=None,
-                 request_filter_sections=None):
+                 request_filter_sections=None, otlp_tracing=None,
+                 otlp_tracing_status=None):
         self.id = id
         self.project_id = project_id
         self.name = name
@@ -448,6 +449,8 @@ class Listener(BaseDataModel):
         self.default_http_response = default_http_response
         self.https_virtual_hosts = https_virtual_hosts
         self.request_filter_sections = request_filter_sections
+        self.otlp_tracing = otlp_tracing
+        self.otlp_tracing_status = otlp_tracing_status
         self.tcp_tls_termination = tcp_tls_termination
         self.tcp_tls_mixed_mode = tcp_tls_mixed_mode
         self.load_balancer_id = load_balancer_id

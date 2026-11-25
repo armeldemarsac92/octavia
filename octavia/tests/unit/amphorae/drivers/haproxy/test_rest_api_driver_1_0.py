@@ -189,6 +189,55 @@ class TestHaproxyAmphoraLoadBalancerDriverTest(base.TestCase):
         (self.driver.clients[API_VERSION].delete_listener.
          assert_called_once_with)(mock_amphora, self.lb.id)
 
+    def test_otlp_collector_tls_closes_and_recovers(self):
+        collector = data_models.Pool(
+            id=FAKE_UUID_1, protocol=constants.PROTOCOL_HTTP,
+            enabled=True, tls_enabled=True, ca_tls_certificate_id='ca-ref')
+        tracing = {'collector_pool_id': collector.id,
+                   'service_name': 'gateway', 'span_name': 'Gateway HTTP'}
+        listener = data_models.Listener(
+            id='listener', protocol=constants.PROTOCOL_HTTP,
+            enabled=True, otlp_tracing=tracing)
+        amphora = data_models.Amphora(id='amphora', status=constants.ACTIVE)
+        amphora.api_version = API_VERSION
+        lb = data_models.LoadBalancer(
+            id='load-balancer', enabled=True, listeners=[listener],
+            pools=[collector], amphorae=[amphora])
+        listener.load_balancer = lb
+        client = self.driver.clients[API_VERSION]
+
+        with (
+            mock.patch.object(self.driver, '_process_pool_certs',
+                              side_effect=[OSError('transfer failed'),
+                                           {'ca_cert': '/tmp/ca.pem'}]),
+            mock.patch.object(driver.db_api, 'session') as session,
+            mock.patch.object(driver.repo.ListenerRepository,
+                              'set_otlp_tracing_statuses') as publish,
+        ):
+            publication = mock.Mock()
+            publication.attach_mock(client.reload_listener, 'reload')
+            publication.attach_mock(publish, 'status')
+            self.driver.update(lb)
+            config = self.driver.jinja_combo.build_config.call_args.kwargs
+            self.assertEqual([listener], config['listeners'])
+            self.assertEqual({collector.id: {'closed': True}},
+                             config['otlp_tls_certs'])
+
+            self.driver.update(lb)
+            config = self.driver.jinja_combo.build_config.call_args.kwargs
+            self.assertEqual([listener], config['listeners'])
+            self.assertEqual({collector.id: {'ca_cert': '/tmp/ca.pem'}},
+                             config['otlp_tls_certs'])
+            transaction = session().begin().__enter__()
+            self.assertEqual([
+                mock.call.reload(amphora, lb.id, timeout_dict=None),
+                mock.call.status(transaction, {
+                    listener.id: (tracing, constants.ERROR)}),
+                mock.call.reload(amphora, lb.id, timeout_dict=None),
+                mock.call.status(transaction, {
+                    listener.id: (tracing, constants.ACTIVE)}),
+            ], publication.mock_calls)
+
     def test_protected_pool_preflights_every_amphora(self):
         capability = constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME
         amphorae = [

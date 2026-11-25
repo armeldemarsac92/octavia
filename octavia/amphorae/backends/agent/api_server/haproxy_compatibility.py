@@ -12,6 +12,7 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
+import os
 import re
 import subprocess
 
@@ -43,11 +44,14 @@ def get_haproxy_capabilities():
     http_request_policy = f'{backend_sans}-http-policy-v1'
     http_request_mirror = f'{http_request_policy}-http-mirror-v1'
     listener_auth = f'{http_request_mirror}-listener-auth-v1'
-    retry_budget_build = f'{listener_auth}-backend-retry-budget-v1 '
+    retry_budget = f'{listener_auth}-backend-retry-budget-v1'
+    retry_budget_build = f'{retry_budget} '
+    otlp_tracing_build = f'{retry_budget}-listener-otlp-v1 '
     strict_dns_builds = (
         f'{strict_dns} ', f'{strict_dns}-h2-alpn-v1 ',
         f'{backend_sans} ', f'{http_request_policy} ',
         f'{http_request_mirror} ', f'{listener_auth} ', retry_budget_build,
+        otlp_tracing_build,
     )
     if not output.startswith(strict_dns_builds):
         return capabilities
@@ -67,8 +71,12 @@ def get_haproxy_capabilities():
         capabilities[
             constants.GATEWAY_CAPABILITY_LISTENER_REQUEST_FILTERS
         ] = True
-    if output.startswith(retry_budget_build):
+    if output.startswith((retry_budget_build, otlp_tracing_build)):
         capabilities[constants.GATEWAY_CAPABILITY_BACKEND_RETRY_BUDGET] = True
+    if (output.startswith(otlp_tracing_build) and
+            '+LUA' in output.split() and
+            os.path.isfile(constants.HAPROXY_OTLP_TRACING_SCRIPT)):
+        capabilities[constants.GATEWAY_CAPABILITY_LISTENER_OTLP_TRACING] = True
     return capabilities
 
 

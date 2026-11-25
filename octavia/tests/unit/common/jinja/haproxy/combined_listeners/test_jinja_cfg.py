@@ -922,6 +922,38 @@ class TestHaproxyCfg(base.TestCase):
                       config)
         self.assertNotIn('verify none', config)
 
+    def test_otlp_tracing_uses_private_collector_backend(self):
+        pool_id = 'e7b5c88c-ac10-4ec1-8935-aba43987cf01'
+        fixture = sample_configs_combined.sample_listener_tuple()
+        collector = SimpleNamespace(**dict(
+            fixture.pools[0]._asdict(), id=pool_id, backend_h2c=False,
+            backend_tls_require_h2=False))
+        load_balancer = fixture.load_balancer._replace(pools=[collector])
+        tracing = dict(collector_pool_id=pool_id, service_name='test.gateway',
+                       span_name='Gateway HTTP')
+        enabled = SimpleNamespace(**dict(
+            fixture._asdict(), load_balancer=load_balancer,
+            otlp_tracing=tracing))
+        neighbor = fixture._replace(
+            id='neighbor', protocol_port=81, load_balancer=load_balancer)
+        amphora = sample_configs_combined.sample_amphora_tuple()
+        render = self.jinja_cfg.render_loadbalancer_obj
+        self.assertRaises(driver_except.AmpVersionUnsupported,
+                          render, amphora, [enabled, neighbor])
+        cap = constants.GATEWAY_CAPABILITY_LISTENER_OTLP_TRACING
+        config = render(amphora, [enabled, neighbor], amp_details={cap: True})
+        self.assertEqual(1, config.count(
+            'http-request lua.octavia-trace-start'))
+        self.assertEqual(1, config.count(
+            'http-request lua.octavia-trace-propagate'))
+        self.assertIn(f'listen octavia-otlp-{pool_id}:{enabled.id}', config)
+        self.assertIn(f'bind /run/octavia/telemetry/{enabled.id}.sock '
+                      'user nobody mode 600', config)
+        enabled.otlp_tracing = None
+        config = render(amphora, [enabled, neighbor])
+        self.assertNotIn('octavia-trace-', config)
+        self.assertNotIn('octavia-otlp-', config)
+
     def test_required_h2_only_offers_h2_with_a_capable_amphora(self):
         listener = sample_configs_combined.sample_listener_tuple()
         pool = SimpleNamespace(**dict(

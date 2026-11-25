@@ -179,6 +179,12 @@ class DuplicatePoolEntry(APIException):
     code = 409
 
 
+class PoolInUseByListenerOtlpTracing(APIException):
+    msg = _("Pool %(id)s is in use by OTLP tracing on listener "
+            "%(listener_id)s")
+    code = 409
+
+
 class PoolInUseByListenerRequestFilter(APIException):
     msg = _("Pool %(id)s is in use by a request filter on listener "
             "%(listener_id)s")
