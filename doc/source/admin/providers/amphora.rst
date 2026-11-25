@@ -445,6 +445,32 @@ that would activate an enabled method rule also requires enrollment. Existing
 active rules continue to serve and can be disabled or removed. Retire them
 before rolling back the workers.
 
+Long HTTP hostname regexes
+--------------------------
+
+Amphora can accept up to 512 characters for ``HOST_NAME`` rules with
+``REGEX`` on HTTP and terminated HTTPS listeners. A single regex can
+match a DNS hostname and its optional numeric port. The existing HTTP
+Host matching and inversion apply.
+
+Upgrade the API and workers and verify that the regional Amphora fleet
+can load the resulting HAProxy configuration. The existing L7 rule
+value column already has sufficient capacity. Configure the provider
+name on each regional API and worker replica. The opt-in defaults to empty.
+
+.. code-block:: ini
+
+   [api_settings]
+   enabled_http_long_hostname_providers = amphora
+
+The provider then advertises ``http_long_hostname_v1``. Removing the
+provider name restores the 255-character limit for new and changed
+hostname regexes and prevents reactivation of stored long rules. Existing
+rules remain readable and can be disabled, shortened or deleted. Retire
+long rules before rolling back to API or worker versions with the
+255-character validation limit.
+
+
 Exact HTTP query parameter matching
 -----------------------------------
 

@@ -1360,12 +1360,16 @@ l7rule-type-optional:
 l7rule-value:
   description: |
     The value to use for the comparison. For example, the file type to compare.
+    ``HOST_NAME`` values for ``REGEX`` can be up to 512 characters on HTTP
+    and terminated HTTPS listeners when ``http_long_hostname_v1`` is enabled.
   in: body
   required: true
   type: string
 l7rule-value-optional:
   description: |
     The value to use for the comparison. For example, the file type to compare.
+    ``HOST_NAME`` values for ``REGEX`` can be up to 512 characters on HTTP
+    and terminated HTTPS listeners when ``http_long_hostname_v1`` is enabled.
   in: body
   required: false
   type: string

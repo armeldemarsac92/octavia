@@ -1685,6 +1685,37 @@ class TestInitialL7Rules(base.BaseAPITest):
         self.rpc.cast.assert_called_once()
         self.assertEqual('update_listener', self.rpc.cast.call_args.args[1])
 
+    def test_long_http_hostname_with_initial_rules(self):
+        rule = {'type': 'HOST_NAME', 'compare_type': 'REGEX',
+                'value': r'\.'.join(['a'] * 127), 'invert': True}
+        self._post_policy(rules=[rule], status=400)
+        self.rpc.cast.assert_not_called()
+        self.conf.config(group='api_settings',
+                         enabled_http_long_hostname_providers=['amphora'])
+        policy = self._post_policy(rules=[rule])['l7policy']
+        self.rpc.cast.assert_called_once()
+        rules_path = self.L7RULES_PATH.format(l7policy_id=policy['id'])
+        saved, = self.get(rules_path).json['rules']
+        self.assertEqual(rule, {key: saved[key] for key in rule})
+
+    def test_batch_activation_rechecks_long_http_hostname_capability(self):
+        option = 'enabled_http_long_hostname_providers'
+        self.conf.config(group='api_settings', **{option: ['amphora']})
+        self.rules[0]['compare_type'] = 'REGEX'
+        self.rules[0]['value'] = r'\.'.join(['a'] * 127)
+        path, payload = self._prepare_activation_group()
+
+        self.conf.config(group='api_settings', **{option: []})
+        self.post(path, payload, status=501)
+        self.rpc.cast.assert_not_called()
+        self.conf.config(group='api_settings', **{option: ['amphora']})
+        self.post(path, payload, status=204)
+        delivery = self.rpc.cast.call_args
+        self.conf.config(group='api_settings', **{option: []})
+        endpoints.Endpoints().activate_l7policies({}, **delivery.kwargs)
+        policies = self._activation_policies(path)
+        self.assertFalse(any(policy['admin_state_up'] for policy in policies))
+
     def test_create_initial_rules_in_one_worker_operation(self):
         response = self._post_policy()['l7policy']
         self.assertFalse(response['admin_state_up'])

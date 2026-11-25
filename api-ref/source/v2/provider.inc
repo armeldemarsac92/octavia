@@ -559,6 +559,11 @@ Removing the provider from either list withdraws sampling discovery and
 admission. Clear sampled tracing with ``otlp_tracing: null`` and verify the
 affected listeners have reloaded before rolling back.
 
+``http_long_hostname_v1`` increases the ``HOST_NAME`` and ``REGEX`` value
+limit from 255 to 512 characters on HTTP and terminated HTTPS listeners.
+It requires an Amphora driver with long hostname support and the provider
+name in ``[api_settings] enabled_http_long_hostname_providers``.
+
 ``http_header_exact_v1`` enables ``HTTP_HEADER_EXACT`` rules for HTTP and
 terminated HTTPS listeners. This capability requires the provider name in
 ``[api_settings] enabled_http_header_exact_providers`` after the regional
