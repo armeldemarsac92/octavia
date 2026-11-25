@@ -216,16 +216,36 @@ class HAProxyCompatTestCase(base.TestCase):
             capability], True)
         self.assertEqual([haproxy_cmd, '-vv'],
                          check_output.call_args.args[0])
+        cookie_probe = next(
+            call for call in self.mock_probe.call_args_list
+            if 'http-after-response replace-header Set-Cookie'
+            in call.kwargs['input'])
         self.assertEqual([haproxy_cmd, '-c', '-q', '-f', '/dev/stdin'],
-                         self.mock_probe.call_args.args[0])
-        self.assertTrue(self.mock_probe.call_args.kwargs['check'])
-        self.assertIn('http-after-response replace-header Set-Cookie',
-                      self.mock_probe.call_args.kwargs['input'])
+                         cookie_probe.args[0])
+        self.assertTrue(cookie_probe.kwargs['check'])
 
         check_output.return_value = 'HAProxy version 3.0.19 custom'
         self.mock_probe.side_effect = (
             haproxy_compatibility.subprocess.CalledProcessError(
                 1, self.mock_probe.call_args.args[0]))
+        self.assertNotIn(capability,
+                         haproxy_compatibility.get_haproxy_capabilities())
+
+    @mock.patch.object(haproxy_compatibility.subprocess, 'check_output')
+    def test_tls_sni_passthrough_weighted_pool_capability(self, check_output):
+        capability = (
+            constants.GATEWAY_CAPABILITY_TLS_SNI_PASSTHROUGH_WEIGHTED_POOLS)
+        check_output.return_value = 'HAProxy version 2.2.0 custom'
+        self.mock_probe.side_effect = None
+        self.assertIs(haproxy_compatibility.get_haproxy_capabilities()[
+            capability], True)
+        self.assertIn('req.ssl_sni', self.mock_probe.call_args.kwargs['input'])
+        self.assertIn('rand(16000000)',
+                      self.mock_probe.call_args.kwargs['input'])
+
+        self.mock_probe.side_effect = [
+            None, haproxy_compatibility.subprocess.CalledProcessError(
+                1, self.mock_probe.call_args.args[0])]
         self.assertNotIn(capability,
                          haproxy_compatibility.get_haproxy_capabilities())
 

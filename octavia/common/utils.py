@@ -84,6 +84,37 @@ def active_http_retry_backoff_policies(loadbalancer):
     }
 
 
+def has_tls_sni_passthrough_weighted_policies(loadbalancer, *, active=True):
+    if loadbalancer is None or (active and not loadbalancer.enabled):
+        return False
+    removed = (constants.PENDING_DELETE, constants.DELETED)
+    for listener in loadbalancer.listeners:
+        if listener.protocol != constants.PROTOCOL_TCP:
+            continue
+        if active and (not listener.enabled or
+                       listener.provisioning_status in removed):
+            continue
+        terminating = getattr(listener, 'tcp_tls_termination', False) is True
+        mixed_mode = getattr(listener, 'tcp_tls_mixed_mode', False) is True
+        for policy in listener.l7policies:
+            if (policy.action != constants.L7POLICY_ACTION_WEIGHTED_TARGETS or
+                    policy.provisioning_status == constants.DELETED):
+                continue
+            passthrough = getattr(policy, 'tcp_tls_passthrough', False) is True
+            raw_tls = ((not terminating and not passthrough) or
+                       (terminating and mixed_mode and passthrough))
+            if not raw_tls:
+                continue
+            if not active or (
+                    policy.enabled and
+                    policy.provisioning_status not in removed and
+                    any(rule.enabled and
+                        rule.provisioning_status not in removed
+                        for rule in policy.l7rules)):
+                return True
+    return False
+
+
 def base64_sha1_string(string_to_hash):
     """Get a b64-encoded sha1 hash of a string. Not intended to be secure!"""
     # TODO(rm_work): applying nosec here because this is not intended to be

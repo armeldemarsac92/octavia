@@ -95,9 +95,7 @@ class BaseRepository:
             return False
         if lb.tcp_member_batch is not None:
             return True
-        l7_providers = (
-            CONF.api_settings.enabled_l7policy_batch_activation_providers)
-        if tcp_only or not l7_providers:
+        if tcp_only:
             return False
         operation = lb.l7policy_activation
         if (operation and
@@ -2583,42 +2581,57 @@ class L7PolicyRepository(BaseRepository):
         return (models.Listener.tcp_tls_termination.is_(True) &
                 self.model_class.tcp_tls_passthrough.is_(False))
 
-    def _active_tls_sni_weighted_policies(self, session):
+    def _active_tls_sni_weighted_policies(self, session, compare_type=None):
         policy = self.model_class
         rule = models.L7Rule
         inactive = (consts.PENDING_DELETE, consts.DELETED)
-        return (session.query(policy.id)
-                .join(policy.listener)
-                .join(policy.l7rules)
-                .filter(
-                    models.Listener.protocol == consts.PROTOCOL_TCP,
-                    self._uses_terminated_tls(),
-                    policy.action == consts.L7POLICY_ACTION_WEIGHTED_TARGETS,
-                    policy.enabled.is_(True),
-                    policy.provisioning_status.notin_(inactive),
-                    rule.enabled.is_(True),
-                    rule.type == consts.L7RULE_TYPE_TLS_SNI,
-                    rule.provisioning_status.notin_(inactive)))
+        query = (session.query(policy.id)
+                 .join(policy.listener)
+                 .join(policy.l7rules)
+                 .filter(
+                     models.Listener.protocol == consts.PROTOCOL_TCP,
+                     policy.action == consts.L7POLICY_ACTION_WEIGHTED_TARGETS,
+                     policy.enabled.is_(True),
+                     policy.provisioning_status.notin_(inactive),
+                     rule.enabled.is_(True),
+                     rule.type == consts.L7RULE_TYPE_TLS_SNI,
+                     rule.provisioning_status.notin_(inactive)))
+        if compare_type is not None:
+            query = query.filter(rule.compare_type == compare_type)
+        return query
 
-    def get_active_tls_sni_weighted_policies(self, session, listener_id):
-        query = (self._active_tls_sni_weighted_policies(session)
-                 .filter(self.model_class.listener_id == listener_id))
+    def get_active_tls_sni_weighted_policies(
+            self, session, listener_id=None, *, load_balancer_id=None):
+        query = self._active_tls_sni_weighted_policies(session)
+        if listener_id is not None:
+            query = query.filter(self.model_class.listener_id == listener_id)
+        if load_balancer_id is not None:
+            listener = models.Listener
+            query = query.filter(
+                listener.load_balancer_id == load_balancer_id,
+                listener.enabled.is_(True),
+                listener.provisioning_status.notin_(
+                    (consts.PENDING_DELETE, consts.DELETED)),
+                # Terminating and mixed listeners are checked separately.
+                listener.tcp_tls_termination.is_(False))
         policy_ids = {
             policy_id for policy_id, in query.with_for_update().all()}
         return [self.get_for_update(session, policy_id)
                 for policy_id in sorted(policy_ids)]
 
-    def has_active_tls_sni_weighted_pool(self, session, pool_id):
+    def has_active_tls_sni_weighted_pool(
+            self, session, pool_id, *, passthrough=False, compare_type=None):
         listener = models.Listener
         target = models.L7PolicyTarget
-        return (self._active_tls_sni_weighted_policies(session)
+        return (self._active_tls_sni_weighted_policies(session, compare_type)
                 .join(listener.load_balancer)
                 .join(self.model_class._targets)
                 .filter(listener.enabled.is_(True),
                         listener.provisioning_status.notin_(
                             (consts.PENDING_DELETE, consts.DELETED)),
                         models.LoadBalancer.enabled.is_(True),
-                        target.pool_id == pool_id, target.weight > 0)
+                        target.pool_id == pool_id, target.weight > 0,
+                        self._uses_terminated_tls().is_(not passthrough))
                 .with_for_update().limit(1).scalar() is not None)
 
     def get_policy_using_pool(self, session, pool_id, *,
@@ -2630,16 +2643,14 @@ class L7PolicyRepository(BaseRepository):
         redirect = (
             (model.redirect_pool_id == pool_id) &
             (model.action == consts.L7POLICY_ACTION_REDIRECT_TO_POOL))
-        if tcp_tls_termination is not False:
-            target_ref = (select(target.pool_id)
-                          .where(target.l7policy_id == model.id,
-                                 target.pool_id == pool_id)
-                          .correlate(model).with_for_update().exists())
-            redirect |= (
-                (model.action == consts.L7POLICY_ACTION_WEIGHTED_TARGETS) &
-                target_ref &
-                (models.Listener.protocol == consts.PROTOCOL_TCP) &
-                self._uses_terminated_tls())
+        target_ref = (select(target.pool_id)
+                      .where(target.l7policy_id == model.id,
+                             target.pool_id == pool_id)
+                      .correlate(model).with_for_update().exists())
+        redirect |= (
+            (model.action == consts.L7POLICY_ACTION_WEIGHTED_TARGETS) &
+            target_ref &
+            (models.Listener.protocol == consts.PROTOCOL_TCP))
         query = (query.filter(redirect)
                  .filter(model.provisioning_status.notin_(
                      (consts.PENDING_DELETE, consts.DELETED))))
@@ -2697,8 +2708,9 @@ class L7PolicyRepository(BaseRepository):
                                   tcp_tls_passthrough=False):
         tcp = listener.protocol == consts.PROTOCOL_TCP
         if tcp:
-            validate.validate_tls_sni_weighted_policy(
-                listener.tcp_tls_termination, tcp_tls_passthrough)
+            passthrough = validate.tls_sni_weighted_passthrough(
+                listener.tcp_tls_termination, listener.tcp_tls_mixed_mode,
+                tcp_tls_passthrough)
             targets = validate.tls_sni_weighted_targets(targets)
         else:
             validate.validate_weighted_l7policy_protocol(listener.protocol)
@@ -2725,7 +2737,8 @@ class L7PolicyRepository(BaseRepository):
                     resource=data_models.Pool._name(), id=pool_id)
             if tcp:
                 validate.validate_tcp_redirect_pool_protocol(
-                    pool.protocol, pool.tls_enabled, tcp_tls_termination=True,
+                    pool.protocol, pool.tls_enabled,
+                    tcp_tls_termination=not passthrough,
                     hostname=pool.backend_tls_hostname,
                     ca_ref=pool.ca_tls_certificate_id)
             else:

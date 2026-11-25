@@ -608,6 +608,15 @@ blocks new selectors and changes that expand them. Operators can disable or
 delete policies and remove zero-weight targets. Disable an admitted policy
 before changing it to a scalar redirect while weighted enrollment is off.
 
+``tls_sni_passthrough_weighted_pools_v1`` enables the same weighted action
+for pure TCP TLS passthrough and for the passthrough branch of mixed TCP
+TLS listeners. It requires ``tls_sni_weighted_pools_v1`` and
+``tls_sni_passthrough_v1``, plus enrollment in
+``[api_settings] enabled_tls_sni_passthrough_weighted_pool_providers``.
+Every target uses a TCP pool with ``tls_enabled: false``. A passthrough
+policy supports exact SNI rules and the existing opt-in for suffix rules.
+An empty TCP pool can reserve a share that closes the connection.
+
 .. rest_status_code:: success ../http-status.yaml
 
    - 200

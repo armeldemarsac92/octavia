@@ -141,6 +141,143 @@ class TestInitialL7Rules(base.BaseAPITest):
             constants.GATEWAY_CAPABILITY_L7POLICY_BATCH_ACTIVATION,
             capabilities['gateway_capabilities'])
 
+    def test_passthrough_weighted_tls_sni_activation_and_withdrawal(self):
+        enabled_providers = ['amphora']
+        setting = 'enabled_tls_sni_passthrough_weighted_pool_providers'
+        self.conf.config(
+            group='api_settings',
+            enabled_tcp_tls_termination_providers=enabled_providers,
+            enabled_tls_sni_weighted_pool_providers=enabled_providers,
+            enabled_tls_sni_providers=enabled_providers,
+            enabled_tls_sni_suffix_providers=enabled_providers,
+            enabled_l7policy_batch_activation_providers=enabled_providers)
+        listener = self.create_listener(
+            'TCP', 443, self.lb_id)['listener']
+        self.set_lb_status(self.lb_id)
+        origin = self.create_pool(
+            self.lb_id, 'TCP', 'ROUND_ROBIN')['pool']
+        self.set_lb_status(self.lb_id)
+        closed = self.create_pool(
+            self.lb_id, 'TCP', 'ROUND_ROBIN', admin_state_up=False)['pool']
+        self.set_lb_status(self.lb_id)
+        http = self.create_pool(self.lb_id, 'HTTP', 'ROUND_ROBIN')['pool']
+        self.set_lb_status(self.lb_id)
+        targets = [{'pool_id': origin['id'], 'weight': 257},
+                   {'pool_id': closed['id'], 'weight': 128}]
+        rule = {'type': 'TLS_SNI', 'compare_type': 'EQUAL_TO',
+                'value': 'a.example.test'}
+        args = {'listener_id': listener['id'], 'action': 'WEIGHTED_TARGETS',
+                'rules': [rule], 'targets': targets, 'admin_state_up': False}
+        capability = (
+            constants.GATEWAY_CAPABILITY_TLS_SNI_PASSTHROUGH_WEIGHTED_POOLS)
+        capability_path = self.PROVIDERS_PATH + '/amphora/gateway_capabilities'
+        self.assertNotIn(capability, self.get(capability_path).json[
+            'gateway_capabilities'])
+        self.post(self.L7POLICIES_PATH, {'l7policy': args}, status=501)
+        self.conf.config(group='api_settings', **{setting: enabled_providers})
+        self.assertIn(capability, self.get(capability_path).json[
+            'gateway_capabilities'])
+        for bad in ([{'pool_id': http['id'], 'weight': 257}],
+                    [{'fixed_response': {'status_code': 503}, 'weight': 1}]):
+            self.post(self.L7POLICIES_PATH,
+                      {'l7policy': dict(args, targets=bad)}, status=400)
+        self.post(self.L7POLICIES_PATH, {'l7policy': dict(
+            args, tcp_tls_passthrough=True)}, status=400)
+
+        with self.session.begin():
+            self.create_amphora(uuidutils.generate_uuid(), self.lb_id,
+                                role=constants.ROLE_STANDALONE,
+                                lb_network_ip='192.0.2.100')
+        for rules in ([rule], [dict(rule, compare_type='ENDS_WITH',
+                                    value='*.example.test')]):
+            policy = self.post(self.L7POLICIES_PATH, {'l7policy': dict(
+                args, rules=rules)}).json['l7policy']
+            self.assertEqual(targets, policy['targets'])
+            endpoints.Endpoints().create_l7policy({}, **self.rpc.cast
+                                                  .call_args.kwargs)
+        listener_path = self.LISTENER_PATH.format(listener_id=listener['id'])
+        path = listener_path + '/l7policy_activation'
+        self.post(path, self._activation_request(path), status=204)
+        endpoints.Endpoints().activate_l7policies(
+            {}, **self.rpc.cast.call_args.kwargs)
+        policies = self._activation_policies(path)
+        self.assertTrue(all(policy['admin_state_up'] for policy in policies))
+        self.assertTrue(all(policy['targets'] == targets for policy in
+                            policies))
+        self.conf.config(group='api_settings',
+                         enabled_tls_sni_suffix_providers=[])
+        pool_path = self.POOL_PATH.format(pool_id=closed['id'])
+        self.put(pool_path, {'pool': {'admin_state_up': True}}, status=501)
+        self.create_member(origin['id'], '192.0.2.200', 8443, status=501)
+        self.conf.config(group='api_settings',
+                         enabled_tls_sni_suffix_providers=enabled_providers)
+
+        policy_path = self.L7POLICY_PATH.format(l7policy_id=policies[0]['id'])
+        updated_targets = [targets[0], dict(targets[1], weight=1000000)]
+        self.put(policy_path, {'l7policy': {'targets': updated_targets}})
+        self.set_lb_status(self.lb_id)
+
+        self.conf.config(group='api_settings', **{setting: []})
+        self.assertNotIn(capability, self.get(capability_path).json[
+            'gateway_capabilities'])
+        retained = self.get(policy_path).json['l7policy']
+        self.assertTrue(retained['admin_state_up'])
+        self.assertEqual(updated_targets, retained['targets'])
+        self.put(policy_path, {'l7policy': {'targets': targets}}, status=501)
+        pool_path = self.POOL_PATH.format(pool_id=closed['id'])
+        self.put(pool_path, {'pool': {'admin_state_up': True}}, status=501)
+        self.put(listener_path, {'listener': {'admin_state_up': False}})
+        self.set_lb_status(self.lb_id)
+        self.put(listener_path, {'listener': {'admin_state_up': True}},
+                 status=501)
+        self.put(policy_path, {'l7policy': {'admin_state_up': False}})
+        self.set_lb_status(self.lb_id)
+        self.put(policy_path, {'l7policy': {'admin_state_up': True}},
+                 status=501)
+        self.delete(policy_path)
+        self.set_lb_status(self.lb_id)
+
+        self.conf.config(group='api_settings', **{setting: enabled_providers})
+        self.put(listener_path, {'listener': {'admin_state_up': True}})
+
+    def test_weighted_tls_sni_batch_activation_recovers_after_opt_out(self):
+        self.conf.config(
+            group='api_settings',
+            enabled_tcp_tls_termination_providers=['amphora'],
+            enabled_tls_sni_weighted_pool_providers=['amphora'],
+            enabled_tls_sni_providers=['amphora'],
+            enabled_tls_sni_passthrough_weighted_pool_providers=['amphora'])
+        listener = self.create_listener('TCP', 8443, self.lb_id)['listener']
+        self.listener_id = listener['id']
+        self.set_lb_status(self.lb_id)
+        pool = self.create_pool(self.lb_id, 'TCP', 'ROUND_ROBIN')['pool']
+        self.set_lb_status(self.lb_id)
+        path, payload = self._prepare_activation_group(
+            action='WEIGHTED_TARGETS', redirect_prefix=None,
+            rules=[{'type': 'TLS_SNI', 'compare_type': 'EQUAL_TO',
+                    'value': 'example.test'}],
+            targets=[{'pool_id': pool['id'], 'weight': 257}])
+
+        self.post(path, payload, status=204)
+        request = self.rpc.cast.call_args
+        self.conf.config(
+            group='api_settings',
+            enabled_tls_sni_passthrough_weighted_pool_providers=[])
+        self.assertTrue(all(not policy['admin_state_up']
+                            for policy in self._activation_policies(path)))
+        self.post(path, payload, status=204)
+        self.assertEqual(request, self.rpc.cast.call_args)
+        endpoints.Endpoints().activate_l7policies({}, **request.kwargs)
+
+        policies = self._activation_policies(path)
+        self.assertTrue(all(not policy['admin_state_up'] for policy in
+                            policies))
+        self.assertEqual(['ERROR', 'ERROR', 'ACTIVE'],
+                         [policy['provisioning_status'] for policy in
+                          policies])
+        self.post(path, self._activation_request(path), status=501)
+        self.delete(self.L7POLICY_PATH.format(l7policy_id=policies[0]['id']))
+
     def test_batch_activation_render_and_replay(self):
         with self.session.begin():
             self.create_amphora(uuidutils.generate_uuid(), self.lb_id,
