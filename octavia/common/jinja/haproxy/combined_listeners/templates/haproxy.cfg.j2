@@ -95,7 +95,7 @@ backend {{ constants.HAPROXY_TLS_SNI_WEIGHTED_CLOSED_PREFIX }}{{ listener.id }}
            {{- listener_auth_delivery_macro(constants, lib_consts, pool, state_file) }}
          {% endfor %}
          {% for pool in loadbalancer.get('request_mirror_pools', []) %}
-           {{- mirror_delivery_macro(constants, lib_consts, pool, state_file) }}
+           {{- mirror_delivery_macro(constants, lib_consts, pool, state_file, loadbalancer.grpc_content_type_acl) }}
          {% endfor %}
     {% endif %}
 {% endblock proxies %}
