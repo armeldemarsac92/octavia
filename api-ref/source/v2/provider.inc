@@ -316,6 +316,11 @@ A policy can combine both deadlines with status-based retries.
 Omission in an update preserves the object. Send
 ``http_request_policy: null`` to clear it.
 
+``http_cookie_name_v1`` enables the optional ``session_persistence.cookie_name``
+on HTTP pools with ``HTTP_COOKIE`` persistence. The load balancer generates
+the cookie and uses it to select a member after selecting the pool. See
+:ref:`session_persistence` for the name and update rules.
+
 ``backend_retry_budget_v1`` enables ``backend_retry_budget`` on HTTP
 pools forwarding ingress on HTTP and ``TERMINATED_HTTPS`` listeners. It
 shares request and retry history among participating pools with the same

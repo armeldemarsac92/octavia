@@ -1668,8 +1668,10 @@ session_persistence-optional:
   type: object
 session_persistence_cookie:
   description: |
-    The name of the cookie to use for session persistence. Only applicable to
-    the ``APP_COOKIE`` session persistence type where it is required.
+    The cookie name is required for ``APP_COOKIE``. On HTTP pools with a
+    provider advertising ``http_cookie_name_v1``, it can also name the cookie
+    generated for ``HTTP_COOKIE``. Omit the name or set it to ``null`` in a
+    supplied ``HTTP_COOKIE`` object to use the provider's default name.
   in: body
   required: false
   type: string

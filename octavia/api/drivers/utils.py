@@ -116,6 +116,9 @@ def gateway_capabilities(driver):
             driver.name in api_settings.enabled_request_cors_providers and
             getattr(driver, 'supports_request_cors', False) is True):
         capabilities.append(constants.GATEWAY_CAPABILITY_REQUEST_CORS)
+    if (driver.name in api_settings.enabled_http_cookie_name_providers and
+            getattr(driver, 'supports_http_cookie_name', False) is True):
+        capabilities.append(constants.GATEWAY_CAPABILITY_HTTP_COOKIE_NAME)
     budget_providers = api_settings.enabled_backend_retry_budget_providers
     if (BACKEND_RETRY_BUDGET_PAYLOAD_AVAILABLE and
             driver.name in budget_providers and
@@ -340,6 +343,17 @@ def require_backend_retry_budget(driver, protocol):
         raise exceptions.ProviderUnsupportedOptionError(
             prov=driver.name, user_msg=_(
                 'Backend retry budgets are unavailable for this provider.'))
+
+
+def require_http_cookie_name(driver, protocol):
+    if protocol != constants.PROTOCOL_HTTP:
+        raise exceptions.ValidationException(detail=_(
+            'A custom HTTP_COOKIE name requires an HTTP pool.'))
+    if (constants.GATEWAY_CAPABILITY_HTTP_COOKIE_NAME not in
+            gateway_capabilities(driver)):
+        raise exceptions.ProviderUnsupportedOptionError(
+            prov=driver.name, user_msg=_(
+                'Custom HTTP_COOKIE names are unavailable for this provider.'))
 
 
 def require_http_request_policy(driver, protocol):
@@ -979,6 +993,12 @@ def db_pools_to_provider_pools(db_pools, for_delete=False):
 
 def db_pool_to_provider_pool(db_pool, for_delete=False):
     pool_dict = db_pool.to_dict(recurse=True)
+    persistence = pool_dict.get('session_persistence')
+    if persistence and data_models.is_unenrolled_amphora_http_cookie(
+            persistence.get('type'),
+            persistence.get('http_cookie_name_enabled'),
+            (pool_dict.get('load_balancer') or {}).get('provider')):
+        pool_dict['session_persistence'] = dict(persistence, cookie_name=None)
     if pool_dict.get('backend_tls_hostname') is None:
         pool_dict.pop('backend_tls_hostname', None)
     new_pool_dict = pool_dict_to_provider_dict(pool_dict,
@@ -1080,6 +1100,8 @@ def pool_dict_to_provider_dict(pool_dict, for_delete=False, for_update=False):
             del new_pool_dict['session_persistence']['pool_id']
         if 'pool' in new_pool_dict['session_persistence']:
             del new_pool_dict['session_persistence']['pool']
+        new_pool_dict['session_persistence'].pop(
+            'http_cookie_name_enabled', None)
     if 'l7policies' in new_pool_dict:
         del new_pool_dict['l7policies']
     if 'listeners' in new_pool_dict:

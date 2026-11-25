@@ -436,8 +436,6 @@ class TestValidations(base.TestCase):
                                   'cookie_name': 'chocolate_chip'}
         invalid_cookie_name_dict = {'type': 'APP_COOKIE',
                                     'cookie_name': '@chocolate_chip'}
-        invalid_type_HTTP_cookie_name_dict = {'type': 'HTTP_COOKIE',
-                                              'cookie_name': 'chocolate_chip'}
         invalid_type_IP_cookie_name_dict = {'type': 'SOURCE_IP',
                                             'cookie_name': 'chocolate_chip'}
         invalid_missing_cookie_name_dict = {'type': 'APP_COOKIE'}
@@ -450,10 +448,23 @@ class TestValidations(base.TestCase):
                           validate.check_session_persistence,
                           invalid_cookie_name_dict)
 
-        # Test raises type HTTP_COOKIE and providing cookie_name
+        # HTTP_COOKIE accepts a name from the restricted proxy identifier set.
+        validate.check_session_persistence(
+            {'type': 'HTTP_COOKIE', 'cookie_name': 'cookie.name_1-prod'})
+        invalid_http_cookie = {'type': 'HTTP_COOKIE', 'cookie_name': 'a@b'}
         self.assertRaises(exceptions.ValidationException,
                           validate.check_session_persistence,
-                          invalid_type_HTTP_cookie_name_dict)
+                          invalid_http_cookie)
+
+        for name in ('__Host-cookie', '__Host-Http-cookie',
+                     '__Secure-cookie', '__hTtP-cookie'):
+            with self.subTest(name=name):
+                self.assertRaises(
+                    exceptions.ValidationException,
+                    validate.check_session_persistence,
+                    {'type': 'HTTP_COOKIE', 'cookie_name': name})
+        validate.check_session_persistence(
+            {'type': 'APP_COOKIE', 'cookie_name': '__Host-cookie'})
 
         # Test raises type SOURCE_IP and providing cookie_name
         self.assertRaises(exceptions.ValidationException,
