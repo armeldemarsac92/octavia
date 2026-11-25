@@ -3205,7 +3205,8 @@ class L7PolicyRepository(BaseRepository):
 
         query = query.options(
             subqueryload(models.L7Policy.l7rules),
-            subqueryload(models.L7Policy.listener),
+            subqueryload(models.L7Policy.listener).joinedload(
+                models.Listener.load_balancer),
             subqueryload(models.L7Policy.redirect_pool),
             subqueryload(models.L7Policy._targets),
             subqueryload(models.L7Policy._mirrors),
