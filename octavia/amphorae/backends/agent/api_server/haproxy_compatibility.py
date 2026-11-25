@@ -80,6 +80,9 @@ def get_haproxy_capabilities():
             '+LUA' in output.split() and
             os.path.isfile(constants.HAPROXY_OTLP_TRACING_SCRIPT)):
         capabilities[constants.GATEWAY_CAPABILITY_LISTENER_OTLP_TRACING] = True
+        if os.path.isfile(constants.HAPROXY_OTLP_SAMPLING_SCRIPT):
+            capabilities[
+                constants.GATEWAY_CAPABILITY_LISTENER_OTLP_SAMPLING] = True
     return capabilities
 
 

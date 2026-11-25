@@ -54,8 +54,9 @@ INVALID_URL_CHARS_RE = re.compile(r'[\x00-\x20\x7f-\x9f]')
 def otlp_tracing(value):
     if value is None:
         return None
-    if not isinstance(value, dict) or value.keys() != {
-            'collector_pool_id', 'service_name', 'span_name'}:
+    required = {'collector_pool_id', 'service_name', 'span_name'}
+    if (not isinstance(value, dict) or not
+            required <= value.keys() <= required | {'sampling'}):
         raise exceptions.ValidationException(detail=_(
             'otlp_tracing requires collector_pool_id, service_name, and '
             'span_name.'))
@@ -78,8 +79,33 @@ def otlp_tracing(value):
                              span)):
         raise exceptions.ValidationException(
             detail=_('Invalid OTLP span_name.'))
-    return dict(collector_pool_id=pool_id, service_name=service,
-                span_name=span)
+    tracing = dict(collector_pool_id=pool_id, service_name=service,
+                   span_name=span)
+    if 'sampling' in value:
+        sampling = value['sampling']
+        if (not isinstance(sampling, dict) or 'base' not in sampling or
+                sampling.keys() - {'base', 'parent'}):
+            raise exceptions.ValidationException(detail=_(
+                'OTLP sampling requires a base rate and accepts an optional '
+                'parent rate.'))
+        tracing['sampling'] = {
+            mode: _otlp_sampling_fraction(fraction)
+            for mode, fraction in sampling.items()}
+    return tracing
+
+
+def _otlp_sampling_fraction(fraction):
+    if (isinstance(fraction, dict) and
+            fraction.keys() == {'numerator', 'denominator'}):
+        numerator = fraction['numerator']
+        denominator = fraction['denominator']
+        if (type(numerator) is int and type(denominator) is int and
+                0 <= numerator <= denominator <= 2147483647 and
+                denominator >= 1):
+            return dict(numerator=numerator, denominator=denominator)
+    raise exceptions.ValidationException(detail=_(
+        'OTLP sampling rates require integer numerator and denominator with '
+        '0 <= numerator <= denominator <= 2147483647 and denominator >= 1.'))
 
 
 def validate_otlp_collector_transport(protocol, backend_h2c, require_h2,

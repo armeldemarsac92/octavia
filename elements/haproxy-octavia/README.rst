@@ -48,6 +48,18 @@ The script verifies and statically links Lua. With
 Lua instrumentation and a tmpfiles entry for the private Unix sockets. The
 Amphora agent checks the build marker, Lua support and presence of the
 instrumentation file before reporting ``listener_otlp_tracing_v1``.
+The updated image also installs the versioned Lua script
+``/var/lib/octavia/octavia-telemetry-sampling-v1.lua``. The upgraded agent
+requires this file as well as the tracing capability before reporting
+``listener_otlp_sampling_v1``. It uses the same Lua-enabled HAProxy build.
+Opt in through ``[api_settings] enabled_listener_otlp_sampling_providers``
+only after qualifying the script and agents across the eligible fleet.
+Apply database revision ``f831dfeaac94`` and update all regional API processes
+and workers before accepting tracing updates. The worker pairs each tracing
+publication with an ID that the agent checks against the running HAProxy
+configuration. Older agents can reload the application configuration and
+omit the acknowledgement. Upgrade them and retry the affected tracing
+requests or withdrawals to confirm publication.
 
 Run the local wire check using the built binary and an OpenTelemetry Collector
 binary with the OTLP receiver and file exporter. From the Octavia checkout,
@@ -55,6 +67,9 @@ with its Python dependencies installed::
 
     PYTHONPATH=. python3 elements/haproxy-octavia/test-telemetry-wire.py \
         /path/to/haproxy /path/to/otelcol /path/to/evidence-directory
+
+Add ``--sampling`` to exercise propagation and collector delivery for
+zero, full and fractional rates with the same harness and binaries.
 
 The ``backend_tls_h2_alpn_v1`` pool capability additionally verifies negotiated
 HTTP/2 before sending application data, including TLS health checks. HTTP

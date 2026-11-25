@@ -156,6 +156,10 @@ api_opts = [
                 help=_('Providers with listener OTLP/HTTP tracing. Enable '
                        'after upgrading the database, octavia-lib, and '
                        'all Amphora images in the region.')),
+    cfg.ListOpt('enabled_listener_otlp_sampling_providers', default=[],
+                help=_('Providers with qualified listener OTLP sampling. '
+                       'Enable alongside listener OTLP tracing after updating '
+                       'the API, workers and all eligible Amphora images.')),
     cfg.ListOpt('enabled_http_request_mirror_providers', default=[],
                 help=_('Providers whose regional fleets support HTTP request '
                        'mirroring. Enable after upgrading the database, '

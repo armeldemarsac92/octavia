@@ -32,13 +32,15 @@ class HAProxyQuery:
     http://cbonte.github.io/haproxy-dconv/configuration-1.4.html#9
     """
 
-    def __init__(self, stats_socket):
+    def __init__(self, stats_socket, timeout=None):
         """Initialize the class
 
         :param stats_socket: Path to the HAProxy statistics socket file.
+        :param timeout: Optional timeout for each socket operation.
         """
 
         self.socket = stats_socket
+        self.timeout = timeout
 
     def _query(self, query):
         """Send the given query to the haproxy statistics socket.
@@ -48,10 +50,13 @@ class HAProxyQuery:
         """
 
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        if self.timeout is not None:
+            sock.settimeout(self.timeout)
 
         try:
             sock.connect(self.socket)
         except OSError as e:
+            sock.close()
             raise Exception(
                 _("HAProxy '{0}' query failed.").format(query)) from e
 

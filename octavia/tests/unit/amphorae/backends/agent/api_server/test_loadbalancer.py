@@ -14,6 +14,7 @@
 import subprocess
 from unittest import mock
 
+import flask
 from oslo_config import cfg
 from oslo_config import fixture as oslo_fixture
 from oslo_utils import uuidutils
@@ -35,6 +36,37 @@ class ListenerTestCase(base.TestCase):
         self.mock_platform = mock.patch("distro.id").start()
         self.mock_platform.return_value = "ubuntu"
         self.test_loadbalancer = loadbalancer.Loadbalancer()
+
+    def test_otlp_reload_acknowledges_only_the_running_config(self):
+        publication = '1' * 32
+        header = consts.HAPROXY_OTLP_PUBLICATION_HEADER
+        app = flask.Flask(__name__)
+        with (
+            app.test_request_context(headers={header: publication}),
+            mock.patch.object(self.test_loadbalancer, '_check_lb_exists'),
+            mock.patch.object(self.test_loadbalancer, '_check_haproxy_status',
+                              return_value=consts.ACTIVE),
+            mock.patch.object(agent_util, 'run_systemctl_command'),
+            mock.patch.object(agent_util, 'send_vip_advertisements'),
+            mock.patch.object(agent_util, 'vrrp_check_script_update'),
+            mock.patch.object(loadbalancer.time, 'sleep'),
+            mock.patch.object(loadbalancer.haproxy_query,
+                              'HAProxyQuery') as query,
+        ):
+            info = query.return_value.show_info
+            desired = f'octavia-otlp-{publication}'
+            info.return_value = {'description': desired, 'Stopping': '1'}
+            response = self.test_loadbalancer.start_stop_lb(
+                LB_ID1, consts.AMP_ACTION_RELOAD)
+            self.assertEqual(503, response.status_code)
+            self.assertNotIn(header, response.headers)
+
+            info.side_effect = [{'description': 'old', 'Stopping': '0'},
+                                {'description': desired, 'Stopping': '0'}]
+            response = self.test_loadbalancer.start_stop_lb(
+                LB_ID1, consts.AMP_ACTION_RELOAD)
+            self.assertEqual(202, response.status_code)
+            self.assertEqual(publication, response.headers[header])
 
     @mock.patch('os.path.exists')
     @mock.patch('octavia.amphorae.backends.agent.api_server' +

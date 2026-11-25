@@ -241,7 +241,7 @@ class ListenersController(base.BaseController):
 
     def _test_lb_and_listener_statuses(
             self, session, lb_id, id=None,
-            listener_status=constants.PENDING_UPDATE):
+            listener_status=constants.PENDING_UPDATE, *, allow_error=False):
         """Verify load balancer is in a mutable state."""
         lb_repo = self.repositories.load_balancer
         if id:
@@ -254,7 +254,8 @@ class ListenersController(base.BaseController):
                                                  id=lb_id)
         else:
             if not lb_repo.test_and_set_provisioning_status(
-                    session, lb_id, constants.PENDING_UPDATE):
+                    session, lb_id, constants.PENDING_UPDATE,
+                    **({'allow_error': True} if allow_error else {})):
                 db_lb = lb_repo.get_orm(session, id=lb_id)
                 LOG.info("Load Balancer %s is immutable.", db_lb.id)
                 raise exceptions.ImmutableObject(resource=db_lb._name(),
@@ -851,7 +852,8 @@ class ListenersController(base.BaseController):
                             constants.PROTOCOL_TERMINATED_HTTPS):
             raise exceptions.ValidationException(detail=_(
                 'OTLP tracing requires an HTTP or TERMINATED_HTTPS listener.'))
-        driver_utils.require_listener_otlp_tracing(driver)
+        driver_utils.require_listener_otlp_tracing(
+            driver, sampling='sampling' in tracing)
         pool = self.repositories.pool.get_on_load_balancer_for_update(
             session, lb_id, project_id, tracing['collector_pool_id'])
         validate.validate_otlp_collector_transport(
@@ -998,12 +1000,17 @@ class ListenersController(base.BaseController):
             # Load the driver early as it also provides validation
             driver = driver_factory.get_driver(provider)
 
+            listener_dict = listener.to_dict(render_unsets=False)
+            withdrawing = (
+                listener_dict == {'otlp_tracing': None} and
+                (db_listener.otlp_tracing is not None or
+                 db_listener.otlp_tracing_status in (
+                     constants.PENDING_UPDATE, constants.ERROR)))
             self._test_lb_and_listener_statuses(
-                context.session, load_balancer_id)
+                context.session, load_balancer_id, allow_error=withdrawing)
             db_listener = self.repositories.listener.get_for_update(
                 context.session, id, show_deleted=False)
 
-            listener_dict = listener.to_dict(render_unsets=False)
             new_pool_id = listener_dict.get('default_pool_id',
                                             db_listener.default_pool_id)
             if (db_listener.protocol == constants.PROTOCOL_UDP and
