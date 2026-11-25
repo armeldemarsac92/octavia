@@ -13,6 +13,7 @@
 #    under the License.
 
 from unittest import mock
+from urllib.parse import urlsplit
 
 from octavia_lib.common import constants as lib_constants
 from oslo_config import cfg
@@ -2505,14 +2506,39 @@ class TestPool(base.BaseAPITest):
             repo.set_http_cookie_pool_statuses(
                 session, persisted_policy, failed={pool_id}, recovered=set())
             repo.mark_active(session, pool_id)
+            self.assertEqual(constants.ACTIVE, repo.get(session, id=pool_id)
+                             .provisioning_status)
         self.assertEqual(constants.ERROR,
                          self.get(path).json['pool']['provisioning_status'])
-        page = {'id': pool_id, 'marker': anchor_id, 'limit': 1,
-                'sort': 'id:asc' if anchor_id < pool_id else 'id:desc',
+        # Reverse the UUID tie-breaker so the raw lifecycle statuses would
+        # produce the wrong first page if the projected status is ignored.
+        tie_breaker = 'desc' if anchor_id < pool_id else 'asc'
+        page = {'loadbalancer_id': lb_id, 'limit': 1,
+                'sort': f'provisioning_status:asc,id:{tie_breaker}',
                 'fields': ['id', 'provisioning_status']}
-        projected = self.get(self.POOLS_PATH, params=page).json['pools']
-        self.assertEqual([{'id': pool_id, 'provisioning_status':
-                           constants.ERROR}], projected)
+        active = {'id': anchor_id, 'provisioning_status': constants.ACTIVE}
+        degraded = {'id': pool_id, 'provisioning_status': constants.ERROR}
+        first = self.get(self.POOLS_PATH, params=page).json
+        self.assertEqual([active], first['pools'])
+        after = next(link['href'] for link in first['pools_links']
+                     if link['rel'] == 'next')
+        second = self.get(self.POOLS_PATH, params=urlsplit(after).query).json
+        self.assertEqual([degraded], second['pools'])
+        before = next(link['href'] for link in second['pools_links']
+                      if link['rel'] == 'previous')
+        previous = self.get(self.POOLS_PATH, params=urlsplit(before).query)
+        self.assertEqual([active], previous.json['pools'])
+
+        error_page = dict(page, provisioning_status=constants.ERROR)
+        filtered = self.get(self.POOLS_PATH, params=error_page).json
+        self.assertEqual([degraded], filtered['pools'])
+        active_page = dict(page, provisioning_status=constants.ACTIVE)
+        active_only = self.get(self.POOLS_PATH, params=active_page).json
+        self.assertEqual([active], active_only['pools'])
+        after = next(link['href'] for link in filtered['pools_links']
+                     if link['rel'] == 'next')
+        continuation = self.get(self.POOLS_PATH, params=urlsplit(after).query)
+        self.assertEqual([], continuation.json['pools'])
 
         # An ordinary PUT may replay the same policy. Publishing the pool's
         # lifecycle completion does not make its still-degraded cookies ready.
@@ -2530,9 +2556,8 @@ class TestPool(base.BaseAPITest):
                 session, persisted_policy, failed=set(), recovered={pool_id})
         self.assertEqual(constants.ACTIVE,
                          self.get(path).json['pool']['provisioning_status'])
-        projected = self.get(self.POOLS_PATH, params=page).json['pools']
-        self.assertEqual([{'id': pool_id, 'provisioning_status':
-                           constants.ACTIVE}], projected)
+        self.assertEqual([], self.get(self.POOLS_PATH, params=error_page)
+                         .json['pools'])
 
         # Failures in each profile remain visible when the other recovers.
         with db_api.session().begin() as session:

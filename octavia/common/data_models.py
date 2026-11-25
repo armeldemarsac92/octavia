@@ -310,6 +310,17 @@ def is_unenrolled_amphora_http_cookie(persistence_type, name_enabled,
             (None, constants.AMPHORA, constants.AMPHORAV2, constants.OCTAVIA))
 
 
+def pool_api_provisioning_status(pool):
+    """Project observed cookie affinity without modifying the lifecycle."""
+    persistence = pool.session_persistence
+    if (pool.enabled and pool.provisioning_status == constants.ACTIVE and
+            persistence is not None and
+            persistence.cookie_absolute_timeout_ms is not None and
+            persistence.cookie_absolute_timeout_error):
+        return constants.ERROR
+    return pool.provisioning_status
+
+
 class Pool(BaseDataModel):
     def __init__(self, id=None, project_id=None, name=None, description=None,
                  protocol=None, lb_algorithm=None, enabled=None,
