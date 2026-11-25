@@ -58,8 +58,10 @@ class PoolFlows:
             requires=constants.POOL_ID))
         delete_pool_flow.add(database_tasks.CountPoolChildrenForQuota(
             requires=constants.POOL_ID, provides=constants.POOL_CHILD_COUNT))
-        delete_pool_flow.add(amphora_driver_tasks.ListenersUpdate(
-            requires=constants.LOADBALANCER_ID))
+        delete_pool_flow.add(amphora_driver_tasks.PoolDeleteListenersUpdate(
+            name='octavia.controller.worker.v2.tasks.'
+                 'amphora_driver_tasks.ListenersUpdate',
+            requires=(constants.LOADBALANCER_ID, constants.POOL_ID)))
         delete_pool_flow.add(database_tasks.DeletePoolInDB(
             requires=constants.POOL_ID))
         delete_pool_flow.add(database_tasks.DecrementPoolQuota(
@@ -68,6 +70,10 @@ class PoolFlows:
             requires=(constants.LOADBALANCER_ID, constants.LISTENERS)))
 
         return delete_pool_flow
+
+    def get_delete_managed_udp_pool_flow(self):
+        return linear_flow.Flow('delete_managed_udp_pool').add(
+            amphora_driver_tasks.DeleteManagedUDPPool())
 
     def get_delete_pool_flow_internal(self, pool_id):
         """Create a flow to delete a pool, etc.

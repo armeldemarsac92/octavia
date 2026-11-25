@@ -194,5 +194,9 @@ def get_delete_pool_flow():
     return P_FLOWS.get_delete_pool_flow()
 
 
+def get_delete_managed_udp_pool_flow():
+    return P_FLOWS.get_delete_managed_udp_pool_flow()
+
+
 def get_update_pool_flow():
     return P_FLOWS.get_update_pool_flow()

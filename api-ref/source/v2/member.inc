@@ -412,15 +412,23 @@ Send ``{"members": [], "udp_packet_drop": {"numerator": 1,
 "denominator": 1}}`` to drop every datagram. A fraction of ``0/1`` with
 eligible members restores forwarding and the listener remains managed.
 The API rejects null and ``additive_only``. After enrollment, submit all
-member changes through a full batch with the fraction. Delete the pool to
-remove the managed configuration from its listener.
+member changes through a full batch with the fraction. A partial or zero
+drop requires at least one enabled member with positive weight. A full
+drop requires no enabled member with positive weight. Backup members
+are unsupported.
 
 The pool exposes the desired fraction after a 202. Wait for its
 ``provisioning_status`` to reach ``ACTIVE`` before treating the new
 configuration as applied. Repeat an identical request to redeliver a
-pending batch. A different request returns 409 while it is pending.
-The pool reports ``ERROR`` if activation fails and accepts a new full
-replacement when the capability is enabled.
+pending batch. A different full batch on the same pool replaces a pending
+UDP batch when the render lock is free. An update in progress returns 409.
+The pool reports ``ERROR`` if activation fails and accepts a new full batch
+when the capability is enabled.
+
+Delete the pool to remove its managed configuration from the listener.
+Deleting the pool can replace its pending batch and remains available when
+the capability is disabled. Repeat the delete after a 409 or to redeliver
+a pending deletion.
 
 If the request is valid, the service returns the ``Accepted (202)``
 response code. To confirm the updates, check that the member provisioning

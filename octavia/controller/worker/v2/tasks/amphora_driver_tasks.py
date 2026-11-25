@@ -29,6 +29,7 @@ import tenacity
 from octavia.amphorae.backends.agent import agent_jinja_cfg
 from octavia.amphorae.driver_exceptions import exceptions as driver_except
 from octavia.common import constants
+from octavia.common import data_models as octavia_data_models
 from octavia.common import exceptions
 from octavia.common import l7policy_activation
 from octavia.common import utils
@@ -120,19 +121,17 @@ class AmpListenersUpdate(BaseAmphoraTask):
         # A managed UDP listener must be installed before enabling VRRP.
         # TODO(johnsom) Optimize this to use the dicts and not need the
         #               DB lookups
-        db_amp = None
-        db_lb = None
+        session = db_apis.get_session()
+        with session.begin():
+            if self.loadbalancer_repo.batch_owns_graph(
+                    session, loadbalancer_id, tcp_only=True):
+                return
+            db_amp = self.amphora_repo.get(session, id=amphora[constants.ID])
+            db_lb = self.loadbalancer_repo.get(session, id=loadbalancer_id)
+        if (db_lb is None or
+                (db_amp is None and _has_managed_udp_listener(db_lb))):
+            raise driver_except.ListenerProvisioningError()
         try:
-            session = db_apis.get_session()
-            with session.begin():
-                if self.loadbalancer_repo.batch_owns_graph(
-                        session, loadbalancer_id, tcp_only=True):
-                    return
-                db_amp = self.amphora_repo.get(session,
-                                               id=amphora[constants.ID])
-                db_lb = self.loadbalancer_repo.get(
-                    session,
-                    id=loadbalancer_id)
             self.amphora_driver.update_amphora_listeners(
                 db_lb, db_amp, timeout_dict)
         except Exception as e:
@@ -227,7 +226,16 @@ class ListenersUpdate(BaseAmphoraTask):
         """Execute updates per listener for an amphora."""
         _serialize_render(self._update, loadbalancer_id)
 
-    def _update(self, loadbalancer_id):
+    @staticmethod
+    def _scope_for_udp_pool(loadbalancer, pool_id):
+        if pool_id is not None:
+            pool = next((pool for pool in loadbalancer.pools
+                         if pool.id == pool_id), None)
+            if pool and pool.protocol == constants.PROTOCOL_UDP:
+                return pool.listeners
+        return None
+
+    def _update(self, loadbalancer_id, pool_id=None):
         session = db_apis.get_session()
         with session.begin():
             if self.loadbalancer_repo.batch_owns_graph(
@@ -236,6 +244,13 @@ class ListenersUpdate(BaseAmphoraTask):
             loadbalancer = self.loadbalancer_repo.get(session,
                                                       id=loadbalancer_id)
         if loadbalancer:
+            scoped = self._scope_for_udp_pool(loadbalancer, pool_id)
+            if scoped is not None:
+                update_udp = getattr(
+                    self.amphora_driver, 'update_udp_pool_listeners', None)
+                if callable(update_udp):
+                    update_udp(loadbalancer, [item.id for item in scoped])
+                    return
             self.amphora_driver.update(loadbalancer)
         else:
             LOG.error('Load balancer %s for listeners update not found. '
@@ -243,26 +258,38 @@ class ListenersUpdate(BaseAmphoraTask):
 
     def revert(self, loadbalancer_id, *args, **kwargs):
         """Handle failed listeners updates."""
+        self._mark_listeners_error(loadbalancer_id)
 
+    def _mark_listeners_error(self, loadbalancer_id, pool_id=None):
         LOG.warning("Reverting listeners updates.")
         session = db_apis.get_session()
         with session.begin():
             loadbalancer = self.loadbalancer_repo.get(session,
                                                       id=loadbalancer_id)
-        for listener in loadbalancer.listeners:
+        scoped = self._scope_for_udp_pool(loadbalancer, pool_id)
+        for listener in (loadbalancer.listeners if scoped is None else scoped):
             self.task_utils.mark_listener_prov_status_error(
                 listener.id)
 
 
-class _ApplyManagedMemberBatch(BaseAmphoraTask):
-    """Apply one committed batch and fence stale or duplicate delivery."""
+class PoolDeleteListenersUpdate(ListenersUpdate):
+    """Render only the listeners affected by deleting a UDP pool."""
 
-    def __init__(self, network_flow, **kwargs):
+    def execute(self, loadbalancer_id, pool_id):
+        _serialize_render(self._update, loadbalancer_id, pool_id)
+
+    def revert(self, loadbalancer_id, pool_id, *args, **kwargs):
+        self._mark_listeners_error(loadbalancer_id, pool_id)
+
+
+class _ManagedPoolOperation(BaseAmphoraTask):
+    """Fence stale and duplicate deliveries against the committed operation."""
+
+    action = None
+
+    def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.network_flow = network_flow
         self.pool_repo = repo.PoolRepository()
-        self.member_repo = repo.MemberRepository()
-        self.az_repo = repo.AvailabilityZoneRepository()
 
     def execute(self, loadbalancer_id, pool_id, batch_id):
         _serialize_render(self._apply, loadbalancer_id, pool_id, batch_id)
@@ -276,6 +303,7 @@ class _ApplyManagedMemberBatch(BaseAmphoraTask):
             return None, None
         operation = lb.tcp_member_batch
         if (operation['id'] != batch_id or operation['pool_id'] != pool_id or
+                operation.get('action') != self.action or
                 operation.get('protocol', constants.PROTOCOL_TCP) !=
                 self.protocol):
             return None, None
@@ -285,6 +313,31 @@ class _ApplyManagedMemberBatch(BaseAmphoraTask):
         if pool is None or pool.tcp_member_batch_id != batch_id:
             return None, None
         return lb, pool
+
+    @staticmethod
+    def _finish_status(lb, *, applied):
+        listener_ids = set(lb.tcp_member_batch['listener_ids'])
+        for listener in lb.listeners:
+            if (listener.id in listener_ids and
+                    listener.provisioning_status == constants.PENDING_UPDATE):
+                listener.provisioning_status = (constants.ACTIVE if applied
+                                                else constants.ERROR)
+        lb.tcp_member_batch = {
+            **lb.tcp_member_batch,
+            'phase': (constants.TCP_MEMBER_BATCH_APPLIED if applied
+                      else constants.TCP_MEMBER_BATCH_FAILED),
+        }
+        lb.provisioning_status = constants.ACTIVE
+
+
+class _ApplyManagedMemberBatch(_ManagedPoolOperation):
+    """Apply one committed member graph and drop or rejection fraction."""
+
+    def __init__(self, network_flow, **kwargs):
+        super().__init__(**kwargs)
+        self.network_flow = network_flow
+        self.member_repo = repo.MemberRepository()
+        self.az_repo = repo.AvailabilityZoneRepository()
 
     def _apply(self, lb_id, pool_id, batch_id):
         with db_apis.session().begin() as session:
@@ -309,19 +362,24 @@ class _ApplyManagedMemberBatch(BaseAmphoraTask):
                 },
                 constants.AVAILABILITY_ZONE: az,
             })
-            self._render(graph, listener_ids)
-            self._finish(lb_id, pool_id, batch_id, applied=True)
+            receipt = self._render(graph, listener_ids)
+            self._finish(lb_id, pool_id, batch_id, applied=True,
+                         receipt=receipt)
         except Exception:
             self._finish(lb_id, pool_id, batch_id, applied=False)
             raise
 
-    def _finish(self, lb_id, pool_id, batch_id, *, applied):
+    def _confirm_render(self, lb, receipt):
+        """Verify worker-specific activation evidence under the LB lock."""
+
+    def _finish(self, lb_id, pool_id, batch_id, *, applied, receipt=None):
         with db_apis.session().begin() as session:
             lb, pool = self._owned(session, lb_id, pool_id, batch_id)
             if pool is None:
                 return
             if (applied and
                     pool.provisioning_status == constants.PENDING_UPDATE):
+                self._confirm_render(lb, receipt)
                 pool.provisioning_status = constants.ACTIVE
                 pool.tcp_member_batch_id = None
                 for member in self.member_repo.get_batch_for_update(
@@ -337,19 +395,8 @@ class _ApplyManagedMemberBatch(BaseAmphoraTask):
                 # or partial reload. Never acknowledge the pool as ACTIVE.
                 pool.provisioning_status = constants.ERROR
                 pool.tcp_member_batch_id = constants.TCP_MEMBER_BATCH_FAILED
-            listener_ids = set(lb.tcp_member_batch['listener_ids'])
-            for listener in lb.listeners:
-                if (listener.id in listener_ids and
-                        listener.provisioning_status ==
-                        constants.PENDING_UPDATE):
-                    listener.provisioning_status = pool.provisioning_status
-            lb.tcp_member_batch = {
-                **lb.tcp_member_batch,
-                'phase': (constants.TCP_MEMBER_BATCH_APPLIED
-                          if pool.provisioning_status == constants.ACTIVE
-                          else constants.TCP_MEMBER_BATCH_FAILED),
-            }
-            lb.provisioning_status = constants.ACTIVE
+            self._finish_status(
+                lb, applied=pool.provisioning_status == constants.ACTIVE)
 
 
 class ApplyTCPMemberBatch(_ApplyManagedMemberBatch):
@@ -368,7 +415,62 @@ class ApplyUDPMemberBatch(_ApplyManagedMemberBatch):
 
     def _render(self, graph, listener_ids):
         listener_id, = listener_ids
-        self.amphora_driver.apply_udp_member_batch(graph, listener_id)
+        return self.amphora_driver.apply_udp_member_batch(graph, listener_id)
+
+    def _confirm_render(self, lb, receipt):
+        current = tuple(sorted(
+            (amp.id, amp.role) for amp in lb.amphorae
+            if amp.status == constants.AMPHORA_ALLOCATED))
+        if not receipt or receipt != current:
+            raise driver_except.ListenerProvisioningError()
+
+
+class DeleteManagedUDPPool(_ManagedPoolOperation):
+    """Retire the scoped listener before releasing the managed pool."""
+
+    protocol = constants.PROTOCOL_UDP
+    action = constants.UDP_POOL_DELETE_ACTION
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.repos = repo.Repositories()
+
+    def _apply(self, lb_id, pool_id, batch_id):
+        with db_apis.session().begin() as session:
+            lb, pool = self._owned(session, lb_id, pool_id, batch_id)
+            if pool is None:
+                return
+            if pool.provisioning_status != constants.PENDING_DELETE:
+                raise driver_except.ListenerProvisioningError()
+            graph = lb.to_data_model()
+            listener_ids = lb.tcp_member_batch['listener_ids']
+        try:
+            self.amphora_driver.update_udp_pool_listeners(graph, listener_ids)
+            self._finish(lb_id, pool_id, batch_id, applied=True)
+        except Exception:
+            self._finish(lb_id, pool_id, batch_id, applied=False)
+            raise
+
+    def _finish(self, lb_id, pool_id, batch_id, *, applied):
+        with db_apis.session().begin() as session:
+            lb, pool = self._owned(session, lb_id, pool_id, batch_id)
+            if pool is None:
+                return
+            if applied:
+                health_monitors, members = self.pool_repo.get_children_count(
+                    session, pool.id)
+                for resource, count in (
+                        (octavia_data_models.Pool, 1),
+                        (octavia_data_models.HealthMonitor, health_monitors),
+                        (octavia_data_models.Member, members)):
+                    if count:
+                        self.repos.decrement_quota(
+                            session, resource, pool.project_id, quantity=count)
+                session.delete(pool)
+            else:
+                pool.provisioning_status = constants.ERROR
+                pool.tcp_member_batch_id = constants.TCP_MEMBER_BATCH_FAILED
+            self._finish_status(lb, applied=applied)
 
 
 class ApplyL7PolicyWithInitialRules(BaseAmphoraTask):

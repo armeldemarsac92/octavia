@@ -750,6 +750,11 @@ class ControllerWorker:
         provider_lb = provider_utils.db_loadbalancer_to_provider_loadbalancer(
             load_balancer).to_dict(recurse=True)
         listeners_dicts = provider_lb.get('listeners', [])
+        if db_pool.protocol == constants.PROTOCOL_UDP:
+            affected = {listener.id for listener in db_pool.listeners}
+            listeners_dicts = [
+                listener for listener in listeners_dicts
+                if listener[constants.LISTENER_ID] in affected]
 
         store = {constants.POOL_ID: pool[constants.POOL_ID],
                  constants.LISTENERS: listeners_dicts,
@@ -759,6 +764,13 @@ class ControllerWorker:
         self.run_flow(
             flow_utils.get_delete_pool_flow,
             store=store)
+
+    def delete_managed_udp_pool(self, loadbalancer_id, pool_id, batch_id):
+        self.run_flow(flow_utils.get_delete_managed_udp_pool_flow, store={
+            constants.LOADBALANCER_ID: loadbalancer_id,
+            constants.POOL_ID: pool_id,
+            'batch_id': batch_id,
+        })
 
     def update_pool(self, origin_pool, pool_updates):
         """Updates a node pool.

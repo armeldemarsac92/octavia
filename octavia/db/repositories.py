@@ -990,6 +990,15 @@ class LoadBalancerRepository(BaseRepository):
         return (lb.tcp_member_batch or {}).get('phase') == (
             consts.TCP_MEMBER_BATCH_PENDING)
 
+    def pending_udp_pool_operation(self, lb, pool_id):
+        operation = lb.tcp_member_batch or {}
+        if (lb.provisioning_status == consts.PENDING_UPDATE and
+                self.tcp_batch_pending(lb) and
+                operation.get('protocol') == consts.PROTOCOL_UDP and
+                operation.get('pool_id') == pool_id):
+            return operation
+        return None
+
     @staticmethod
     def _invalidate_batch(lb):
         lb.tcp_member_batch = None
@@ -1154,13 +1163,16 @@ class PoolRepository(BaseRepository):
                 pool.provisioning_status != consts.ERROR)).update(
                     {'provisioning_status': consts.ACTIVE})
 
-    def get_on_load_balancer_for_update(self, session, lb_id, project_id,
-                                        pool_id):
+    def get_on_load_balancer_for_update(
+            self, session, lb_id, project_id, pool_id, *,
+            include_pending_delete=False):
+        excluded = [consts.DELETED]
+        if not include_pending_delete:
+            excluded.append(consts.PENDING_DELETE)
         pool = (session.query(self.model_class)
                 .filter_by(id=pool_id, project_id=project_id,
                            load_balancer_id=lb_id)
-                .filter(self.model_class.provisioning_status.notin_(
-                    (consts.PENDING_DELETE, consts.DELETED)))
+                .filter(self.model_class.provisioning_status.notin_(excluded))
                 .populate_existing().with_for_update().first())
         if pool is None:
             raise exceptions.NotFound(

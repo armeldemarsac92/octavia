@@ -135,6 +135,13 @@ class TestAmphoraDriverTasks(base.TestCase):
             Exception, 'boom', amp_list_update_obj.execute,
             _LB_mock, _amphora_mock, self.timeout_dict)
 
+        mock_driver.update_amphora_listeners.reset_mock()
+        mock_lb_get.side_effect = RuntimeError('graph read failed')
+        self.assertRaisesRegex(
+            RuntimeError, 'graph read failed', amp_list_update_obj.execute,
+            _LB_mock, _amphora_mock, self.timeout_dict)
+        mock_driver.update_amphora_listeners.assert_not_called()
+
     @mock.patch('octavia.db.repositories.LoadBalancerRepository.get')
     def test_amp_index_listener_update(self,
                                        mock_lb_get,
