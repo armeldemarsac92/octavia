@@ -42,7 +42,7 @@ sha256sum --check --strict <<'HASHES'
 7d1fba6e89ac26f706b4eedca3e804be8b63c1289402179f3ae366579413f7dc  haproxy-3.0.19-http-mirror.patch
 dfe62edf7729bb332753384c13d6b58488d0c8c19f9a0651c8b18d8dbce89891  haproxy-3.0.19-listener-auth.patch
 692ebf63778ca21ad3442e85e17d66b405513ad63418a806f8695705573e20ad  haproxy-3.0.19-backend-retry-budget.patch
-418abb26b459f84923bc4fa67ba243254ff1276cfcc6966d104c0ce5cf70014d  haproxy-3.0.19-route-retry-backoff.patch
+4344d1583da5e9aab1ec0e9cb53bbbb92034fc85ef56a06e64f3a6a74b32a344  haproxy-3.0.19-route-retry-backoff.patch
 HASHES
 
 tar -xzf "$tarball" -C "$work_dir"
