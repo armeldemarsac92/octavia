@@ -27,6 +27,26 @@ import octavia.tests.unit.base as base
 
 
 class TestValidations(base.TestCase):
+
+    def test_l7policy_external_auth_forward_body_size(self):
+        auth = {'pool_id': '00000000-0000-4000-8000-000000000001'}
+        for options, maximum in ((auth, 2147483647),
+                                 ({**auth, 'protocol': 'GRPC'}, 2146435071)):
+            with self.subTest(options=options):
+                self.assertEqual(options, validate.l7policy_external_auth(
+                    {**options, 'forward_body_max_size': 0}))
+                with_body = {**options, 'forward_body_max_size': maximum}
+                self.assertEqual(with_body,
+                                 validate.l7policy_external_auth(with_body))
+                for invalid in (-1, maximum + 1, True, None, 1.0, '1'):
+                    self.assertRaises(exceptions.ValidationException,
+                                      validate.l7policy_external_auth,
+                                      {**options,
+                                       'forward_body_max_size': invalid})
+        self.assertRaises(exceptions.ValidationException,
+                          validate.http_external_auth,
+                          {**auth, 'forward_body_max_size': 4096})
+
     # Note that particularly complex validation testing is handled via
     # functional tests elsewhere (ex. repository tests)
 

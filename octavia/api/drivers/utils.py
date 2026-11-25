@@ -231,6 +231,18 @@ def gateway_capabilities(driver):
                     False) is True):
         capabilities.append(
             constants.GATEWAY_CAPABILITY_L7POLICY_GRPC_EXTERNAL_AUTH)
+    external_auth_capabilities = (
+        constants.GATEWAY_CAPABILITY_L7POLICY_HTTP_EXTERNAL_AUTH,
+        constants.GATEWAY_CAPABILITY_L7POLICY_GRPC_EXTERNAL_AUTH)
+    forward_body_providers = (
+        api_settings.enabled_l7policy_external_auth_forward_body_providers)
+    if (driver.name in forward_body_providers and
+            getattr(driver, 'supports_l7policy_external_auth_forward_body',
+                    False) is True and
+            any(capability in capabilities
+                for capability in external_auth_capabilities)):
+        capabilities.append(
+            constants.GATEWAY_CAPABILITY_L7POLICY_EXTERNAL_AUTH_FORWARD_BODY)
     initial_rules_providers = (
         api_settings.enabled_l7policy_initial_rules_providers)
     if (driver.name in initial_rules_providers and
@@ -576,6 +588,23 @@ def require_l7policy_external_auth(driver, protocol, auth):
         require_l7policy_grpc_external_auth(driver, protocol)
     else:
         require_l7policy_http_external_auth(driver, protocol)
+    if validate.l7policy_external_auth_forwards_body(auth):
+        require_l7policy_external_auth_forward_body(driver, protocol)
+        if validate.external_auth_body_over_limit(auth):
+            _reject_l7policy_external_auth_body_limit(driver, protocol)
+
+
+def require_l7policy_external_auth_forward_body(driver, protocol):
+    _require_l7policy_external_auth(
+        driver, protocol,
+        constants.GATEWAY_CAPABILITY_L7POLICY_EXTERNAL_AUTH_FORWARD_BODY,
+        _('forward-body'))
+
+
+def _reject_l7policy_external_auth_body_limit(_driver, _protocol):
+    raise exceptions.ValidationException(detail=_(
+        'ExternalAuth forward_body_max_size exceeds the provider limit '
+        'for this authorization protocol.'))
 
 
 def require_l7policy_http_external_auth(driver, protocol):
@@ -699,7 +728,7 @@ def _withdrawn_grpc_metadata(capabilities):
                require_grpc_binary_response_metadata)
 
 
-def _withdrawn_request_transforms(driver):
+def _unavailable_request_transforms(driver):
     capabilities = gateway_capabilities(driver)
     if constants.GATEWAY_CAPABILITY_REQUEST_URL_REWRITE not in capabilities:
         yield 'request_url_rewrite', require_request_url_rewrite
@@ -724,12 +753,22 @@ def _withdrawn_request_transforms(driver):
     if (constants.GATEWAY_CAPABILITY_L7POLICY_GRPC_EXTERNAL_AUTH not in
             capabilities):
         yield 'grpc_external_auth', require_l7policy_grpc_external_auth
+    if (constants.GATEWAY_CAPABILITY_L7POLICY_EXTERNAL_AUTH_FORWARD_BODY
+            in capabilities):
+        yield ('external_auth_forward_body_over_limit',
+               _reject_l7policy_external_auth_body_limit)
+    elif (constants.GATEWAY_CAPABILITY_L7POLICY_HTTP_EXTERNAL_AUTH
+            in capabilities or
+            constants.GATEWAY_CAPABILITY_L7POLICY_GRPC_EXTERNAL_AUTH
+            in capabilities):
+        yield ('external_auth_forward_body',
+               require_l7policy_external_auth_forward_body)
     yield from _withdrawn_grpc_metadata(capabilities)
 
 
 def require_no_exposed_request_transforms(driver, policy_repo, session,
                                           **changes):
-    for transform, require in _withdrawn_request_transforms(driver):
+    for transform, require in _unavailable_request_transforms(driver):
         protocol = policy_repo.get_transform_exposed_by_policy(
             session, transform=transform, **changes)
         if protocol:
@@ -739,7 +778,7 @@ def require_no_exposed_request_transforms(driver, policy_repo, session,
 def require_no_transform_exposed_by_ordered_redirect(
         driver, policy_repo, session, listener_id, hostname, position,
         *, policy_id=None):
-    for transform, require in _withdrawn_request_transforms(driver):
+    for transform, require in _unavailable_request_transforms(driver):
         protocol = policy_repo.get_transform_exposed_by_ordered_redirect(
             session, listener_id, hostname, position, policy_id=policy_id,
             transform=transform)
@@ -750,7 +789,7 @@ def require_no_transform_exposed_by_ordered_redirect(
 def require_no_active_request_transforms(
         driver, policy_repo, session, *, policy_id=None,
         removed_https_hosts=(), **scope):
-    for transform, require in _withdrawn_request_transforms(driver):
+    for transform, require in _unavailable_request_transforms(driver):
         for row in policy_repo.get_active_request_transforms(
                 session, transform=transform, **scope):
             if policy_id is not None and row.id != policy_id:

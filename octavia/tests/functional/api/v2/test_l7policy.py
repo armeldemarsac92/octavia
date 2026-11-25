@@ -183,6 +183,123 @@ class TestInitialL7Rules(base.BaseAPITest):
         self.set_lb_status(self.lb_id)
         self.delete(pool_path)
 
+    def test_external_auth_forward_body_admission_and_withdrawal(self):
+        enabled = ['amphora']
+        cap = (
+            constants.GATEWAY_CAPABILITY_L7POLICY_EXTERNAL_AUTH_FORWARD_BODY)
+        caps_path = self.PROVIDERS_PATH + '/amphora/gateway_capabilities'
+        cap_limit = 'l7policy_external_auth_max_body_bytes'
+        option = 'enabled_l7policy_external_auth_forward_body_providers'
+        self.conf.config(group='api_settings', **{option: enabled})
+        capabilities = self.get(caps_path).json
+        self.assertNotIn(cap, capabilities['gateway_capabilities'])
+        self.assertNotIn(cap_limit, capabilities)
+        self.conf.config(group='api_settings',
+                         enabled_l7policy_http_external_auth_providers=enabled,
+                         **{option: []})
+
+        auth_pool = self.create_pool(
+            self.lb_id, 'HTTP', 'ROUND_ROBIN',
+            tags=[constants.GATEWAY_LISTENER_AUTH_POOL_TAG])['pool']['id']
+        self.set_lb_status(self.lb_id)
+        origin = self.create_pool(
+            self.lb_id, 'HTTP', 'ROUND_ROBIN')['pool']['id']
+        self.set_lb_status(self.lb_id)
+        auth = {'pool_id': auth_pool, 'path_prefix': '/auth'}
+        forward = {**auth, 'forward_body_max_size': 4096}
+        payload = {'action': 'REDIRECT_TO_POOL', 'redirect_prefix': None,
+                   'redirect_pool_id': origin}
+        self.assertNotIn(cap, self.get(caps_path).json['gateway_capabilities'])
+        self._post_policy(status=501, external_auth=forward, **payload)
+        self.conf.config(group='api_settings', **{option: enabled})
+        capabilities = self.get(caps_path).json
+        self.assertIn(cap, capabilities['gateway_capabilities'])
+        self.assertEqual(67108864, capabilities[cap_limit])
+        self.conf.config(group='haproxy_amphora',
+                         external_auth_body_buffer_bytes=4096)
+        self.assertEqual(4096, self.get(caps_path).json[cap_limit])
+        oversized = {**forward, 'forward_body_max_size': 4097}
+        self._post_policy(status=400, external_auth=oversized, **payload)
+        response = self._post_policy(external_auth=forward, **payload)
+        policy = response['l7policy']
+        self.assertEqual(forward, self.rpc.cast.call_args.kwargs[
+            constants.L7POLICY]['external_auth'])
+        self.set_lb_status(self.lb_id)
+        path = self.L7POLICY_PATH.format(l7policy_id=policy['id'])
+        self.assertEqual(forward,
+                         self.get(path).json['l7policy']['external_auth'])
+        self.put(path, {'l7policy': {'external_auth': oversized}}, status=400)
+        self.put(path, {'l7policy': {'admin_state_up': True}})
+        self.set_lb_status(self.lb_id)
+        other = self.create_listener('HTTP', 81, lb_id=self.lb_id)['listener']
+        self.set_lb_status(self.lb_id)
+
+        with db_api.session().begin() as session:
+            lb = self.lb_repo.get(session, id=self.lb_id)
+        amp = data_models.Amphora(id='local',
+                                  status=constants.AMPHORA_ALLOCATED)
+        renderer = jinja_cfg.JinjaTemplater()
+        amp_caps = {
+            constants.GATEWAY_CAPABILITY_LISTENER_REQUEST_FILTERS: True,
+        }
+        match = f"{{ var(txn.octavia_l7_policy) -m str {policy['id']} }}"
+        config = renderer.build_config(
+            amp, lb.listeners, {}, amp_details=amp_caps,
+            haproxy_versions=['3', '0', '19'])
+        self.assertIn(f'http-request deny deny_status 503 if {match}', config)
+        self.assertNotIn('http-request octavia-auth ', config)
+        tune = 'tune.octavia-auth-body-max-memory'
+        self.assertNotIn(tune, config)
+        amp_caps[constants.AMPHORA_CAPABILITY_HTTP_AUTH_BODY] = True
+        config = renderer.build_config(
+            amp, lb.listeners, {}, amp_details=amp_caps,
+            haproxy_versions=['3', '0', '19'])
+        action = (f'http-request octavia-auth /run/octavia/listener-auth/'
+                  f'{auth_pool}.sock 2f61757468 - - 4096 if {match}')
+        protected = config.split(
+            f'\nfrontend {self.listener_id}\n', 1)[1].split('\n\n', 1)[0]
+        unprotected = config.split(
+            f"\nfrontend {other['id']}\n", 1)[1].split('\n\n', 1)[0]
+        self.assertIn(action, protected)
+        self.assertIn('filter octavia-auth', protected)
+        self.assertNotIn('octavia-auth', unprotected)
+        self.assertEqual(1, config.count(f'{tune} 4096\n'))
+
+        self.conf.config(group='haproxy_amphora',
+                         external_auth_body_buffer_bytes=4095)
+        config = renderer.build_config(
+            amp, lb.listeners, {}, amp_details=amp_caps,
+            haproxy_versions=['3', '0', '19'])
+        self.assertIn(f'http-request deny deny_status 503 if {match}', config)
+        self.assertNotIn('http-request octavia-auth ', config)
+        self.assertNotIn(tune, config)
+        self.assertEqual(forward,
+                         self.get(path).json['l7policy']['external_auth'])
+        self.create_l7rule(policy['id'], 'HEADER', 'EQUAL_TO', 'yes',
+                           key='x-test', status=400)
+
+        listener_path = self.LISTENER_PATH.format(listener_id=self.listener_id)
+        self.put(listener_path, {'listener': {'admin_state_up': False}})
+        self.set_lb_status(self.lb_id)
+        self.put(listener_path, {'listener': {'admin_state_up': True}},
+                 status=400)
+        self.conf.config(group='api_settings', **{option: []})
+        self.assertNotIn(cap_limit, self.get(caps_path).json)
+        self.put(listener_path, {'listener': {'admin_state_up': True}},
+                 status=501)
+        self.put(path, {'l7policy': {'description': 'same authorizer'}})
+        self.set_lb_status(self.lb_id)
+        self.put(path, {'l7policy': {'admin_state_up': False}})
+        self.set_lb_status(self.lb_id)
+        self.put(path, {'l7policy': {'admin_state_up': True}}, status=501)
+        response = self.put(path, {'l7policy': {
+            'external_auth': {**auth, 'forward_body_max_size': 0}}})
+        self.assertEqual(auth, response.json['l7policy']['external_auth'])
+        self.set_lb_status(self.lb_id)
+        self.put(path, {'l7policy': {'admin_state_up': True}})
+        self.set_lb_status(self.lb_id)
+        self.put(listener_path, {'listener': {'admin_state_up': True}})
+
     def test_http_external_auth_rejects_weighted_target_mirrors(self):
         self.conf.config(
             group='api_settings', enabled_gateway_action_providers=['amphora'],
@@ -254,6 +371,11 @@ class TestInitialL7Rules(base.BaseAPITest):
             **payload, field: {**auth, 'allowed_response_headers': []}})
         self._post_policy(status=400, **{
             **payload, field: {**auth, 'pool_id': origin['id']}})
+        auth['forward_body_max_size'] = 4096
+        self._post_policy(status=501, **payload)
+        self.conf.config(
+            group='api_settings',
+            enabled_l7policy_external_auth_forward_body_providers=enabled)
         policy = self._post_policy(**payload)['l7policy']
         auth['allowed_request_headers'] = [':authority', 'x-identity']
         self.assertEqual(auth, policy[field])
@@ -362,10 +484,48 @@ class TestInitialL7Rules(base.BaseAPITest):
                     self.assertIn('http-request deny deny_status 503 if '
                                   '{ var(txn.octavia_l7_policy)', config)
 
+        listener = lb.listeners[0]
+        policy = next(item for item in listener.l7policies if item.enabled)
+        policy.external_auth = {**auth, 'forward_body_max_size': 4096}
+        match = f'{{ var(txn.octavia_l7_policy) -m str {policy.id} }}'
+        material = {auth_pool['id']: {'ca_cert': '/auth-ca.pem'}}
+        config = renderer.build_config(
+            amp, [listener], material, amp_details=caps,
+            haproxy_versions=['3', '0', '19'])
+        self.assertNotIn('octavia-collect-body', config)
+        self.assertIn('http-request lua.octavia-grpc-auth ', config)
+        self.assertIn(f'http-request deny deny_status 503 if {match}', config)
+        caps[constants.AMPHORA_CAPABILITY_GRPC_AUTH_BODY] = True
+        config = renderer.build_config(
+            amp, [listener], material, amp_details=caps,
+            haproxy_versions=['3', '0', '19'])
+        lines = [line.strip() for line in config.splitlines()
+                 if ('octavia-collect-body' in line or
+                     'lua.octavia-grpc-auth-body' in line)]
+        self.assertEqual([
+            f'http-request octavia-collect-body 4096 if {match}',
+            f"http-request lua.octavia-grpc-auth-body {auth_pool['id']} "
+            f'- 4096 if {match}',
+        ], lines)
+        self.assertNotIn('filter octavia-auth', config)
+        tune = 'tune.octavia-auth-body-max-memory'
+        self.assertIn(f'{tune} 67108864\n', config)
+        self.conf.config(group='haproxy_amphora',
+                         external_auth_body_buffer_bytes=2147483647)
+        policy.external_auth['forward_body_max_size'] = 2146435072
+        config = renderer.build_config(
+            amp, [listener], material, amp_details=caps,
+            haproxy_versions=['3', '0', '19'])
+        self.assertIn('http-request lua.octavia-grpc-auth ', config)
+        self.assertIn(f'http-request deny deny_status 503 if {match}', config)
+        self.assertNotIn('octavia-collect-body', config)
+        self.assertNotIn(tune, config)
+
     def test_http_external_auth_withdrawal_blocks_indirect_exposure(self):
         self.conf.config(
             group='api_settings',
-            enabled_l7policy_http_external_auth_providers=['amphora'])
+            enabled_l7policy_http_external_auth_providers=['amphora'],
+            enabled_l7policy_external_auth_forward_body_providers=['amphora'])
         auth_pool = self.create_pool(
             self.lb_id, 'HTTP', 'ROUND_ROBIN',
             tags=[constants.GATEWAY_LISTENER_AUTH_POOL_TAG])['pool']['id']
@@ -385,9 +545,13 @@ class TestInitialL7Rules(base.BaseAPITest):
         blocker_path = activate(position=1)
         protected_path = activate(
             position=2, action='REDIRECT_TO_POOL', redirect_prefix=None,
-            redirect_pool_id=origin, external_auth={'pool_id': auth_pool})
+            redirect_pool_id=origin, external_auth={
+                'pool_id': auth_pool, 'forward_body_max_size': 4096})
         origin_path = self.POOL_PATH.format(pool_id=origin)
         authorizer_path = self.POOL_PATH.format(pool_id=auth_pool)
+        self.conf.config(group='haproxy_amphora',
+                         external_auth_body_buffer_bytes=4095)
+        self.delete(blocker_path, status=400)
         self.conf.config(group='api_settings',
                          enabled_l7policy_http_external_auth_providers=[])
         self.rpc.cast.reset_mock()

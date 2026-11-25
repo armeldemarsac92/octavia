@@ -3,7 +3,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -82,8 +84,90 @@ func (a *testAuthorizer) Check(ctx context.Context, request *auth.CheckRequest) 
 	case "/slow":
 		<-ctx.Done()
 		return nil, ctx.Err()
+	case "/binary", "/empty":
+		return &auth.CheckResponse{Status: status.New(codes.OK, "").Proto()}, nil
 	default:
 		return nil, status.Error(codes.Unavailable, "fixture unavailable")
+	}
+}
+
+func TestUnixCheckRawBody(t *testing.T) {
+	root := t.TempDir() + string(filepath.Separator)
+	listener, err := net.Listen("unix", root+testPool+".sock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A 4 MiB body plus the protobuf metadata exceeds gRPC's default
+	// receive limit. The authorizer must configure room for the envelope.
+	server := grpc.NewServer(grpc.MaxRecvMsgSize(8 * 1024 * 1024))
+	authorizer := &testAuthorizer{requests: make(chan *auth.AttributeContext_HttpRequest, 1)}
+	auth.RegisterAuthorizationServer(server, authorizer)
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(server.Stop)
+	handler := newHandler(unixCheck(root))
+
+	for _, tc := range []struct {
+		path string
+		body []byte
+	}{
+		{path: "/binary", body: bytes.Repeat([]byte{0, 0xff, '&', '='}, 1024*1024)},
+		{path: "/empty"},
+	} {
+		form := validForm(tc.path) + "&h.x-selected=header"
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, rawBodyRequest(form, tc.body))
+		assertDecision(t, response, "decision=allow")
+		got := <-authorizer.requests
+		if got.GetSize() != int64(len(tc.body)) || !bytes.Equal(got.GetRawBody(), tc.body) || got.GetBody() != "" ||
+			got.GetPath() != tc.path || got.GetHeaders()["x-selected"] != "header" {
+			t.Fatalf("unexpected Check for %s: Size=%d, %d raw bytes, %d string bytes",
+				tc.path, got.GetSize(), len(got.GetRawBody()), len(got.GetBody()))
+		}
+	}
+}
+
+func TestRawBodyLeavesRoomForProtobuf(t *testing.T) {
+	const largestBody = 2146435071
+	form := validForm("/upload")
+	frame := rawBodyRequest(form, nil)
+	frame.ContentLength += largestBody
+	metadata, err := readCheckRequest(httptest.NewRecorder(), frame)
+	if err != nil || metadata.GetSize() != largestBody {
+		t.Fatal("expected the largest supported declared body to fit")
+	}
+	frame = rawBodyRequest(form, nil)
+	frame.ContentLength += largestBody + 1
+	if _, err = readCheckRequest(httptest.NewRecorder(), frame); err == nil {
+		t.Fatal("accepted a body without room for a protobuf envelope")
+	}
+}
+
+func TestInvalidRawBodyFrame(t *testing.T) {
+	handler := newHandler(func(context.Context, string, *auth.CheckRequest) (*auth.CheckResponse, error) {
+		t.Fatal("called the authorizer with an invalid body frame")
+		return nil, nil
+	})
+	for _, tc := range []struct {
+		name   string
+		change func(*http.Request)
+	}{
+		{"missing length", func(r *http.Request) { r.ContentLength = -1 }},
+		{"chunked frame", func(r *http.Request) { r.TransferEncoding = []string{"chunked"} }},
+		{"short form", func(r *http.Request) { r.Body = io.NopCloser(strings.NewReader("method=POST")) }},
+		{"short body", func(r *http.Request) { r.ContentLength++ }},
+		{"oversized metadata", func(r *http.Request) { r.Header.Set(formLengthHeader, strconv.Itoa(maxFormSize+1)) }},
+		{"oversized declared body", func(r *http.Request) { r.ContentLength += maxForwardBodySize }},
+		{"duplicate metadata length", func(r *http.Request) { r.Header.Add(formLengthHeader, "1") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			request := rawBodyRequest(validForm("/binary"), []byte{0, 0xff})
+			tc.change(request)
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != http.StatusServiceUnavailable || response.Body.Len() != 0 {
+				t.Fatalf("expected an empty 503 response, got %d", response.Code)
+			}
+		})
 	}
 }
 
@@ -210,6 +294,15 @@ func postCheck(handler http.Handler, form string) *httptest.ResponseRecorder {
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 	return response
+}
+
+func rawBodyRequest(form string, body []byte) *http.Request {
+	frame := io.MultiReader(strings.NewReader(form), bytes.NewReader(body))
+	request := httptest.NewRequest(http.MethodPost, "/v1/check/"+testPool, frame)
+	request.ContentLength = int64(len(form)) + int64(len(body))
+	request.Header.Set("Content-Type", bodyContentType)
+	request.Header.Set(formLengthHeader, strconv.Itoa(len(form)))
+	return request
 }
 
 func assertDecision(t *testing.T, response *httptest.ResponseRecorder, want string) {

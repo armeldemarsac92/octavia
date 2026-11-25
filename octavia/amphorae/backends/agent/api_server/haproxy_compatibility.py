@@ -178,6 +178,60 @@ backend probe_pool
     return _valid_haproxy_config(haproxy_cmd, config)
 
 
+_HTTP_EXTERNAL_AUTH_FORWARD_BODY_PROBE = (
+    """global
+    tune.octavia-auth-body-max-memory 4096
+defaults
+    mode http
+    timeout client 3s
+    timeout connect 1s
+    timeout server 3s
+frontend probe
+    bind 127.0.0.1:1
+    filter octavia-auth
+    http-request octavia-auth """
+    """/tmp/octavia-auth-probe.sock - - - 4096 if METH_POST
+listen authorization
+    bind /tmp/octavia-auth-probe.sock mode 600 octavia-auth-socket
+    retries 0
+    server authorizer 127.0.0.1:2
+""")
+
+_GRPC_EXTERNAL_AUTH_FORWARD_BODY_PROBE = (
+    """global
+    tune.octavia-auth-body-max-memory 4096
+    lua-load-per-thread """
+    f"{constants.HAPROXY_GRPC_AUTH_SCRIPT}"
+    """
+    httpclient.retries 0
+    httpclient.timeout.connect 3s
+defaults
+    mode http
+    timeout client 3s
+    timeout connect 1s
+    timeout server 3s
+frontend probe
+    bind 127.0.0.1:1
+    http-request octavia-collect-body 4096 if METH_POST
+    http-request set-var(txn.probe_body) octavia.auth_body if METH_POST
+    http-request lua.octavia-grpc-auth-body """
+    """00000000-0000-4000-8000-000000000001 - 4096 if METH_POST
+""")
+
+
+def _supports_grpc_external_auth_forward_body(haproxy_cmd):
+    try:
+        result = subprocess.run(
+            [constants.GRPC_AUTH_ADAPTER, '--capabilities'], check=True,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, timeout=3)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return (constants.GRPC_AUTH_ADAPTER_FORWARD_BODY_CAPABILITY in
+            result.stdout.splitlines() and _valid_haproxy_config(
+                haproxy_cmd, _GRPC_EXTERNAL_AUTH_FORWARD_BODY_PROBE))
+
+
 _TLS_SNI_PASSTHROUGH_WEIGHTED_POOLS_PROBE = (
     """global
     description octavia-probe
@@ -297,6 +351,11 @@ def get_haproxy_capabilities():
         capabilities[
             constants.GATEWAY_CAPABILITY_LISTENER_REQUEST_FILTERS
         ] = True
+        if _valid_haproxy_config(
+                haproxy_cmd, _HTTP_EXTERNAL_AUTH_FORWARD_BODY_PROBE):
+            capabilities[
+                constants.AMPHORA_CAPABILITY_HTTP_AUTH_BODY
+            ] = True
     if output.startswith(retry_budget_builds + otlp_tracing_builds):
         capabilities[constants.GATEWAY_CAPABILITY_BACKEND_RETRY_BUDGET] = True
     if (output.startswith(otlp_tracing_builds) and
@@ -319,6 +378,10 @@ def get_haproxy_capabilities():
     if '+LUA' in output.split() and _supports_grpc_external_auth(haproxy_cmd):
         capabilities[
             constants.GATEWAY_CAPABILITY_L7POLICY_GRPC_EXTERNAL_AUTH] = True
+        if _supports_grpc_external_auth_forward_body(haproxy_cmd):
+            capabilities[
+                constants.AMPHORA_CAPABILITY_GRPC_AUTH_BODY
+            ] = True
     return capabilities
 
 

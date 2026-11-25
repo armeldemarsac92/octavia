@@ -176,6 +176,13 @@ api_opts = [
                 help=_('Providers exposing bodyless gRPC L7 policy '
                        'authorization. Enable after upgrading the API and '
                        'workers and qualifying eligible Amphora images.')),
+    cfg.ListOpt('enabled_l7policy_external_auth_forward_body_providers',
+                default=[],
+                help=_('Providers whose regional fleets support forwarding '
+                       'request bodies for L7 policy authorization. Enable '
+                       'after upgrading the API and workers and qualifying '
+                       'all eligible Amphora agents, HAProxy builds and '
+                       'gRPC authorization adapters where applicable.')),
     cfg.ListOpt('enabled_listener_request_filter_providers', default=[],
                 help=_('Providers exposing ordered listener HTTP request '
                        'filters. Enable after updating the database, '
@@ -578,6 +585,13 @@ haproxy_amphora_opts = [
                help=_('Expected SHA-256 of the regional Amphora image '
                       'system CA PEM bundle.')),
     cfg.StrOpt('haproxy_template', help=_('Custom haproxy template.')),
+    cfg.IntOpt('external_auth_body_buffer_bytes',
+               default=constants.DEFAULT_EXTERNAL_AUTH_BODY_BUFFER_BYTES,
+               min=1,
+               max=constants.L7POLICY_EXTERNAL_AUTH_FORWARD_BODY_MAX_SIZE,
+               help=_('Shared per-HAProxy-process byte budget for external '
+                      'authorization request bodies. Set the same value on '
+                      'the API and Amphora workers in the region.')),
     cfg.StrOpt('http_cookie_signing_key_file',
                help=_('Worker-only path to a private 32-byte key file for '
                       'signed HTTP cookie and header persistence. The same '
