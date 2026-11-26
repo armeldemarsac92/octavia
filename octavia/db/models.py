@@ -750,6 +750,7 @@ class Listener(base_models.BASE, base_models.IdMixin,
     tcp_default_targets_status = sa.Column(sa.String(16))
     tcp_default_targets_applied = sa.Column(sa.JSON(none_as_null=True))
     tcp_default_targets_restrictive = sa.Column(sa.Boolean())
+    l7policy_listener_update = sa.Column(sa.JSON(none_as_null=True))
     default_http_response = sa.Column(sa.JSON(none_as_null=True))
     https_virtual_hosts = sa.Column(sa.JSON(none_as_null=True))
     request_filter_sections = sa.Column(sa.JSON(none_as_null=True))

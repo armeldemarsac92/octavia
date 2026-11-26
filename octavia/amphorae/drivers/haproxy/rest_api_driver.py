@@ -55,6 +55,8 @@ class HaproxyAmphoraLoadBalancerDriver(
     driver_base.AmphoraLoadBalancerDriver,
         vrrp_rest_driver.KeepalivedAmphoraDriverMixin):
 
+    supports_listener_closure_publication = True
+
     def __init__(self):
         super().__init__()
         self.clients = {
@@ -380,7 +382,7 @@ class HaproxyAmphoraLoadBalancerDriver(
             http_retry_backoff_observed=None, required_backoff_policies=(),
             verify_publication=False, weighted_passthrough_degraded=False,
             system_ca_observed=None, read_http_header_key=None,
-            tcp_only=False):
+            tcp_only=False, closure_publications=None):
         if not loadbalancer.listeners:
             LOG.debug('No listeners found to update.')
             return set()
@@ -528,7 +530,8 @@ class HaproxyAmphoraLoadBalancerDriver(
                     publication_options['config_publication'] = (
                         uuid.uuid4().hex)
                 elif (tracing_results or verify_publication or
-                      system_ca_results is not None):
+                      system_ca_results is not None or
+                      closure_publications is not None):
                     publication_options['otlp_publication'] = uuid.uuid4().hex
                 system_ca_options = (
                     {'system_ca_results': system_ca_results}
@@ -590,6 +593,8 @@ class HaproxyAmphoraLoadBalancerDriver(
                     **publication_options)
                 acknowledged = self._haproxy_publication_acked(
                     response, **publication_options)
+                if closure_publications is not None and acknowledged:
+                    closure_publications.add((amphora.id, amphora.role))
                 if not acknowledged and (
                         system_ca_results is not None or verify_publication):
                     raise driver_except.ListenerProvisioningError()
@@ -790,7 +795,7 @@ class HaproxyAmphoraLoadBalancerDriver(
                l7policy_restoration=False, tcp_member_batch=False,
                http_header_name_withdrawal=False,
                require_http_header_name_256=False,
-               tcp_default_targets_update=False):
+               tcp_default_targets_update=False, closure_publications=None):
         amphorae = [amphora for amphora in loadbalancer.amphorae
                     if amphora.status != consts.DELETED]
         if tcp_member_batch and not any(
@@ -821,6 +826,8 @@ class HaproxyAmphoraLoadBalancerDriver(
         batch_options = (
             {'tcp_batch_configs': tcp_batch_configs}
             if tcp_member_batch else {})
+        closure_options = ({'closure_publications': closure_publications}
+                           if closure_publications is not None else {})
         opted_in, protected = self._backend_tls_pools(loadbalancer)
         fallback, withdrawn = self._frontend_fallback_listeners(loadbalancer)
         with (
@@ -852,13 +859,13 @@ class HaproxyAmphoraLoadBalancerDriver(
                     **({'require_tcp_default_target_topology': True}
                        if verify_tcp_defaults else {}),
                     **tracing_options, **batch_options, **persistence_options,
-                    **system_options)
+                    **system_options, **closure_options)
             for amphora in amphorae:
                 self._update_amphora_listeners(
                     loadbalancer, amphora,
                     l7policy_activation=l7policy_activation,
                     **tracing_options, **batch_options, **persistence_options,
-                    **system_options)
+                    **system_options, **closure_options)
             if tcp_member_batch:
                 self._reload_tcp_batch_configs(
                     loadbalancer, tcp_batch_configs, backoff_policies,
@@ -1218,7 +1225,8 @@ class HaproxyAmphoraLoadBalancerDriver(
             system_ca_observed=None, require_header_name_topology=False,
             http_header_name_withdrawal=False,
             require_http_header_name_256=False,
-            require_tcp_default_target_topology=False):
+            require_tcp_default_target_topology=False,
+            closure_publications=None):
         # Preflight the pair before staging material or reloading either peer.
         header_name_256 = validate.http_header_name_256_listeners(
             loadbalancer, include_new_rules=require_header_name_topology and
@@ -1520,6 +1528,8 @@ class HaproxyAmphoraLoadBalancerDriver(
                 unreachable, driver_except.ListenerProvisioningError()))
         reloaded_listeners = []
         render_options = {}
+        if closure_publications is not None:
+            render_options['closure_publications'] = closure_publications
         if otlp_observed is not None:
             render_options['otlp_observed'] = otlp_observed
         if http_persistence_observed is not None:

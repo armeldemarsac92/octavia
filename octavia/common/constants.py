@@ -189,6 +189,8 @@ GATEWAY_CAPABILITY_L7POLICY_GRPC_AUTH_TRANSITION = (
     'l7policy_grpc_auth_transition_v1')
 GATEWAY_CAPABILITY_L7POLICY_CONDITIONAL_REMOVAL = (
     'l7policy_conditional_removal_v1')
+GATEWAY_CAPABILITY_L7POLICY_CLOSED_LISTENER_REMOVAL = (
+    'l7policy_closed_listener_removal_v1')
 MAX_L7POLICY_BATCH_ACTIVATION = 64
 GATEWAY_CAPABILITY_TCP_CONNECTION_REJECTION = 'tcp_connection_rejection_v1'
 MAX_TCP_CONNECTION_REJECTION_WEIGHT = 16000000
@@ -555,6 +557,7 @@ IPV6_ICMP = 'ipv6-icmp'
 IS_SRIOV = 'is_sriov'
 LB_NETWORK_IP = 'lb_network_ip'
 L7POLICY = 'l7policy'
+L7POLICY_LISTENER_REVISION = 'l7policy_listener_revision'
 L7POLICY_ACTIVATION = 'l7policy_activation'
 L7POLICY_REMOVAL = 'l7policy_removal'
 L7POLICY_ACTIVATION_FENCED = 'fenced'

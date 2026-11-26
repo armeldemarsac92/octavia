@@ -34,6 +34,7 @@ from octavia.common import constants
 from octavia.common import data_models as octavia_data_models
 from octavia.common import exceptions
 from octavia.common import l7policy_activation
+from octavia.common import l7policy_removal
 from octavia.common import utils
 from octavia.common import validate
 from octavia.controller.worker import task_utils as task_utilities
@@ -393,15 +394,42 @@ class ListenersUpdate(BaseAmphoraTask):
         changes = []
         withdrawal = False
         weighted_update = self._is_tcp_default_targets_update(updates)
-        target_id = (original or {}).get(constants.LISTENER_ID)
+        original = original or {}
+        target_id = original.get(constants.LISTENER_ID)
+        # Policy and rule payloads can include their parent listener ID.
+        if (constants.L7POLICY_ID in original or
+                constants.L7RULE_ID in original):
+            target_id = None
         revision = (updates or {}).get('tcp_default_targets_revision')
+        listener_revision = (updates or {}).get(
+            constants.L7POLICY_LISTENER_REVISION)
+        closure_publications = None
         with session.begin():
+            if target_id:
+                # A listener PUT commits its revision under this lock. Take
+                # it before establishing a repeatable-read graph snapshot.
+                self.loadbalancer_repo.lock(session, loadbalancer_id)
             if self.loadbalancer_repo.batch_owns_graph(
                     session, loadbalancer_id):
                 return
             loadbalancer = self.loadbalancer_repo.get(session,
                                                       id=loadbalancer_id)
             if loadbalancer:
+                if target_id:
+                    target = next(
+                        (listener for listener in loadbalancer.listeners
+                         if listener.id == target_id), None)
+                    state = getattr(target, 'l7policy_listener_update',
+                                    None) or {}
+                    if state.get('revision') != listener_revision:
+                        return
+                    if (state.get('confirm_closure') and
+                            not state.get('published_peers') and
+                            target.enabled is False and getattr(
+                                self.amphora_driver,
+                                'supports_listener_closure_publication',
+                                False) is True):
+                        closure_publications = set()
                 if revision and utils.pending_tcp_default_target_revisions(
                         loadbalancer).get(target_id) != revision:
                     return
@@ -436,13 +464,19 @@ class ListenersUpdate(BaseAmphoraTask):
                     **({'require_http_header_name_256': True}
                        if changes else {}),
                     **({'tcp_default_targets_update': True}
-                       if weighted_update else {}))
+                       if weighted_update else {}),
+                    **({'closure_publications': closure_publications}
+                       if closure_publications is not None else {}))
             except driver_except.HttpHeaderName256Unsupported:
                 # The capability preflight failed before any publication.
                 if changes:
                     with session.begin():
                         self._restore_header_name_changes(session, changes)
                 raise
+            if closure_publications:
+                self._confirm_listener_closure(
+                    loadbalancer, target_id, listener_revision,
+                    closure_publications)
         else:
             LOG.error('Load balancer %s for listeners update not found. '
                       'Skipping update.', loadbalancer_id)
@@ -451,6 +485,39 @@ class ListenersUpdate(BaseAmphoraTask):
     def _is_tcp_default_targets_update(updates):
         return bool({'tcp_default_targets', 'tcp_default_targets_revision'}
                     .intersection(updates or {}))
+
+    def _confirm_listener_closure(self, loadbalancer, listener_id, revision,
+                                  observed):
+        # Called under the render lock, after the current disabled graph
+        # has been acknowledged by the configured Amphora peers.
+        lb_id = loadbalancer.id
+        with db_apis.session().begin() as session:
+            lb = self.loadbalancer_repo.get_for_update(session, lb_id)
+            if (lb is None or not lb.l7policy_graph_generation or
+                    lb.l7policy_graph_generation !=
+                    loadbalancer._l7policy_graph_generation or
+                    lb.provisioning_status not in (constants.ACTIVE,
+                                                   constants.PENDING_UPDATE)):
+                return
+            try:
+                listener = self.listener_repo.get_for_update(
+                    session, listener_id, show_deleted=False)
+            except exceptions.NotFound:
+                return
+            state = listener.l7policy_listener_update or {}
+            if (state.get('revision') != revision or
+                    state.get('confirm_closure') is not True or
+                    listener.load_balancer_id != lb_id or
+                    listener.project_id != lb.project_id or
+                    listener.enabled is not False or
+                    listener.provisioning_status not in (
+                        constants.ACTIVE, constants.PENDING_UPDATE)):
+                return
+            peers = l7policy_removal.allocated_peers(lb)
+            if peers and {tuple(peer) for peer in peers} == observed:
+                listener.l7policy_listener_update = {
+                    **state, 'published_peers': peers,
+                    'graph_generation': lb.l7policy_graph_generation}
 
     def revert(self, loadbalancer_id, original=None, updates=None,
                *args, **kwargs):

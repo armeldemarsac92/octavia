@@ -258,6 +258,12 @@ api_opts = [
                 help=_('Providers that can remove a disabled L7 policy and '
                        'its observed rules together. Enable after upgrading '
                        'the API and all workers.')),
+    cfg.ListOpt('enabled_l7policy_closed_listener_removal_providers',
+                default=[],
+                help=_('Providers that can conditionally remove an enabled '
+                       'L7 policy from a closed HTTP or TERMINATED_HTTPS '
+                       'listener. Enable after upgrading the API and all '
+                       'workers and qualifying listener closure.')),
     cfg.ListOpt('enabled_http_method_match_providers', default=[],
                 help=_('Provider driver names whose regional fleets '
                        'support exact HTTP method L7 rules. Enable '

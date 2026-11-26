@@ -413,6 +413,10 @@ class DeleteL7PolicyConditionallyInDB(BaseDatabaseTask):
 
     def execute(self, l7policy_removal):
         project_id = l7policy_removal[constants.PROJECT_ID]
+        require_listener_disabled = l7policy_removal.get(
+            'require_listener_disabled', False)
+        if type(require_listener_disabled) is not bool:
+            return
         with db_apis.session().begin() as session:
             # Creation reserves quota before it takes the load balancer lock.
             self.repos.quotas.get_for_update(session, project_id)
@@ -424,18 +428,24 @@ class DeleteL7PolicyConditionallyInDB(BaseDatabaseTask):
                     skip_locked=True)
                 if not lb or lb.project_id != project_id:
                     return
-                policy = octavia_l7policy_removal.lock_policy(
+                listener, policy = octavia_l7policy_removal.lock_policy(
                     session, self.repos, lb,
                     l7policy_removal[constants.LISTENER_ID],
-                    l7policy_removal[constants.L7POLICY_ID], removing=True)
+                    l7policy_removal[constants.L7POLICY_ID], removing=True,
+                    require_listener_disabled=require_listener_disabled)
                 octavia_l7policy_removal.validate_removal(
                     lb, policy, l7policy_removal['expected_revision'])
             except (exceptions.NotFound, exceptions.L7PolicyRemovalConflict):
                 # An old delivery must never supersede a newer mutation.
                 return
-            # Invalidate activation receipts as an ordinary CRUD admission
-            # would. Disabled policies have already left the rendered graph.
+            # The disabled policy or its closed listener has already left
+            # the rendered graph. Subsequent renders read the new DB graph.
             self.loadbalancer_repo._invalidate_batch(lb)
+            if require_listener_disabled:
+                # Successive removals leave the same listener closed.
+                listener.l7policy_listener_update = {
+                    **listener.l7policy_listener_update,
+                    'graph_generation': lb.l7policy_graph_generation}
             _delete_l7policy_with_quota(
                 self.repos, session, policy.id, project_id)
 
@@ -1514,6 +1524,9 @@ class UpdateListenerInDB(BaseDatabaseTask):
         :returns: None
         """
 
+        if constants.L7POLICY_LISTENER_REVISION in update_dict:
+            # Revisioned listener settings were committed by the API.
+            return
         # The API stores these along with their pool FKs before the
         # render. A retried worker must not restore older pool references.
         api_owned = {'request_filter_sections', 'otlp_tracing',
@@ -1529,6 +1542,17 @@ class UpdateListenerInDB(BaseDatabaseTask):
         LOG.debug("Update DB for listener id: %s ",
                   listener[constants.LISTENER_ID])
         with db_apis.session().begin() as session:
+            lb_id = listener.get(constants.LOADBALANCER_ID)
+            if lb_id:
+                self.loadbalancer_repo.lock(session, lb_id)
+                try:
+                    current = self.listener_repo.get_for_update(
+                        session, listener[constants.LISTENER_ID])
+                except exceptions.NotFound:
+                    return
+                if current.l7policy_listener_update:
+                    # An unversioned replay predates the current graph.
+                    return
             self.listener_repo.update(session,
                                       listener[constants.LISTENER_ID],
                                       **update_dict)

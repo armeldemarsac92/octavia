@@ -23,6 +23,7 @@ class L7PolicyRemovalSnapshot(types.BaseType):
     revision = wtypes.wsattr(wtypes.text)
     loadbalancer_id = wtypes.wsattr(wtypes.UuidType())
     policy = wtypes.wsattr(l7policy.L7PolicyFullResponse)
+    listener_closure_confirmed = wtypes.wsattr(bool)
 
 
 class L7PolicyRemovalRootResponse(types.BaseType):
@@ -31,6 +32,7 @@ class L7PolicyRemovalRootResponse(types.BaseType):
 
 class L7PolicyRemovalPOST(types.BaseType):
     expected_revision = wtypes.wsattr(Revision, mandatory=True)
+    require_listener_disabled = types.StrictBooleanAttribute()
 
 
 class L7PolicyRemovalRootPOST(types.BaseType):
@@ -42,8 +44,9 @@ def _l7policy_removal_post_from_json(datatype, value):
     if not isinstance(value, dict) or set(value) != {'l7policy_removal'}:
         raise ValueError(_('Supply an l7policy_removal object.'))
     removal = value['l7policy_removal']
+    allowed = {'expected_revision', 'require_listener_disabled'}
     if (not isinstance(removal, dict) or
-            set(removal) != {'expected_revision'} or
-            not isinstance(removal['expected_revision'], str)):
+            set(removal) - allowed or
+            not isinstance(removal.get('expected_revision'), str)):
         raise ValueError(_('Supply the expected L7 policy removal revision.'))
     return wsme_json.fromjson.default(datatype, value)
