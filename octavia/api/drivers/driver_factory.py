@@ -14,6 +14,7 @@
 
 import copy
 
+from octavia_lib.api.drivers import data_models as driver_dm
 from oslo_config import cfg
 from oslo_log import log as logging
 from stevedore import driver as stevedore_driver
@@ -23,6 +24,8 @@ from octavia.common import exceptions
 
 CONF = cfg.CONF
 LOG = logging.getLogger(__name__)
+TCP_DEFAULT_POOL_TLS_PAYLOAD_AVAILABLE = hasattr(
+    driver_dm.Listener(), 'tcp_default_pool_tls')
 
 
 def get_driver(provider):
@@ -67,6 +70,28 @@ def provider_supports_tcp_connection_rejection(provider):
     except RuntimeError:
         return False
     return supports_tcp_connection_rejection(driver)
+
+
+def tcp_default_pool_tls_available(provider, driver=None):
+    provider = provider or 'amphora'
+    api = CONF.api_settings
+    if (not TCP_DEFAULT_POOL_TLS_PAYLOAD_AVAILABLE or
+            provider not in api.enabled_provider_drivers or
+            provider not in api.enabled_tcp_default_pool_tls_providers or
+            provider not in api.enabled_backend_tls_hostname_providers):
+        return False
+    if driver is None:
+        # Listener readback needs the advertised support without an RPC client.
+        try:
+            driver = stevedore_driver.DriverManager(
+                namespace='octavia.api.drivers', name=provider,
+                invoke_on_load=False).driver
+        except RuntimeError:
+            return False
+    supports_default_tls = getattr(
+        driver, 'supports_tcp_default_pool_tls', False)
+    supports_hostname = getattr(driver, 'supports_backend_tls_hostname', False)
+    return supports_default_tls is True and supports_hostname is True
 
 
 def supports_udp_packet_drop(driver):

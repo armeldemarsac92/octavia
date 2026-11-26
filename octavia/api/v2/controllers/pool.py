@@ -71,7 +71,10 @@ def _validate_backend_tls_hostname(driver, protocol, hostname, tls_enabled,
     if not enrolling:
         return
     if protocol == constants.PROTOCOL_TCP:
-        driver_utils.require_tcp_tls_backend_auth(driver)
+        if system_ca:
+            driver_utils.require_tcp_tls_backend_auth(driver)
+        else:
+            driver_utils.require_tcp_pool_tls_auth(driver)
     elif (constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME not in
           driver_utils.gateway_capabilities(driver)):
         raise exceptions.ProviderUnsupportedOptionError(
@@ -449,7 +452,14 @@ class PoolsController(base.BaseController):
                             hostname != current.backend_tls_hostname or
                             (hostname is not None and
                              ca_ref != current.ca_tls_certificate_id))
-        if not (identity_changed or reopening or changes.tls_enabled is True):
+        client_tls_changed = any(
+            requested is not wtypes.Unset and requested != previous
+            for requested, previous in (
+                (changes.tls_container_ref, current.tls_certificate_id),
+                (changes.crl_container_ref, current.crl_container_id)))
+        transport_changed = (
+            identity_changed or reopening or changes.tls_enabled is True)
+        if not (transport_changed or client_tls_changed):
             return
         tls_enabled = (current.tls_enabled
                        if changes.tls_enabled is wtypes.Unset
@@ -460,6 +470,15 @@ class PoolsController(base.BaseController):
                 session, pool_id, tcp_tls_termination=None,
                 tcp_tls_mixed_mode=True):
             driver_utils.require_tcp_tls_mixed_mode(driver)
+        if listener_repo.has_default_pool_listener(
+                session, pool_id, tcp_tls_termination=False,
+                tcp_default_pool_tls=True):
+            driver_utils.validate_tcp_pool_attachment(
+                driver, current.protocol, tls_enabled, hostname=hostname,
+                ca_ref=ca_ref, system_ca=system_ca, tcp_default_pool_tls=True)
+
+        if not transport_changed:
+            return
         if (listener_repo.has_default_pool_listener(
                 session, pool_id, tcp_tls_termination=True) or
                 policy_repo.get_policy_using_pool(
@@ -474,6 +493,8 @@ class PoolsController(base.BaseController):
                 hostname=hostname, ca_ref=ca_ref, system_ca=system_ca)
             if reopening:
                 driver_utils.require_tcp_tls_termination(driver)
+            if hostname is not None and (identity_changed or reopening):
+                driver_utils.require_tcp_tls_backend_auth(driver)
             if ((reopening or identity_changed) and
                     policy_repo.has_active_tls_sni_weighted_pool(
                         session, pool_id)):
@@ -481,7 +502,8 @@ class PoolsController(base.BaseController):
 
         if hostname is not None and (identity_changed or reopening):
             if (listener_repo.has_default_pool_listener(
-                    session, pool_id, tcp_tls_termination=False) or
+                    session, pool_id, tcp_tls_termination=False,
+                    tcp_default_pool_tls=False) or
                     policy_repo.get_policy_using_pool(
                         session, pool_id, tcp_only=False)):
                 validate.validate_tcp_tls_backend_listener(
@@ -637,7 +659,8 @@ class PoolsController(base.BaseController):
                     tcp_tls_termination=listener.tcp_tls_termination,
                     hostname=pool_dict.get('backend_tls_hostname'),
                     ca_ref=pool_dict.get('ca_tls_certificate_id'),
-                    system_ca=pool_dict.get('backend_tls_system_ca'))
+                    system_ca=pool_dict.get('backend_tls_system_ca'),
+                    tcp_default_pool_tls=listener.tcp_default_pool_tls)
                 listener.provisioning_status = constants.PENDING_UPDATE
 
             db_pool = self._validate_create_pool(
@@ -682,6 +705,9 @@ class PoolsController(base.BaseController):
 
         # Now possibly create a healthmonitor
         if hm:
+            if (db_pool.protocol == constants.PROTOCOL_TCP and
+                    db_pool.backend_tls_hostname and hm.get('enabled', True)):
+                validate.validate_tcp_tls_backend_monitor(hm['type'])
             hm[constants.POOL_ID] = db_pool.id
             hm[constants.PROJECT_ID] = db_pool.project_id
             new_hm = health_monitor.HealthMonitorController()._graph_create(

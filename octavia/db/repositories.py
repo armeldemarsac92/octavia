@@ -1275,6 +1275,7 @@ class PoolRepository(BaseRepository):
                              pool.backend_tls_system_ca,
                              pool.ca_tls_certificate_id,
                              pool.crl_container_id,
+                             pool.tls_certificate_id,
                              pool.alpn_protocols,
                              _pool_has_gateway_backend_tls_tag().label(
                                  'gateway_backend_tls_tagged'))
@@ -1537,21 +1538,24 @@ class ListenerRepository(BaseRepository):
     def get_active_tcp_tls_listeners(self, session, load_balancer_id):
         listener = self.model_class
         return (session.query(listener)
-                .filter_by(load_balancer_id=load_balancer_id,
-                           tcp_tls_termination=True, enabled=True)
+                .filter_by(load_balancer_id=load_balancer_id, enabled=True)
+                .filter(listener.tcp_tls_termination.is_(True) |
+                        listener.tcp_default_pool_tls.is_(True))
                 .filter(listener.provisioning_status.notin_(
                     (consts.PENDING_DELETE, consts.DELETED)))
                 .populate_existing().with_for_update().all())
 
     def has_default_pool_listener(self, session, pool_id, *,
-                                  tcp_tls_termination):
+                                  tcp_tls_termination,
+                                  tcp_default_pool_tls=None):
         listener = self.model_class
-        return (session.query(listener.id)
-                .filter_by(default_pool_id=pool_id,
-                           tcp_tls_termination=tcp_tls_termination)
-                .filter(listener.provisioning_status.notin_(
-                    (consts.PENDING_DELETE, consts.DELETED)))
-                .with_for_update().limit(1).scalar() is not None)
+        query = session.query(listener.id).filter_by(
+            default_pool_id=pool_id, tcp_tls_termination=tcp_tls_termination)
+        if tcp_default_pool_tls is not None:
+            query = query.filter_by(tcp_default_pool_tls=tcp_default_pool_tls)
+        return (query.filter(listener.provisioning_status.notin_(
+            (consts.PENDING_DELETE, consts.DELETED)))
+            .with_for_update().limit(1).scalar() is not None)
 
     def get_all_API_list(self, session, pagination_helper=None, **filters):
         """Get a list of listeners for the API list call.
@@ -2549,6 +2553,13 @@ class L7PolicyRepository(BaseRepository):
             raise exceptions.NotFound(
                 resource=data_models.Pool._name(), id=pool_id)
         listener_request_filters.require_non_http_tls_authorizer(pool_db.tags)
+
+    def has_listener_policy(self, session, listener_id):
+        policy = self.model_class
+        return (session.query(policy.id).filter_by(listener_id=listener_id)
+                .filter(policy.provisioning_status.notin_(
+                    (consts.PENDING_DELETE, consts.DELETED)))
+                .with_for_update().limit(1).scalar() is not None)
 
     def get_redirect_pool_for_update(self, session, listener, pool_id):
         pool = PoolRepository().get_on_load_balancer_for_update(

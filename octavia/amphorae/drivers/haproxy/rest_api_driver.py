@@ -1344,6 +1344,19 @@ class HaproxyAmphoraLoadBalancerDriver(
         closed = set()
         system_ca_pools = set()
         system_ca_material = None
+        tcp_tls_listeners = [
+            listener for listener in loadbalancer.listeners
+            if (listener.enabled and
+                listener.protocol == consts.PROTOCOL_TCP and
+                listener.provisioning_status not in
+                (consts.PENDING_DELETE, consts.DELETED))]
+        clear_tcp_default_pools = {
+            listener.default_pool_id for listener in tcp_tls_listeners
+            if getattr(listener, 'tcp_default_pool_tls', False) is True}
+        terminated_tcp_pools = {
+            pool.id for listener in tcp_tls_listeners
+            if getattr(listener, 'tcp_tls_termination', False) is True
+            for pool in listener.pools}
         for pool_id, (listener, pool) in protected.items():
             required = [consts.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME]
             system_ca = getattr(pool, 'backend_tls_system_ca', False) is True
@@ -1355,7 +1368,13 @@ class HaproxyAmphoraLoadBalancerDriver(
                 required.append(
                     consts.GATEWAY_CAPABILITY_LISTENER_REQUEST_FILTERS)
             if pool.protocol == consts.PROTOCOL_TCP:
-                required.append(consts.GATEWAY_CAPABILITY_TCP_TLS_BACKEND_AUTH)
+                if pool_id in clear_tcp_default_pools:
+                    required.append(
+                        consts.GATEWAY_CAPABILITY_TCP_DEFAULT_POOL_TLS)
+                if (pool_id not in clear_tcp_default_pools or
+                        pool_id in terminated_tcp_pools):
+                    required.append(
+                        consts.GATEWAY_CAPABILITY_TCP_TLS_BACKEND_AUTH)
             if getattr(pool, 'backend_tls_require_h2', False) is True:
                 required.append(consts.GATEWAY_CAPABILITY_BACKEND_TLS_H2_ALPN)
             if getattr(pool, 'backend_tls_subject_alt_names', None):

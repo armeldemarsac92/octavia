@@ -1516,9 +1516,13 @@ class UpdateListenerInDB(BaseDatabaseTask):
 
         # The API stores these along with their pool FKs before the
         # render. A retried worker must not restore older pool references.
+        api_owned = {'request_filter_sections', 'otlp_tracing'}
+        if listener.get('protocol') == constants.PROTOCOL_TCP:
+            api_owned.update(('tcp_default_pool_tls', 'default_pool_id'))
         update_dict = {key: value for key, value in update_dict.items()
-                       if key not in ('request_filter_sections',
-                                      'otlp_tracing')}
+                       if key not in api_owned}
+        if not update_dict:
+            return
         LOG.debug("Update DB for listener id: %s ",
                   listener[constants.LISTENER_ID])
         with db_apis.session().begin() as session:

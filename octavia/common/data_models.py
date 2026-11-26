@@ -495,7 +495,8 @@ class Listener(BaseDataModel):
                  client_authentication_insecure_fallback=None,
                  frontend_fallback_owns_error=None,
                  request_filter_sections=None, otlp_tracing=None,
-                 otlp_tracing_status=None, otlp_tracing_revision=None):
+                 otlp_tracing_status=None, otlp_tracing_revision=None,
+                 *, tcp_default_pool_tls=False):
         self.id = id
         self.project_id = project_id
         self.name = name
@@ -509,6 +510,7 @@ class Listener(BaseDataModel):
         self.otlp_tracing_revision = otlp_tracing_revision
         self.tcp_tls_termination = tcp_tls_termination
         self.tcp_tls_mixed_mode = tcp_tls_mixed_mode
+        self.tcp_default_pool_tls = tcp_default_pool_tls
         self.load_balancer_id = load_balancer_id
         self.protocol = protocol
         self.protocol_port = protocol_port

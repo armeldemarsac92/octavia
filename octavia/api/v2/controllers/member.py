@@ -163,10 +163,27 @@ class MemberController(base.BaseController):
         if not transport.enabled:
             return
         capabilities = driver_utils.gateway_capabilities(driver)
-        backend_auth_withdrawn = (
+        pool_auth_capabilities = {
+            constants.GATEWAY_CAPABILITY_TCP_TLS_BACKEND_AUTH,
+            constants.GATEWAY_CAPABILITY_TCP_DEFAULT_POOL_TLS}
+        required_pool_auth = set()
+        if transport.backend_tls_hostname is not None:
+            listeners = self.repositories.listener
+            if listeners.has_default_pool_listener(
+                    session, pool.id, tcp_tls_termination=False,
+                    tcp_default_pool_tls=True):
+                required_pool_auth.add(
+                    constants.GATEWAY_CAPABILITY_TCP_DEFAULT_POOL_TLS)
+            if (listeners.has_default_pool_listener(
+                    session, pool.id, tcp_tls_termination=True) or
+                    self.repositories.l7policy.get_policy_using_pool(
+                        session, pool.id, tcp_tls_termination=True)):
+                required_pool_auth.add(
+                    constants.GATEWAY_CAPABILITY_TCP_TLS_BACKEND_AUTH)
+        withdrawn_pool_auth = required_pool_auth.difference(capabilities)
+        pool_auth_unavailable = (
             transport.backend_tls_hostname is not None and
-            constants.GATEWAY_CAPABILITY_TCP_TLS_BACKEND_AUTH not in
-            capabilities)
+            not pool_auth_capabilities.intersection(capabilities))
         mixed_mode_withdrawn = (
             constants.GATEWAY_CAPABILITY_TCP_TLS_MIXED_MODE not in
             capabilities and self.repositories.l7policy.get_policy_using_pool(
@@ -187,7 +204,8 @@ class MemberController(base.BaseController):
             self.repositories.l7policy.has_active_tls_sni_weighted_pool(
                 session, pool.id, passthrough=True,
                 compare_type=constants.L7RULE_COMPARE_TYPE_ENDS_WITH))
-        if not (backend_auth_withdrawn or mixed_mode_withdrawn or
+        if not (withdrawn_pool_auth or pool_auth_unavailable or
+                mixed_mode_withdrawn or
                 weighted_pools_withdrawn or
                 passthrough_weighted_pools_withdrawn or
                 weighted_suffix_withdrawn):
@@ -214,8 +232,14 @@ class MemberController(base.BaseController):
                         desired[field] != getattr(previous, field)
                         for field in ('monitor_address', 'monitor_port',
                                       'subnet_id'))):
-                if backend_auth_withdrawn:
+                if (constants.GATEWAY_CAPABILITY_TCP_DEFAULT_POOL_TLS in
+                        withdrawn_pool_auth):
+                    driver_utils.require_tcp_default_pool_tls(driver)
+                if (constants.GATEWAY_CAPABILITY_TCP_TLS_BACKEND_AUTH in
+                        withdrawn_pool_auth):
                     driver_utils.require_tcp_tls_backend_auth(driver)
+                if pool_auth_unavailable:
+                    driver_utils.require_tcp_pool_tls_auth(driver)
                 if mixed_mode_withdrawn:
                     driver_utils.require_tcp_tls_mixed_mode(driver)
                 if weighted_pools_withdrawn:

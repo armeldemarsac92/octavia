@@ -1778,6 +1778,83 @@ class TestHaproxyCfg(base.TestCase):
             [line.split(' if ')[1] for line in config.splitlines()
              if line.strip().startswith('use_backend ')])
 
+    def test_render_clear_tcp_default_pool_tls(self):
+        samples = sample_configs_combined
+        plain = samples.sample_pool_tuple(
+            proto='TCP', sample_pool=2, persistence=False)
+        hostname = 'origin.example.test'
+        original = samples.sample_listener_tuple(
+            proto='TCP', persistence=False, tls=False)
+        regional_alpn = CONF.api_settings.default_pool_alpn_protocols
+        pool = SimpleNamespace(**dict(
+            original.default_pool._asdict(), tls_enabled=True,
+            backend_tls_hostname=hostname, alpn_protocols=list(regional_alpn),
+            ca_tls_certificate_id='ca-ref', tls_certificate_id='client-ref'))
+        rule = samples.sample_l7rule_tuple(
+            'exact-name', type='TLS_SNI', compare_type='EQUAL_TO',
+            value='legacy.example.test')
+        legacy = samples.sample_l7policy_tuple('legacy')._replace(
+            redirect_pool=plain, l7rules=[rule])
+        listener = SimpleNamespace(**dict(
+            original._asdict(), default_pool=pool, pools=[pool, plain],
+            tcp_default_pool_tls=True, l7policies=[legacy]))
+        amphora = samples.sample_amphora_tuple()
+        details = {constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME: True,
+                   constants.GATEWAY_CAPABILITY_TCP_DEFAULT_POOL_TLS: True,
+                   constants.GATEWAY_CAPABILITY_TCP_TLS_BACKEND_AUTH: True}
+        ca = {'ca_cert': '/path/to/backend-ca.pem'}
+        material = {pool.id: dict(ca, client_cert='/path/to/client.pem')}
+        terminating = SimpleNamespace(**dict(
+            original._asdict(), id='terminating', protocol_port=8443,
+            default_pool=pool, pools=[pool], l7policies=[],
+            tcp_tls_termination=True, tls_certificate_id='frontend-cert'))
+
+        config = self.jinja_cfg.build_config(
+            amphora, [listener, terminating], material, ['3', '0'], details)
+        bind = next(line for line in config.splitlines()
+                    if line.lstrip().startswith('bind '))
+        self.assertNotIn('ssl', bind)
+        self.assertIn(f'default_backend {pool.id}:{listener.id}', config)
+        self.assertNotIn('use_backend ', config)
+        self.assertIn('crt /path/to/client.pem', config)
+        self.assertIn('ca-file /path/to/backend-ca.pem verify required',
+                      config)
+        self.assertIn(f'sni str({hostname}) verifyhost-strict {hostname}',
+                      config)
+        self.assertNotIn('verify none', config)
+
+        alpn = ','.join(regional_alpn)
+        for current in (listener, terminating):
+            with self.subTest(listener=current.id):
+                name = f'{pool.id}:{current.id}'
+                backend = config.split(f'\nbackend {name}\n', 1)[1]
+                section = backend.split('\n\n', 1)[0]
+                servers = [line for line in section.splitlines()
+                           if line.lstrip().startswith('server ')]
+                self.assertTrue(servers)
+                for server in servers:
+                    self.assertIn(f' check-ssl check-sni {hostname}', server)
+                    if current is terminating:
+                        self.assertIn(f' alpn {alpn}', server)
+                        self.assertIn(f' check-alpn {alpn}', server)
+                    else:
+                        self.assertNotIn(' alpn ', server)
+                        self.assertNotIn(' check-alpn ', server)
+        self.assertEqual(regional_alpn, pool.alpn_protocols)
+
+        for label, current, details, certs in (
+            ('old Amphora', listener, {}, material),
+            ('missing client identity', listener, details, {pool.id: ca}),
+            ('clear pool', SimpleNamespace(**dict(
+                vars(listener), default_pool=plain)), details, material),
+        ):
+            with self.subTest(label=label):
+                config = self.jinja_cfg.render_loadbalancer_obj(
+                    amphora, [current], tls_certs=certs, amp_details=details)
+                self.assertNotIn('default_backend ', config)
+                self.assertNotIn('use_backend ', config)
+                self.assertNotIn('\n    server ', config)
+
     def test_render_tcp_tls_mixed_mode(self):
         samples = sample_configs_combined
         plain = samples.sample_pool_tuple(

@@ -666,6 +666,20 @@ Enroll the provider in
 ``[api_settings] enabled_tcp_tls_backend_auth_providers`` after qualifying
 the regional API, workers and Amphora fleet.
 
+``tcp_default_pool_tls_v1`` enables authenticated TLS on the default TCP
+pool of a clear TCP listener. It requires ``backend_tls_hostname_v1`` and
+independent enrollment in ``[api_settings]
+enabled_tcp_default_pool_tls_providers``. The listener has no L7 policies.
+This association omits application ALPN on backend connections and health
+checks. The API continues to store and return the pool's ``alpn_protocols``.
+Attach the authenticated pool and enable the mode in a single listener
+update with ``default_pool_id`` and ``tcp_default_pool_tls: true``. A
+listener with the mode enabled and no pool closes connections. Listener
+responses include false before enrollment and after withdrawal on an
+eligible listener when the provider advertises the capability. Clear the
+association with ``default_pool_id: null`` and
+``tcp_default_pool_tls: false`` in one update.
+
 The ``backend_tls_system_ca_v1`` capability allows a TLS pool with
 ``backend_tls_hostname`` to use a regional Amphora image CA bundle.
 It requires ``backend_tls_hostname_v1`` and, for TCP pools, the usual

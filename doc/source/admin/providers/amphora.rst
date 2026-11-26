@@ -717,6 +717,27 @@ Amphorae and reports the update as unconfirmed. A failover must confirm the
 configuration before proceeding. Drain and remove weighted passthrough
 policies before downgrading workers or Amphorae.
 
+Authenticated TLS default pools on clear TCP listeners
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+After upgrading octavia-lib, the database, API, workers and Amphora agents,
+add the provider name to
+``[api_settings] enabled_tcp_default_pool_tls_providers``. Enable the
+provider for ``backend_tls_hostname_v1`` as well. The API and each qualified
+Amphora agent report ``tcp_default_pool_tls_v1``.
+
+Use a clear TCP listener with ``tcp_default_pool_tls: true`` and a single
+default TCP pool with ``tls_enabled: true``, a literal DNS
+``backend_tls_hostname`` and an explicit trusted ``ca_tls_container_ref``.
+Set ``tls_container_ref`` on the pool when the origin requests a client
+certificate. Octavia uses the DNS name for backend SNI and verifies the
+certificate chain and DNS identity. Amphora sends no application ALPN on
+backend connections or health checks for this association. The pool retains
+its configured ALPN for other listeners. A listener without a pool or without
+qualified Amphora support and prepared certificate material closes
+connections. Withdraw the association with ``tcp_default_pool_tls: false``
+and ``default_pool_id: null`` before downgrading the region.
+
 Authenticated TLS backends on terminating TCP listeners
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

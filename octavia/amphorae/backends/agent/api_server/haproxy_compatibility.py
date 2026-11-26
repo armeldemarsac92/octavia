@@ -372,6 +372,9 @@ def get_haproxy_capabilities():
     capabilities[constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME] = True
     capabilities[constants.GATEWAY_CAPABILITY_BACKEND_TLS_SYSTEM_CA] = True
     capabilities[constants.GATEWAY_CAPABILITY_TCP_TLS_BACKEND_AUTH] = True
+    # The clear frontend uses the same native TCP server options and strict
+    # DNS verifier as TLS re-encryption behind a terminating frontend.
+    capabilities[constants.GATEWAY_CAPABILITY_TCP_DEFAULT_POOL_TLS] = True
     if output.startswith(strict_dns_builds[1:]):
         capabilities[constants.GATEWAY_CAPABILITY_BACKEND_TLS_H2_ALPN] = True
     if output.startswith(strict_dns_builds[2:]):
