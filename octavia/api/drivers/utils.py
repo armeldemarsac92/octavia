@@ -312,6 +312,9 @@ def gateway_capabilities(driver):
     if l7policy_conditional_removal_available(driver):
         capabilities.append(
             constants.GATEWAY_CAPABILITY_L7POLICY_CONDITIONAL_REMOVAL)
+    if l7policy_closed_listener_removal_available(driver):
+        capabilities.append(
+            constants.GATEWAY_CAPABILITY_L7POLICY_CLOSED_LISTENER_REMOVAL)
     tcp_rejection_providers = (
         api_settings.enabled_tcp_connection_rejection_providers)
     if (driver.name in tcp_rejection_providers and
@@ -969,6 +972,15 @@ def l7policy_conditional_removal_available(driver):
                     False) is True)
 
 
+def l7policy_closed_listener_removal_available(driver):
+    enabled = (
+        CONF.api_settings.enabled_l7policy_closed_listener_removal_providers)
+    return (driver.name in enabled and
+            getattr(driver, 'supports_l7policy_closed_listener_removal',
+                    False) is True and
+            l7policy_conditional_removal_available(driver))
+
+
 def l7policy_batch_activation_available(driver, listener):
     capabilities = gateway_capabilities(driver)
     if (constants.GATEWAY_CAPABILITY_L7POLICY_BATCH_ACTIVATION not in
@@ -1563,6 +1575,7 @@ def listener_dict_to_provider_dict(listener_dict, for_delete=False,
             'load_balancer_id')
 
     # Preserve the existing driver payload for ordinary listeners.
+    new_listener_dict.pop('l7policy_listener_update', None)
     new_listener_dict.pop('frontend_fallback_owns_error', None)
     new_listener_dict.pop('otlp_tracing_status', None)
     new_listener_dict.pop('otlp_tracing_revision', None)

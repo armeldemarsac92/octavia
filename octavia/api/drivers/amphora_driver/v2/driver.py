@@ -99,6 +99,7 @@ class AmphoraProviderDriver(driver_base.ProviderDriver):
     supports_l7policy_batch_activation = True
     supports_l7policy_grpc_auth_transition = True
     supports_l7policy_conditional_removal = True
+    supports_l7policy_closed_listener_removal = True
     supports_tcp_connection_rejection = True
     supports_udp_packet_drop = True
     supports_http_header_exact = True
@@ -290,7 +291,8 @@ class AmphoraProviderDriver(driver_base.ProviderDriver):
         driver_utils.remove_otlp_export_headers(payload[consts.LISTENER])
         self.client.cast({}, 'delete_listener', **payload)
 
-    def listener_update(self, old_listener, new_listener):
+    def listener_update(self, old_listener, new_listener, *,
+                        l7policy_listener_revision=None):
         self._validate_alpn_protocols(new_listener)
         original_listener = old_listener.to_dict()
         listener_updates = new_listener.to_dict()
@@ -299,6 +301,9 @@ class AmphoraProviderDriver(driver_base.ProviderDriver):
         driver_utils.remove_otlp_export_headers(listener_updates)
         self._encrypt_listener_dict(original_listener)
         self._encrypt_listener_dict(listener_updates)
+        if l7policy_listener_revision:
+            listener_updates[consts.L7POLICY_LISTENER_REVISION] = (
+                l7policy_listener_revision)
 
         payload = {consts.ORIGINAL_LISTENER: original_listener,
                    consts.LISTENER_UPDATES: listener_updates}

@@ -1,5 +1,40 @@
 .. -*- rst -*-
 
+Read the conditional removal snapshot for an L7 policy
+======================================================
+
+.. rest_method:: GET /v2/lbaas/l7policies/{l7policy_id}/conditional_removal
+
+This extension is available when the regional provider advertises
+``l7policy_conditional_removal_v1``. The HTTP 200 response contains an
+``l7policy_removal`` object with ``loadbalancer_id``, the complete policy
+and rule snapshot in ``policy``, and an opaque ``revision``. Verify the
+policy and rule ownership before using the revision.
+The optional ``listener_closure_confirmed`` boolean is true when the
+current listener update has closed the listener on every allocated
+Amphora and the confirmed graph generation is current. A missing or
+false value calls for the ordinary policy disable and removal sequence.
+
+Conditionally remove an L7 policy
+=================================
+
+.. rest_method:: POST /v2/lbaas/l7policies/{l7policy_id}/conditional_removal
+
+Send the observed revision as ``l7policy_removal.expected_revision``.
+The optional JSON boolean ``l7policy_removal.require_listener_disabled``
+defaults to ``false``, which requires a disabled policy. Setting it to
+``true`` requires an enabled policy and an administratively down HTTP or
+TERMINATED_HTTPS listener with provisioning status ``ACTIVE``. The
+GET must report ``listener_closure_confirmed`` as true and the provider
+must advertise ``l7policy_closed_listener_removal_v1``.
+
+HTTP 202 acknowledges queueing. The worker checks the current revision
+and eligibility before it deletes the policy and its rules. A subsequent
+GET returns HTTP 404 after removal. HTTP 409 indicates that the policy,
+listener or load balancer does not meet the preconditions. Read a fresh
+snapshot and verify ownership again before retrying. HTTP 501 indicates
+that the requested mode is unavailable for the regional provider.
+
 Read the activation snapshot for a listener
 ===========================================
 

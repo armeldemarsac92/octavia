@@ -25,6 +25,7 @@ from oslo_utils import uuidutils
 
 from octavia.amphorae.drivers.haproxy import rest_api_driver
 from octavia.amphorae.drivers.noop_driver import driver as amphora_noop
+from octavia.api.drivers.amphora_driver.v2 import driver as amphora_driver
 from octavia.api.drivers.noop_driver import driver as noop_driver
 from octavia.api.drivers import utils as driver_utils
 from octavia.common import constants
@@ -2447,10 +2448,16 @@ class TestInitialL7Rules(base.BaseAPITest):
         return (self.L7POLICY_PATH.format(l7policy_id=policy_id) +
                 '/conditional_removal')
 
-    def _removal_request(self, path):
+    def _removal_request(self, path, **options):
         snapshot = self.get(path).json['l7policy_removal']
         return {'l7policy_removal': {
-            'expected_revision': snapshot['revision']}}
+            'expected_revision': snapshot['revision'], **options}}
+
+    def _enable_closed_listener_removal(self):
+        self._enable_conditional_removal()
+        self.conf.config(
+            group='api_settings',
+            enabled_l7policy_closed_listener_removal_providers=['amphora'])
 
     def test_conditional_removal_frees_quota_and_preserves_neighbor(self):
         self._authenticated_project()
@@ -2501,7 +2508,8 @@ class TestInitialL7Rules(base.BaseAPITest):
             'expected_revision': snapshot['revision']}}
         self.post(path, payload, status=202)
         self.assertEqual(snapshot, self.get(path).json['l7policy_removal'])
-        self.post(path, payload, status=202)
+        self.post(path, self._removal_request(
+            path, require_listener_disabled=False), status=202)
         first, replay = self.rpc.cast.call_args_list
         self.assertEqual(first, replay)
         self.rpc.cast.reset_mock()
@@ -2521,6 +2529,182 @@ class TestInitialL7Rules(base.BaseAPITest):
                 self.session, project_id=self.project_id)
             self.assertEqual((2, 3), (quotas.in_use_l7policy,
                                       quotas.in_use_l7rule))
+
+    def test_closed_listener_removal_requires_opt_in_and_driver_support(self):
+        saved = self._post_policy()['l7policy']
+        self._dispatch('create_l7policy')
+        path = self._removal_path(saved['id'])
+        caps_path = self.PROVIDERS_PATH + '/amphora/gateway_capabilities'
+        legacy = constants.GATEWAY_CAPABILITY_L7POLICY_CONDITIONAL_REMOVAL
+        closed = constants.GATEWAY_CAPABILITY_L7POLICY_CLOSED_LISTENER_REMOVAL
+        payload = {'l7policy_removal': {
+            'expected_revision': '0' * 64, 'require_listener_disabled': True}}
+        self._enable_conditional_removal()
+        self.assertNotIn(closed, self.get(caps_path).json[
+            'gateway_capabilities'])
+        self.post(path, payload, status=501)
+
+        self.conf.config(
+            group='api_settings',
+            enabled_l7policy_conditional_removal_providers=[],
+            enabled_l7policy_closed_listener_removal_providers=['amphora'])
+        self.assertNotIn(closed, self.get(caps_path).json[
+            'gateway_capabilities'])
+        self.post(path, payload, status=501)
+
+        self._enable_closed_listener_removal()
+        with mock.patch.object(amphora_driver.AmphoraProviderDriver,
+                               'supports_l7policy_closed_listener_removal',
+                               False):
+            self.assertNotIn(closed, self.get(caps_path).json[
+                'gateway_capabilities'])
+            self.post(path, payload, status=501)
+        capabilities = self.get(caps_path).json['gateway_capabilities']
+        self.assertIn(legacy, capabilities)
+        self.assertIn(closed, capabilities)
+        for invalid in ('true', 1, None):
+            self.post(path, self._removal_request(
+                path, require_listener_disabled=invalid), status=400)
+        self.rpc.cast.assert_not_called()
+
+    @mock.patch('octavia.common.tls_utils.cert_parser.load_certificates_data')
+    def test_closed_listener_removal_waits_for_current_render(self, cert_data):
+        cert_data.return_value = {
+            'tls_cert': data_models.TLSContainer(certificate='certificate')}
+        listener = self.create_listener(
+            constants.PROTOCOL_TERMINATED_HTTPS, 443, self.lb_id,
+            default_tls_container_ref=uuidutils.generate_uuid())['listener']
+        self.listener_id = listener['id']
+        self.set_lb_status(self.lb_id)
+        self.rpc.cast.reset_mock()
+        saved = self._post_policy()['l7policy']
+        self._dispatch('create_l7policy')
+        policy_path = self.L7POLICY_PATH.format(l7policy_id=saved['id'])
+        self.put(policy_path, {'l7policy': {'admin_state_up': True}})
+        self._dispatch('update_l7policy')
+        listener_path = self.LISTENER_PATH.format(listener_id=self.listener_id)
+        self.put(listener_path, {'listener': {'admin_state_up': True}})
+        earlier = self.rpc.cast.call_args.kwargs
+        self._dispatch('update_listener')
+
+        self._enable_closed_listener_removal()
+        path = self._removal_path(saved['id'])
+        self.put(listener_path, {'listener': {'admin_state_up': False}})
+        closing = self.rpc.cast.call_args.kwargs
+        self.rpc.cast.reset_mock()
+        old_listener = earlier['original_listener']
+        old_updates = earlier['listener_updates']
+        # Resume the DB portion of an already rendered unversioned PUT.
+        database_tasks.UpdateListenerInDB().execute(old_listener, old_updates)
+        database_tasks.MarkLBAndListenersActiveInDB().execute(
+            self.lb_id, [old_listener])
+        current = self.get(listener_path).json['listener']
+        self.assertEqual(constants.ACTIVE, current['provisioning_status'])
+        self.assertFalse(current['admin_state_up'])
+        self.assertFalse(self.get(path).json['l7policy_removal'][
+            'listener_closure_confirmed'])
+        self.post(path, self._removal_request(
+            path, require_listener_disabled=True), status=409)
+        self.rpc.cast.assert_not_called()
+
+        with mock.patch.object(amphora_noop.NoopAmphoraLoadBalancerDriver,
+                               'update') as update:
+            amphora_driver_tasks.ListenersUpdate().execute(
+                self.lb_id, old_listener, old_updates)
+            update.assert_not_called()
+            amphora_driver_tasks.ListenersUpdate().execute(
+                self.lb_id, closing['original_listener'],
+                closing['listener_updates'])
+            update.assert_called_once()
+        # Noop cannot certify an Amphora publication.
+        self.assertFalse(self.get(path).json['l7policy_removal'][
+            'listener_closure_confirmed'])
+        self.assertTrue(self.get(policy_path).json[
+            'l7policy']['admin_state_up'])
+
+        self.put(listener_path, {'listener': {'admin_state_up': True}})
+        self._dispatch('update_listener')
+        with mock.patch.object(amphora_noop.NoopAmphoraLoadBalancerDriver,
+                               'update') as update:
+            amphora_driver_tasks.ListenersUpdate().execute(
+                self.lb_id, closing['original_listener'],
+                closing['listener_updates'])
+            update.assert_not_called()
+        self.assertTrue(self.get(listener_path).json[
+            'listener']['admin_state_up'])
+
+    def test_policy_update_renders_after_tracked_listener_reopens(self):
+        self._enable_closed_listener_removal()
+        neighbor = self._post_policy(
+            redirect_prefix='https://neighbor.test')['l7policy']
+        self._dispatch('create_l7policy')
+        path = self.L7POLICY_PATH.format(l7policy_id=neighbor['id'])
+        self.put(path, {'l7policy': {'admin_state_up': True}})
+        self._dispatch('update_l7policy')
+        listener_path = self.LISTENER_PATH.format(listener_id=self.listener_id)
+        for enabled in (False, True):
+            self.put(listener_path, {'listener': {'admin_state_up': enabled}})
+            self._dispatch('update_listener')
+
+        destination = 'https://updated-neighbor.test'
+        with mock.patch.object(amphora_noop.NoopAmphoraLoadBalancerDriver,
+                               'update') as update:
+            self.put(path, {'l7policy': {'redirect_prefix': destination}})
+            self._dispatch('update_l7policy')
+        update.assert_called_once()
+        graph = update.call_args.args[0]
+        listener, = graph.listeners
+        policy, = listener.l7policies
+        self.assertTrue(listener.enabled)
+        self.assertEqual(neighbor['id'], policy.id)
+        self.assertEqual(destination, policy.redirect_prefix)
+
+    def test_closed_listener_removal_rejects_pre_enrollment_revision(self):
+        saved = self._post_policy()['l7policy']
+        self._dispatch('create_l7policy')
+        policy_path = self.L7POLICY_PATH.format(l7policy_id=saved['id'])
+        self.put(policy_path, {'l7policy': {'admin_state_up': True}})
+        self._dispatch('update_l7policy')
+        listener_path = self.LISTENER_PATH.format(listener_id=self.listener_id)
+        self.put(listener_path, {'listener': {'admin_state_up': False}})
+        self._dispatch('update_listener')
+        with self.session.begin():
+            # Octavia resolves older NULL provider rows to Amphora.
+            self.session.get(models.LoadBalancer, self.lb_id).provider = None
+
+        self._enable_closed_listener_removal()
+        path = self._removal_path(saved['id'])
+        original = self._removal_request(path, require_listener_disabled=True)
+        self.assertFalse(self.get(path).json['l7policy_removal'][
+            'listener_closure_confirmed'])
+        self.conf.config(
+            group='api_settings',
+            enabled_l7policy_conditional_removal_providers=[],
+            enabled_l7policy_closed_listener_removal_providers=[])
+        for enabled in (True, False):
+            self.put(listener_path, {'listener': {'admin_state_up': enabled}})
+            self._dispatch('update_listener')
+
+        self._enable_closed_listener_removal()
+        self.assertEqual(original, self._removal_request(
+            path, require_listener_disabled=True))
+        self.post(path, original, status=409)
+        self.rpc.cast.assert_not_called()
+
+        # The next revisioned close seeds the graph before any observation.
+        self.put(listener_path, {'listener': {'admin_state_up': False}})
+        self._dispatch('update_listener')
+        self.assertNotEqual(original, self._removal_request(
+            path, require_listener_disabled=True))
+        self.post(path, original, status=409)
+        self.rpc.cast.assert_not_called()
+
+        # The ordinary disable and removal path still works without a receipt.
+        self.put(policy_path, {'l7policy': {'admin_state_up': False}})
+        self._dispatch('update_l7policy')
+        self.post(path, self._removal_request(path), status=202)
+        self._dispatch('remove_l7policy_conditionally')
+        self.get(path, status=404)
 
     def test_conditional_removal_rechecks_rules_after_dispatch(self):
         self._enable_conditional_removal()
