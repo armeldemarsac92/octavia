@@ -404,6 +404,12 @@ class JinjaTemplater:
             constants.GATEWAY_CAPABILITY_TLS_SNI_PASSTHROUGH_WEIGHTED_POOLS)
         feature_compatibility[weighted_passthrough] = (
             (amp_details or {}).get(weighted_passthrough) is True)
+        default_pool_tls_cap = (
+            constants.GATEWAY_CAPABILITY_TCP_DEFAULT_POOL_TLS)
+        feature_compatibility[default_pool_tls_cap] = all(
+            (amp_details or {}).get(capability) is True for capability in (
+                default_pool_tls_cap,
+                constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME))
         if weighted_passthrough_degraded:
             feature_compatibility['weighted_passthrough_degraded'] = True
         cookie_capability = (
@@ -612,9 +618,12 @@ class JinjaTemplater:
                                     'authentication support')
                     tcp = pool['protocol'] == PROTOCOL_MAP[
                         constants.PROTOCOL_TCP]
+                    tcp_auth_capability = (
+                        default_pool_tls_cap
+                        if listener.get('tcp_default_pool_tls') else
+                        constants.GATEWAY_CAPABILITY_TCP_TLS_BACKEND_AUTH)
                     if tcp and (amp_details or {}).get(
-                            constants.GATEWAY_CAPABILITY_TCP_TLS_BACKEND_AUTH
-                    ) is not True:
+                            tcp_auth_capability) is not True:
                         raise driver_except.AmpVersionUnsupported(
                             version='HAProxy requires strict TCP backend TLS '
                                     'authentication support')
@@ -896,6 +905,8 @@ class JinjaTemplater:
         tcp_tls_termination = getattr(listener, 'tcp_tls_termination',
                                       False) is True
         mixed_mode = getattr(listener, 'tcp_tls_mixed_mode', False) is True
+        default_pool_tls = (
+            getattr(listener, 'tcp_default_pool_tls', False) is True)
         active = listener.enabled and loadbalancer.enabled
         client_auth_fallback = active and getattr(
             listener, 'client_authentication_insecure_fallback', None) is True
@@ -942,6 +953,8 @@ class JinjaTemplater:
             ret_value['tcp_tls_termination'] = True
         if mixed_mode:
             ret_value['tcp_tls_mixed_mode'] = True
+        if default_pool_tls:
+            ret_value['tcp_default_pool_tls'] = True
         if self.connection_logging:
             ret_value['user_log_format'] = (
                 self._format_log_string(loadbalancer, listener.protocol))
@@ -1019,12 +1032,22 @@ class JinjaTemplater:
                     not listener_request_filters.is_http_tls_authorizer(
                         pool))
         for pool in pool_gen:
+            if default_pool_tls and (
+                    not listener.default_pool or
+                    pool.id != listener.default_pool.id):
+                continue
             if (tcp_tls_termination and
                     pool.protocol != constants.PROTOCOL_TCP):
                 continue
             pool_certs = (tls_certs or {}).get(pool.id)
             hostname = getattr(pool, 'backend_tls_hostname', None)
-            if tcp_tls_termination and active and pool.enabled:
+            if default_pool_tls:
+                if (listener.protocol != constants.PROTOCOL_TCP or
+                        tcp_tls_termination or mixed_mode or
+                        not self._tcp_default_pool_tls_ready(
+                            pool, pool_certs, feature_compatibility)):
+                    continue
+            elif tcp_tls_termination and active and pool.enabled:
                 try:
                     validate.validate_tcp_redirect_pool_protocol(
                         pool.protocol, pool.tls_enabled,
@@ -1034,13 +1057,17 @@ class JinjaTemplater:
                                           False))
                 except exceptions.ValidationException:
                     pool_certs = {'closed': True}
-            if (not tcp_tls_termination and
+            if (not (tcp_tls_termination or default_pool_tls) and
                     pool.protocol == constants.PROTOCOL_TCP and
                     hostname is not None):
                 pool_certs = {'closed': True}
             rendered_pool = self._transform_pool(
                 pool, feature_compatibility, tls_enabled,
                 pool_tls_certs=pool_certs)
+            if default_pool_tls:
+                # This association carries an opaque TCP stream. The pool's
+                # stored ALPN still applies to other listeners using it.
+                rendered_pool.pop('alpn_protocols', None)
             if 'cookie_path_token' in rendered_pool['session_persistence']:
                 removed = (constants.PENDING_DELETE, constants.DELETED)
                 cookie_path_active = (
@@ -1099,8 +1126,10 @@ class JinjaTemplater:
             ret_value['request_filter_sections'] = (
                 self._transform_request_filters(
                     listener, loadbalancer, feature_compatibility))
-        policy_gen = (policy for policy in listener.l7policies if
-                      policy.provisioning_status != constants.PENDING_DELETE)
+        policy_gen = (
+            policy for policy in listener.l7policies if
+            not default_pool_tls and
+            policy.provisioning_status != constants.PENDING_DELETE)
         if https_sections is None and not mixed_mode and listener.default_pool:
             for pool in pools:
                 if pool['id'] == listener.default_pool.id:
@@ -1593,6 +1622,27 @@ class JinjaTemplater:
             tracing['export_headers_arg'] = f' export_headers={encoded}'
         tracing['pool'] = rendered
         return tracing
+
+    @staticmethod
+    def _tcp_default_pool_tls_ready(pool, certs, feature_compatibility):
+        capability = constants.GATEWAY_CAPABILITY_TCP_DEFAULT_POOL_TLS
+        if (not feature_compatibility.get(capability) or not pool.enabled or
+                pool.provisioning_status == constants.DELETED or
+                not certs or certs.get('closed') or not certs.get('ca_cert') or
+                (pool.tls_certificate_id and not certs.get('client_cert')) or
+                (pool.crl_container_id and not certs.get('crl')) or
+                getattr(pool, 'backend_h2c', False) or
+                getattr(pool, 'backend_tls_require_h2', False) or
+                getattr(pool, 'backend_tls_subject_alt_names', None)):
+            return False
+        try:
+            validate.validate_tcp_default_pool_tls(
+                pool.protocol, pool.tls_enabled, pool.backend_tls_hostname,
+                pool.ca_tls_certificate_id,
+                getattr(pool, 'backend_tls_system_ca', False))
+        except exceptions.ValidationException:
+            return False
+        return True
 
     def _transform_pool(self, pool, feature_compatibility,
                         listener_tls_enabled, pool_tls_certs=None):

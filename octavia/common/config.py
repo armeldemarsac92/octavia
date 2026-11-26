@@ -305,6 +305,10 @@ api_opts = [
                        'authenticate TLS backends on TCP listeners which '
                        'terminate TLS. Requires both TCP TLS termination '
                        'and backend TLS hostname authentication.')),
+    cfg.ListOpt('enabled_tcp_default_pool_tls_providers', default=[],
+                help=_('Providers with qualified Amphora fleets that can '
+                       'authenticate the default TCP pool of a clear TCP '
+                       'listener. Requires backend TLS hostname support.')),
     cfg.ListOpt('enabled_tcp_tls_termination_providers', default=[],
                 help=_('Providers whose regional Amphora fleets support TLS '
                        'termination on TCP listeners. Enable after upgrading '

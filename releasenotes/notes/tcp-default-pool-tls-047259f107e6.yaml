@@ -1,0 +1,10 @@
+---
+features:
+  - |
+    Amphora can authenticate the backend TLS connection of a clear TCP
+    listener's default pool. The listener enables this mode with
+    ``tcp_default_pool_tls``. The provider advertises
+    ``tcp_default_pool_tls_v1`` after operator enrollment and qualification
+    of the Amphora fleet. The TCP pool uses a strict backend DNS identity,
+    an explicit CA certificate reference, and an optional client
+    certificate.

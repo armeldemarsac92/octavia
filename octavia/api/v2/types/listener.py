@@ -20,6 +20,7 @@ from wsme import exc as wsme_exc
 from wsme import types as wtypes
 
 from octavia.api.common import types
+from octavia.api.drivers import driver_factory
 from octavia.api.v2.types import l7policy as l7policy_types
 from octavia.api.v2.types import pool as pool_types
 from octavia.common import constants
@@ -94,6 +95,7 @@ class ListenerResponse(BaseListenerType):
     protocol = wtypes.wsattr(wtypes.text)
     tcp_tls_termination = wtypes.wsattr(bool)
     tcp_tls_mixed_mode = wtypes.wsattr(bool)
+    tcp_default_pool_tls = wtypes.wsattr(bool)
     protocol_port = wtypes.wsattr(wtypes.IntegerType())
     connection_limit = wtypes.wsattr(wtypes.IntegerType())
     default_tls_container_ref = wtypes.wsattr(wtypes.StringType())
@@ -150,6 +152,19 @@ class ListenerResponse(BaseListenerType):
             result.tcp_tls_termination = wtypes.Unset
         if result.tcp_tls_mixed_mode is not True:
             result.tcp_tls_mixed_mode = wtypes.Unset
+        if result.tcp_default_pool_tls is not True:
+            clear_tcp = (
+                db_obj.protocol == constants.PROTOCOL_TCP and
+                not db_obj.tcp_tls_termination and
+                not db_obj.tcp_tls_mixed_mode and
+                not any(policy.provisioning_status not in (
+                    constants.PENDING_DELETE, constants.DELETED)
+                    for policy in db_obj.l7policies))
+            load_balancer = db_obj.load_balancer if clear_tcp else None
+            result.tcp_default_pool_tls = (
+                False if load_balancer and
+                driver_factory.tcp_default_pool_tls_available(
+                    load_balancer.provider) else wtypes.Unset)
         if result.client_authentication_insecure_fallback is None:
             result.client_authentication_insecure_fallback = wtypes.Unset
         if db_obj.default_http_response is not None:
@@ -230,6 +245,7 @@ class ListenerPOST(BaseListenerType):
         wtypes.ArrayType(wtypes.StringType(max_length=253)))
     tcp_tls_termination = wtypes.wsattr(bool, default=False)
     tcp_tls_mixed_mode = wtypes.wsattr(bool, default=False)
+    tcp_default_pool_tls = wtypes.wsattr(bool, default=False)
     default_pool = wtypes.wsattr(pool_types.PoolSingleCreate)
     l7policies = wtypes.wsattr(
         [l7policy_types.L7PolicySingleCreate], default=[])
@@ -287,6 +303,7 @@ class ListenerPUT(BaseListenerType):
         wtypes.ArrayType(wtypes.StringType(max_length=253)))
     tcp_tls_termination = wtypes.wsattr(bool)
     tcp_tls_mixed_mode = wtypes.wsattr(bool)
+    tcp_default_pool_tls = wtypes.wsattr(bool)
     insert_headers = wtypes.wsattr(
         wtypes.DictType(str, wtypes.StringType(max_length=255)))
     timeout_client_data = wtypes.wsattr(
@@ -346,6 +363,7 @@ class ListenerSingleCreate(BaseListenerType):
         wtypes.ArrayType(wtypes.StringType(max_length=253)))
     tcp_tls_termination = wtypes.wsattr(bool, default=False)
     tcp_tls_mixed_mode = wtypes.wsattr(bool, default=False)
+    tcp_default_pool_tls = wtypes.wsattr(bool, default=False)
     default_pool = wtypes.wsattr(pool_types.PoolSingleCreate)
     l7policies = wtypes.wsattr(
         [l7policy_types.L7PolicySingleCreate], default=[])

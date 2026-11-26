@@ -1965,6 +1965,20 @@ tcp_tls_passthrough:
   in: body
   required: false
   type: boolean
+tcp_default_pool_tls:
+  description: |
+    Set this to true on a clear TCP listener to require authenticated TLS
+    for connections to its default pool. The provider must advertise
+    ``tcp_default_pool_tls_v1``. The listener accepts only a TCP pool with
+    ``tls_enabled: true``, a literal DNS ``backend_tls_hostname``, and
+    ``ca_tls_container_ref``. An optional pool ``tls_container_ref`` specifies
+    the client certificate. This mode excludes L7 policies and frontend
+    TLS termination. The field defaults to false. Responses include the
+    stored true value or false for an eligible clear TCP listener in a
+    region that offers the capability.
+  in: body
+  required: false
+  type: boolean
 tcp_tls_termination:
   description: |
     On creation, set this to true with protocol ``TCP`` and an authorized
