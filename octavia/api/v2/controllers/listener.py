@@ -95,6 +95,15 @@ def validate_policy_options_on_create(
             listener.get('default_pool_id') or listener.get('default_pool'))
         driver_utils.require_tcp_tls_mixed_mode(driver)
 
+    tcp_default_pool_tls = listener.get('tcp_default_pool_tls', False)
+    if not isinstance(tcp_default_pool_tls, bool):
+        raise exceptions.ValidationException(detail=_(
+            'tcp_default_pool_tls must be true or false.'))
+    if tcp_default_pool_tls:
+        validate.validate_tcp_default_pool_tls_listener(
+            protocol, tcp_tls_termination, listener.get('l7policies'))
+        driver_utils.require_tcp_default_pool_tls(driver)
+
     default_response = listener.get('default_http_response')
     hosts = listener.get('https_virtual_hosts')
     if hosts is not None:
@@ -528,7 +537,8 @@ class ListenersController(base.BaseController):
                 tcp_tls_termination=listener_dict.get('tcp_tls_termination'),
                 hostname=pool.backend_tls_hostname,
                 ca_ref=pool.ca_tls_certificate_id,
-                system_ca=pool.backend_tls_system_ca)
+                system_ca=pool.backend_tls_system_ca,
+                tcp_default_pool_tls=listener_dict.get('tcp_default_pool_tls'))
 
         try:
             db_listener = self.repositories.listener.create(
@@ -807,6 +817,18 @@ class ListenersController(base.BaseController):
             raise exceptions.ValidationException(detail=_(
                 'tcp_tls_termination can only be set at listener creation.'))
         pool_id = updates.get('default_pool_id', listener.default_pool_id)
+        current_default_tls = listener.tcp_default_pool_tls
+        default_tls = updates.get('tcp_default_pool_tls', current_default_tls)
+        if not isinstance(default_tls, bool):
+            raise exceptions.ValidationException(detail=_(
+                'tcp_default_pool_tls must be true or false.'))
+        default_tls_changed = default_tls != current_default_tls
+        policy_repo = self.repositories.l7policy
+        if default_tls and (default_tls_changed or reopening):
+            validate.validate_tcp_default_pool_tls_listener(
+                listener.protocol, listener.tcp_tls_termination,
+                policy_repo.has_listener_policy(session, listener.id))
+            driver_utils.require_tcp_default_pool_tls(driver)
         mixed_mode = listener.tcp_tls_mixed_mode
         if updates.pop('tcp_tls_mixed_mode', mixed_mode) is not mixed_mode:
             raise exceptions.ValidationException(detail=_(
@@ -815,11 +837,12 @@ class ListenersController(base.BaseController):
             validate.validate_tcp_tls_mixed_default_pool(pool_id)
         new_pool = pool_id and pool_id != listener.default_pool_id
         if not listener.tcp_tls_termination:
-            if new_pool:
+            if pool_id and (new_pool or default_tls_changed or
+                            (default_tls and reopening)):
                 driver_utils.validate_existing_tcp_pool_attachment(
-                    driver, self.repositories.l7policy, session, listener,
-                    pool_id)
-            if reopening:
+                    driver, policy_repo, session, listener, pool_id,
+                    tcp_default_pool_tls=default_tls)
+            if reopening and not default_tls:
                 driver_utils.require_active_tls_sni_weighted_policies(
                     driver, self.repositories.l7policy, session, listener.id)
             return
@@ -862,7 +885,6 @@ class ListenersController(base.BaseController):
             if ca_ref:
                 self._validate_client_ca_and_crl_refs(ca_ref, crl_ref)
 
-        policy_repo = self.repositories.l7policy
         if admits_pool:
             driver_utils.validate_existing_tcp_pool_attachment(
                 driver, policy_repo, session, listener, pool_id,
@@ -1058,17 +1080,25 @@ class ListenersController(base.BaseController):
             driver = driver_factory.get_driver(provider)
 
             listener_dict = listener.to_dict(render_unsets=False)
-            withdrawing = (
+            withdrawing_otlp = (
                 listener_dict.keys() == {'otlp_tracing'} and
                 self._is_otlp_withdrawal(db_listener,
                                          listener_dict['otlp_tracing']))
+            withdrawing_default_tls = (
+                db_listener.tcp_default_pool_tls and
+                listener_dict == {'tcp_default_pool_tls': False,
+                                  'default_pool_id': None})
             self._test_lb_and_listener_statuses(
-                context.session, load_balancer_id, allow_error=withdrawing)
+                context.session, load_balancer_id,
+                allow_error=withdrawing_otlp or withdrawing_default_tls)
             db_listener = self.repositories.listener.get_for_update(
                 context.session, id, show_deleted=False)
-            if (withdrawing and listener_dict['otlp_tracing'] is not None and
-                    not self._is_otlp_withdrawal(
-                        db_listener, listener_dict['otlp_tracing'])):
+            if ((withdrawing_default_tls and
+                 not db_listener.tcp_default_pool_tls) or
+                (withdrawing_otlp and
+                 listener_dict['otlp_tracing'] is not None and
+                 not self._is_otlp_withdrawal(
+                     db_listener, listener_dict['otlp_tracing']))):
                 # Only a withdrawal of the current profile may bypass ERROR.
                 raise exceptions.ImmutableObject(
                     resource=data_models.Listener._name(), id=id)
@@ -1163,6 +1193,9 @@ class ListenersController(base.BaseController):
             provider_listener_dict = (
                 driver_utils.listener_dict_to_provider_dict(
                     dict(listener_dict, id=id),
+                    clear_tcp_default_pool_tls=(
+                        db_listener.tcp_default_pool_tls and
+                        listener_dict.get('tcp_default_pool_tls') is False),
                     clear_client_auth_fallback=(
                         db_listener.client_authentication_insecure_fallback
                         is True and listener_dict.get(

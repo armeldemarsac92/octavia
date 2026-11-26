@@ -392,6 +392,8 @@ def gateway_capabilities(driver):
             is True):
         capabilities.append(
             constants.GATEWAY_CAPABILITY_BACKEND_TLS_SUBJECT_ALT_NAMES)
+    if driver_factory.tcp_default_pool_tls_available(driver.name, driver):
+        capabilities.append(constants.GATEWAY_CAPABILITY_TCP_DEFAULT_POOL_TLS)
     if (api_settings.allow_tls_terminated_listeners and driver.name in
             api_settings.enabled_tcp_tls_termination_providers and
             getattr(driver, 'supports_tcp_tls_termination', False) is True):
@@ -1030,6 +1032,26 @@ def require_tcp_tls_backend_auth(driver):
                 'unavailable for this provider.'))
 
 
+def require_tcp_default_pool_tls(driver):
+    if (constants.GATEWAY_CAPABILITY_TCP_DEFAULT_POOL_TLS not in
+            gateway_capabilities(driver)):
+        raise exceptions.ProviderUnsupportedOptionError(
+            prov=driver.name, user_msg=_(
+                'Backend TLS authentication on the default pool of a clear '
+                'TCP listener is unavailable for this provider.'))
+
+
+def require_tcp_pool_tls_auth(driver):
+    capabilities = gateway_capabilities(driver)
+    if not {constants.GATEWAY_CAPABILITY_TCP_DEFAULT_POOL_TLS,
+            constants.GATEWAY_CAPABILITY_TCP_TLS_BACKEND_AUTH}.intersection(
+                capabilities):
+        raise exceptions.ProviderUnsupportedOptionError(
+            prov=driver.name, user_msg=_(
+                'Backend TLS authentication for TCP pools is unavailable '
+                'for this provider.'))
+
+
 def require_tcp_tls_mixed_mode(driver):
     if (constants.GATEWAY_CAPABILITY_TCP_TLS_MIXED_MODE not in
             gateway_capabilities(driver)):
@@ -1054,7 +1076,13 @@ def validate_tcp_tls_policy_mode(driver, mixed_mode, passthrough):
 def validate_tcp_pool_attachment(driver, protocol, tls_enabled, *,
                                  tcp_tls_termination=False, hostname=None,
                                  ca_ref=None, system_ca=False,
-                                 tls_sni_policy=False):
+                                 tls_sni_policy=False,
+                                 tcp_default_pool_tls=False):
+    if tcp_default_pool_tls:
+        validate.validate_tcp_default_pool_tls(
+            protocol, tls_enabled, hostname, ca_ref, system_ca)
+        require_tcp_default_pool_tls(driver)
+        return
     validate.validate_tcp_tls_backend_listener(
         tcp_tls_termination, protocol, hostname)
     if tcp_tls_termination or tls_sni_policy:
@@ -1067,7 +1095,8 @@ def validate_tcp_pool_attachment(driver, protocol, tls_enabled, *,
 
 def validate_existing_tcp_pool_attachment(
         driver, policy_repo, session, listener, pool_id, *,
-        tls_sni_policy=False, skip_disabled_pool=False, passthrough=False):
+        tls_sni_policy=False, skip_disabled_pool=False, passthrough=False,
+        tcp_default_pool_tls=False):
     pool = policy_repo.get_redirect_pool_for_update(session, listener, pool_id)
     if skip_disabled_pool and not pool.enabled:
         return
@@ -1076,7 +1105,8 @@ def validate_existing_tcp_pool_attachment(
         tcp_tls_termination=listener.tcp_tls_termination and not passthrough,
         hostname=pool.backend_tls_hostname,
         ca_ref=pool.ca_tls_certificate_id,
-        system_ca=pool.backend_tls_system_ca, tls_sni_policy=tls_sni_policy)
+        system_ca=pool.backend_tls_system_ca, tls_sni_policy=tls_sni_policy,
+        tcp_default_pool_tls=tcp_default_pool_tls)
 
 
 def validate_tcp_policy_targets(
@@ -1509,7 +1539,8 @@ def _get_secret_data(cert_manager, project_id, secret_ref, for_delete=False):
 
 
 def listener_dict_to_provider_dict(listener_dict, for_delete=False,
-                                   clear_client_auth_fallback=False):
+                                   clear_client_auth_fallback=False,
+                                   clear_tcp_default_pool_tls=False):
     new_listener_dict = _base_to_provider_dict(listener_dict,
                                                include_project_id=True)
     new_listener_dict['listener_id'] = new_listener_dict.pop('id')
@@ -1527,6 +1558,12 @@ def listener_dict_to_provider_dict(listener_dict, for_delete=False,
         new_listener_dict.pop('request_filter_sections', None)
     if not new_listener_dict.get('tcp_tls_termination'):
         new_listener_dict.pop('tcp_tls_termination', None)
+    include_default_pool_tls = (
+        new_listener_dict.get('tcp_default_pool_tls') is True or
+        clear_tcp_default_pool_tls)
+    if (not driver_factory.TCP_DEFAULT_POOL_TLS_PAYLOAD_AVAILABLE or
+            not include_default_pool_tls):
+        new_listener_dict.pop('tcp_default_pool_tls', None)
     if (not TCP_TLS_MIXED_MODE_PAYLOAD_AVAILABLE or
             not new_listener_dict.get('tcp_tls_mixed_mode')):
         new_listener_dict.pop('tcp_tls_mixed_mode', None)

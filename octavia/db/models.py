@@ -722,6 +722,8 @@ class Listener(base_models.BASE, base_models.IdMixin,
                                     server_default=sa.false())
     tcp_tls_mixed_mode = sa.Column(sa.Boolean(), nullable=False,
                                    server_default=sa.false())
+    tcp_default_pool_tls = sa.Column(sa.Boolean(), nullable=False,
+                                     server_default=sa.false())
     default_http_response = sa.Column(sa.JSON(none_as_null=True))
     https_virtual_hosts = sa.Column(sa.JSON(none_as_null=True))
     request_filter_sections = sa.Column(sa.JSON(none_as_null=True))

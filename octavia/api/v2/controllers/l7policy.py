@@ -844,6 +844,10 @@ class L7PolicyController(base.BaseController):
                 listener_ids=[listener_id])
             listener = self.repositories.listener.get_for_update(
                 lock_session, listener_id, show_deleted=False)
+            if listener.tcp_default_pool_tls:
+                raise exceptions.ValidationException(detail=_(
+                    'L7 policies are unavailable on tcp_default_pool_tls '
+                    'listeners.'))
             driver_utils.require_l7policy_external_auth_transport(
                 driver, lock_session, listener,
                 l7policy_dict.get('external_auth'))

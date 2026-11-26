@@ -143,6 +143,7 @@ Response Parameters
    - protocol_port: protocol_port
    - tcp_tls_termination: tcp_tls_termination
    - tcp_tls_mixed_mode: tcp_tls_mixed_mode
+   - tcp_default_pool_tls: tcp_default_pool_tls
    - request_filter_sections: request_filter_sections
    - otlp_tracing: otlp_tracing
    - otlp_tracing_status: otlp_tracing_status
@@ -291,6 +292,7 @@ Request
    - protocol_port: protocol_port
    - tcp_tls_termination: tcp_tls_termination
    - tcp_tls_mixed_mode: tcp_tls_mixed_mode
+   - tcp_default_pool_tls: tcp_default_pool_tls
    - request_filter_sections: request_filter_sections
    - otlp_tracing: otlp_tracing
    - sni_container_refs: sni_container_refs-optional
@@ -425,6 +427,7 @@ Response Parameters
    - protocol_port: protocol_port
    - tcp_tls_termination: tcp_tls_termination
    - tcp_tls_mixed_mode: tcp_tls_mixed_mode
+   - tcp_default_pool_tls: tcp_default_pool_tls
    - request_filter_sections: request_filter_sections
    - otlp_tracing: otlp_tracing
    - otlp_tracing_status: otlp_tracing_status
@@ -515,6 +518,7 @@ Response Parameters
    - protocol_port: protocol_port
    - tcp_tls_termination: tcp_tls_termination
    - tcp_tls_mixed_mode: tcp_tls_mixed_mode
+   - tcp_default_pool_tls: tcp_default_pool_tls
    - request_filter_sections: request_filter_sections
    - otlp_tracing: otlp_tracing
    - otlp_tracing_status: otlp_tracing_status
@@ -641,6 +645,7 @@ Response Parameters
    - protocol_port: protocol_port
    - tcp_tls_termination: tcp_tls_termination
    - tcp_tls_mixed_mode: tcp_tls_mixed_mode
+   - tcp_default_pool_tls: tcp_default_pool_tls
    - request_filter_sections: request_filter_sections
    - otlp_tracing: otlp_tracing
    - otlp_tracing_status: otlp_tracing_status

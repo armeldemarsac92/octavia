@@ -444,6 +444,23 @@ def validate_tcp_tls_backend_listener(tcp_tls_termination, protocol, hostname):
             'a TCP listener that terminates TLS.'))
 
 
+def validate_tcp_default_pool_tls_listener(protocol, terminating_tls,
+                                           has_policies):
+    if protocol != constants.PROTOCOL_TCP or terminating_tls or has_policies:
+        raise exceptions.ValidationException(detail=_(
+            'tcp_default_pool_tls requires a clear TCP listener without '
+            'L7 policies.'))
+
+
+def validate_tcp_default_pool_tls(protocol, tls_enabled, hostname, ca_ref,
+                                  system_ca):
+    if (protocol != constants.PROTOCOL_TCP or tls_enabled is not True or
+            not is_exact_sni_name(hostname) or not ca_ref or system_ca):
+        raise exceptions.ValidationException(detail=_(
+            'tcp_default_pool_tls requires a TCP default pool with TLS, '
+            'a backend DNS hostname and a CA certificate reference.'))
+
+
 def tls_sni_weighted_passthrough(tcp_tls_termination, mixed_mode,
                                  passthrough):
     if (type(tcp_tls_termination) is not bool or
