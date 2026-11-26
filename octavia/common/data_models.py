@@ -500,7 +500,8 @@ class Listener(BaseDataModel):
                  tcp_default_targets_revision=None,
                  tcp_default_targets_status=None,
                  tcp_default_targets_applied=None,
-                 tcp_default_targets_restrictive=None):
+                 tcp_default_targets_restrictive=None,
+                 l7policy_listener_update=None):
         self.id = id
         self.project_id = project_id
         self.name = name
@@ -520,6 +521,7 @@ class Listener(BaseDataModel):
         self.tcp_default_targets_status = tcp_default_targets_status
         self.tcp_default_targets_applied = tcp_default_targets_applied
         self.tcp_default_targets_restrictive = tcp_default_targets_restrictive
+        self.l7policy_listener_update = l7policy_listener_update
         self.load_balancer_id = load_balancer_id
         self.protocol = protocol
         self.protocol_port = protocol_port

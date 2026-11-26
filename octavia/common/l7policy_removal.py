@@ -18,6 +18,7 @@ from wsme.rest import json as wsme_json
 from octavia.api.v2.types import l7policy as wire
 from octavia.common import constants
 from octavia.common import exceptions
+from octavia.common import utils
 
 
 def lock_load_balancer(session, repos, lb_id):
@@ -27,7 +28,30 @@ def lock_load_balancer(session, repos, lb_id):
     return lb
 
 
-def lock_policy(session, repos, lb, listener_id, policy_id, *, removing=False):
+def allocated_peers(lb):
+    peers = sorted([amp.id, amp.role] for amp in lb.amphorae
+                   if amp.status == constants.AMPHORA_ALLOCATED)
+    if not utils.amphora_roles_match_topology(
+            lb.topology, [role for _, role in peers]):
+        return []
+    return peers
+
+
+def closure_confirmed(lb, listener):
+    if listener.protocol not in (constants.PROTOCOL_HTTP,
+                                 constants.PROTOCOL_TERMINATED_HTTPS):
+        return False
+    state = listener.l7policy_listener_update or {}
+    generation = lb.l7policy_graph_generation
+    return bool(generation and state.get('graph_generation') == generation and
+                lb.provisioning_status == constants.ACTIVE and
+                listener.provisioning_status == constants.ACTIVE and
+                listener.enabled is False and state.get('published_peers') and
+                state['published_peers'] == allocated_peers(lb))
+
+
+def lock_policy(session, repos, lb, listener_id, policy_id, *, removing=False,
+                require_listener_disabled=False):
     """Read a policy and its children under the load balancer write lock."""
     if removing and (
             lb.provisioning_status != constants.ACTIVE or
@@ -40,19 +64,22 @@ def lock_policy(session, repos, lb, listener_id, policy_id, *, removing=False):
             listener.project_id != lb.project_id or
             (removing and listener.provisioning_status != constants.ACTIVE)):
         raise exceptions.L7PolicyRemovalConflict()
+    if require_listener_disabled and not closure_confirmed(lb, listener):
+        raise exceptions.L7PolicyRemovalConflict()
     policy = repos.l7policy.get_for_update(
         session, policy_id, show_deleted=False, load_targets_and_mirrors=False)
     if (policy.listener_id != listener.id or
             policy.project_id != lb.project_id or
-            (removing and (policy.enabled or
-                           policy.provisioning_status != constants.ACTIVE))):
+            (removing and (
+                policy.enabled is not require_listener_disabled or
+                policy.provisioning_status != constants.ACTIVE))):
         raise exceptions.L7PolicyRemovalConflict()
     repos.l7policy.load_activation_references(
         session, [policy], include_deleted_rules=True)
     if any(rule.project_id != policy.project_id or
            rule.l7policy_id != policy.id for rule in policy.l7rules):
         raise exceptions.L7PolicyRemovalConflict()
-    return policy
+    return listener, policy
 
 
 def snapshot(lb, policy):

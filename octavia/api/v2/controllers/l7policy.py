@@ -219,23 +219,31 @@ class L7PolicyRemovalController(base.BaseController):
         with session.begin():
             lb = l7policy_removal.lock_load_balancer(
                 session, self.repositories, lb_id)
-            self._authorize(context, lb, constants.RBAC_GET_ONE,
-                            constants.RBAC_GET_ALL)
-            policy = l7policy_removal.lock_policy(
+            driver = self._authorize(context, lb, constants.RBAC_GET_ONE,
+                                     constants.RBAC_GET_ALL)
+            listener, policy = l7policy_removal.lock_policy(
                 session, self.repositories, lb, listener_id, self.policy_id)
             result, revision = l7policy_removal.snapshot(lb, policy)
+            closure_confirmed = wtypes.Unset
+            if driver_utils.l7policy_closed_listener_removal_available(
+                    driver):
+                closure_confirmed = l7policy_removal.closure_confirmed(
+                    lb, listener)
         return removal_types.L7PolicyRemovalRootResponse(
             l7policy_removal=removal_types.L7PolicyRemovalSnapshot(
-                revision=revision, loadbalancer_id=lb_id, policy=result))
+                revision=revision, loadbalancer_id=lb_id, policy=result,
+                listener_closure_confirmed=closure_confirmed))
 
     @wsme_pecan.wsexpose(
         None, body=removal_types.L7PolicyRemovalRootPOST, status_code=202)
     def post(self, removal_):
-        """Request removal of the disabled policy at the observed revision."""
+        """Request removal of the policy at the observed revision."""
         if not removal_:
             raise exceptions.ValidationException(detail=_(
                 'Supply an l7policy_removal object.'))
-        expected_revision = removal_.l7policy_removal.expected_revision
+        removal = removal_.l7policy_removal
+        expected_revision = removal.expected_revision
+        require_listener_disabled = removal.require_listener_disabled is True
         context = pecan_request.context.get('octavia_context')
         session = context.session
         lb_id, listener_id = self._parent_ids(session)
@@ -244,22 +252,32 @@ class L7PolicyRemovalController(base.BaseController):
                 session, self.repositories, lb_id)
             driver = self._authorize(context, lb, constants.RBAC_DELETE,
                                      constants.RBAC_DELETE)
-            policy = l7policy_removal.lock_policy(
+            if (require_listener_disabled and not
+                    driver_utils.l7policy_closed_listener_removal_available(
+                        driver)):
+                raise exceptions.ProviderNotImplementedError(
+                    prov=driver.name, user_msg=_(
+                        'Closed-listener L7 policy removal is unavailable.'))
+            _listener, policy = l7policy_removal.lock_policy(
                 session, self.repositories, lb, listener_id, self.policy_id,
-                removing=True)
+                removing=True,
+                require_listener_disabled=require_listener_disabled)
             l7policy_removal.validate_removal(lb, policy, expected_revision)
             driver_utils.require_no_exposed_request_transforms(
                 driver, self.repositories.l7policy, session,
                 policy_id=self.policy_id)
             project_id = lb.project_id
+        request = {
+            constants.LOADBALANCER_ID: lb_id,
+            constants.LISTENER_ID: listener_id,
+            constants.L7POLICY_ID: self.policy_id,
+            constants.PROJECT_ID: project_id,
+            'expected_revision': expected_revision,
+        }
+        if require_listener_disabled:
+            request['require_listener_disabled'] = True
         driver_utils.call_provider(
-            driver.name, driver.l7policy_conditional_remove, {
-                constants.LOADBALANCER_ID: lb_id,
-                constants.LISTENER_ID: listener_id,
-                constants.L7POLICY_ID: self.policy_id,
-                constants.PROJECT_ID: project_id,
-                'expected_revision': expected_revision,
-            })
+            driver.name, driver.l7policy_conditional_remove, request)
 
 
 class L7PolicyActivationController(base.BaseController):

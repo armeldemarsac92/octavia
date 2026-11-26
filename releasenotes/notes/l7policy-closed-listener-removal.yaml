@@ -1,0 +1,23 @@
+---
+features:
+  - |
+    A separate opt-in allows conditional removal of an enabled L7 policy
+    when its HTTP or TERMINATED_HTTPS listener is administratively down
+    and has finished provisioning. Clients use the conditional removal
+    snapshot and pass ``"require_listener_disabled": true`` alongside
+    ``expected_revision`` in the POST when the snapshot includes
+    ``listener_closure_confirmed: true``. All allocated Amphorae must
+    acknowledge the current listener publication. The worker rechecks
+    the confirmation and revision before deleting, without another reload.
+upgrade:
+  - |
+    To advertise ``l7policy_closed_listener_removal_v1``, add ``amphora``
+    to both ``[api_settings] enabled_l7policy_conditional_removal_providers``
+    and ``enabled_l7policy_closed_listener_removal_providers``. The second
+    allowlist defaults to empty. Apply the Octavia migration and upgrade
+    every regional API instance and worker before enabling it. Run
+    Amphora agents that acknowledge HAProxy publications and verify
+    closure on the complete allocated topology. An existing disabled
+    listener qualifies after an explicit disable PUT completes with that
+    acknowledgement. Clear the second allowlist and let queued removals
+    and listener updates drain before rolling back the API or workers.

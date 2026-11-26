@@ -1309,6 +1309,25 @@ class ListenersController(base.BaseController):
                     driver_utils.require_tls_sni_suffix(driver)
 
             db_listener.provisioning_status = constants.PENDING_UPDATE
+            enabled = listener_dict.get('enabled', db_listener.enabled)
+            confirms_closure = (
+                enabled is False and db_listener.protocol in (
+                    constants.PROTOCOL_HTTP,
+                    constants.PROTOCOL_TERMINATED_HTTPS) and
+                (db_listener.l7policy_listener_update is not None or
+                 'enabled' in listener_dict) and
+                driver_utils.l7policy_closed_listener_removal_available(
+                    driver))
+            closure_update = {}
+            if confirms_closure or db_listener.l7policy_listener_update:
+                revision = uuidutils.generate_uuid()
+                db_listener.l7policy_listener_update = {
+                    'revision': revision, 'confirm_closure': confirms_closure}
+                closure_update[constants.L7POLICY_LISTENER_REVISION] = revision
+                lb = self.repositories.load_balancer.get_for_update(
+                    context.session, load_balancer_id)
+                if not lb.l7policy_graph_generation:
+                    lb.l7policy_graph_generation = uuidutils.generate_uuid()
             track_targets = (
                 ('tcp_default_targets' in listener_dict and
                  (target_revision or
@@ -1343,7 +1362,8 @@ class ListenersController(base.BaseController):
             driver_utils.call_provider(
                 driver.name, driver.listener_update,
                 old_provider_listener,
-                driver_dm.Listener.from_dict(provider_listener_dict))
+                driver_dm.Listener.from_dict(provider_listener_dict),
+                **closure_update)
 
             # Update the database to reflect what the driver just accepted.
             if track_targets:
