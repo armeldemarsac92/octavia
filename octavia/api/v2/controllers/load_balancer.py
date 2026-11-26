@@ -937,6 +937,8 @@ class LoadBalancersController(base.BaseController):
                     context.session, id)
                 listener_controller = listener.ListenersController()
                 for tls_listener in tls_listeners:
+                    listener_controller._validate_tcp_default_targets_update(
+                        context.session, tls_listener, {}, driver, True)
                     listener_controller._validate_tcp_tls_update(
                         context.session, tls_listener, {}, driver, True)
                 policy_repo = self.repositories.l7policy

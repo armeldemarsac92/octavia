@@ -119,6 +119,7 @@ class AmphoraProviderDriver(driver_base.ProviderDriver):
     supports_tcp_tls_mixed_mode = True
     supports_tcp_tls_backend_auth = True
     supports_tcp_default_pool_tls = True
+    supports_tcp_weighted_default_pools = True
     supports_tls_sni_passthrough = True
     supports_tls_sni_suffix = True
     supports_tls_sni_weighted_pools = True

@@ -461,6 +461,77 @@ def validate_tcp_default_pool_tls(protocol, tls_enabled, hostname, ca_ref,
             'a backend DNS hostname and a CA certificate reference.'))
 
 
+def tcp_default_targets(targets):
+    if (not isinstance(targets, list) or
+            len(targets) > constants.MAX_L7POLICY_TARGETS):
+        raise exceptions.ValidationException(detail=_(
+            'tcp_default_targets must be a list of up to 16 entries.'))
+
+    result = []
+    for target in targets:
+        if (not isinstance(target, dict) or target.keys() not in
+                ({'pool_id', 'weight'}, {'reject', 'weight'})):
+            raise exceptions.ValidationException(detail=_(
+                'Each TCP target requires weight and exactly one of '
+                'pool_id or reject.'))
+        weight = target['weight']
+        if (type(weight) is not int or
+                not 1 <= weight <= constants.MAX_L7POLICY_TARGET_WEIGHT):
+            raise exceptions.ValidationException(detail=_(
+                'Target weight must be an integer from 1 to 1000000.'))
+        if 'pool_id' in target:
+            try:
+                pool_id = str(uuid.UUID(target['pool_id']))
+            except (AttributeError, TypeError, ValueError) as e:
+                raise exceptions.ValidationException(detail=_(
+                    'Target pool_id must be a UUID.')) from e
+            result.append({'pool_id': pool_id, 'weight': weight})
+        elif target['reject'] is True:
+            result.append({'reject': True, 'weight': weight})
+        else:
+            raise exceptions.ValidationException(detail=_(
+                'TCP target reject must be true.'))
+    return result
+
+
+def tcp_default_targets_withdrawal(current, targets):
+    """Allow clearing or replacing an existing positive share in place."""
+    if not current or not isinstance(current, list) or not isinstance(
+            targets, list):
+        return False
+    if not targets:
+        return True
+    return (len(current) == len(targets) and current != targets and
+            all(isinstance(previous, dict) and
+                previous.get('weight') == target['weight'] and
+                (previous == target or target.get('reject') is True)
+                for previous, target in zip(current, targets)))
+
+
+def tcp_default_targets_retryable(listener):
+    status = listener.tcp_default_targets_status
+    return (bool(listener.tcp_default_targets_revision) and
+            listener.tcp_default_targets_restrictive is True and
+            (status == constants.ERROR or
+             (status == constants.PENDING_UPDATE and
+              listener.provisioning_status == constants.ERROR)))
+
+
+def validate_tcp_default_target_pool(protocol, tls_enabled, hostname, ca_ref,
+                                     system_ca, rejection):
+    if (protocol != constants.PROTOCOL_TCP or
+            type(tls_enabled) is not bool or rejection is not None):
+        raise exceptions.ValidationException(detail=_(
+            'Weighted default targets require TCP pools without '
+            'pool-level connection rejection.'))
+    if tls_enabled:
+        validate_tcp_default_pool_tls(
+            protocol, tls_enabled, hostname, ca_ref, system_ca)
+    elif hostname is not None or system_ca:
+        raise exceptions.ValidationException(detail=_(
+            'A clear TCP target cannot specify backend TLS authentication.'))
+
+
 def tls_sni_weighted_passthrough(tcp_tls_termination, mixed_mode,
                                  passthrough):
     if (type(tcp_tls_termination) is not bool or

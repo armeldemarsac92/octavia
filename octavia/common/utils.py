@@ -72,6 +72,38 @@ def active_listener_pools(loadbalancer):
                     pool.enabled and pool.provisioning_status not in removed)
 
 
+def tcp_default_target_pool_ids(listener):
+    targets = getattr(listener, 'tcp_default_targets', None)
+    if not isinstance(targets, list):
+        return set()
+    return {target['pool_id'] for target in targets
+            if isinstance(target, dict) and
+            isinstance(target.get('pool_id'), str)}
+
+
+def has_tcp_default_target_pools(loadbalancer):
+    return loadbalancer.enabled and any(
+        listener.enabled and listener.provisioning_status not in
+        (constants.PENDING_DELETE, constants.DELETED) and
+        tcp_default_target_pool_ids(listener)
+        for listener in loadbalancer.listeners)
+
+
+def pending_tcp_default_target_revisions(loadbalancer):
+    result = {}
+    for listener in loadbalancer.listeners:
+        revision = getattr(listener, 'tcp_default_targets_revision', None)
+        status = getattr(listener, 'tcp_default_targets_status', None)
+        retrying = (status == constants.ERROR and getattr(
+            listener, 'tcp_default_targets_restrictive', False) is True)
+        if (isinstance(revision, str) and
+                (status == constants.PENDING_UPDATE or retrying) and
+                listener.provisioning_status not in (
+                    constants.PENDING_DELETE, constants.DELETED)):
+            result[listener.id] = revision
+    return result
+
+
 def has_active_http_header_persistence(loadbalancer):
     return any(pool.session_persistence and pool.session_persistence.type ==
                constants.SESSION_PERSISTENCE_HTTP_HEADER

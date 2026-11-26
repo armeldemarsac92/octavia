@@ -459,13 +459,26 @@ class PoolsController(base.BaseController):
                 (changes.crl_container_ref, current.crl_container_id)))
         transport_changed = (
             identity_changed or reopening or changes.tls_enabled is True)
+        listener_repo = self.repositories.listener
+        if ((transport_changed or client_tls_changed or
+             changes.tls_enabled is not wtypes.Unset) and
+                listener_repo.get_tcp_default_target_listener_using_pool(
+                    session, pool_id)):
+            tls_enabled = (current.tls_enabled
+                           if changes.tls_enabled is wtypes.Unset
+                           else changes.tls_enabled)
+            validate.validate_tcp_default_target_pool(
+                current.protocol, tls_enabled, hostname, ca_ref, system_ca,
+                current.tcp_connection_rejection)
+            if (reopening or identity_changed or client_tls_changed or
+                    changes.tls_enabled is True):
+                driver_utils.require_tcp_weighted_default_pools(driver)
         if not (transport_changed or client_tls_changed):
             return
         tls_enabled = (current.tls_enabled
                        if changes.tls_enabled is wtypes.Unset
                        else changes.tls_enabled)
         policy_repo = self.repositories.l7policy
-        listener_repo = self.repositories.listener
         if reopening and policy_repo.get_policy_using_pool(
                 session, pool_id, tcp_tls_termination=None,
                 tcp_tls_mixed_mode=True):
@@ -652,6 +665,12 @@ class PoolsController(base.BaseController):
                         'A scoped HTTPS listener cannot have a default pool.'))
                 if listener.tcp_tls_mixed_mode:
                     validate.validate_tcp_tls_mixed_default_pool(pool_dict)
+                if (listener.tcp_default_targets or
+                        listener.tcp_default_targets_status in (
+                            constants.PENDING_UPDATE, constants.ERROR)):
+                    raise exceptions.ValidationException(detail=_(
+                        'A listener using tcp_default_targets cannot have '
+                        'a scalar default pool.'))
                 if listener.default_pool_id:
                     raise exceptions.DuplicatePoolEntry()
                 validate.validate_default_http_response(
@@ -1260,6 +1279,12 @@ class PoolsController(base.BaseController):
                     session, lb_id=lb_id,
                     listener_ids=self._get_affected_listener_ids(db_pool))
             listener_repo = self.repositories.listener
+            target_listener_id = (
+                listener_repo.get_tcp_default_target_listener_using_pool(
+                    context.session, db_pool.id))
+            if target_listener_id:
+                raise exceptions.PoolInUseByListenerTcpDefaultTargets(
+                    id=id, listener_id=target_listener_id)
             filter_listener_id = (
                 listener_repo.get_request_filter_listener_using_pool(
                     context.session, db_pool.id))

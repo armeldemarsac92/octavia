@@ -179,6 +179,12 @@ class DuplicatePoolEntry(APIException):
     code = 409
 
 
+class PoolInUseByListenerTcpDefaultTargets(APIException):
+    msg = _("Pool %(id)s is in use by weighted default targets on listener "
+            "%(listener_id)s")
+    code = 409
+
+
 class PoolInUseByListenerOtlpTracing(APIException):
     msg = _("Pool %(id)s is in use by OTLP tracing on listener "
             "%(listener_id)s")

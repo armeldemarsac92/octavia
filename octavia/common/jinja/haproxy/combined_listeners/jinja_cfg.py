@@ -410,6 +410,10 @@ class JinjaTemplater:
             (amp_details or {}).get(capability) is True for capability in (
                 default_pool_tls_cap,
                 constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME))
+        weighted_default_cap = (
+            constants.GATEWAY_CAPABILITY_TCP_WEIGHTED_DEFAULT_POOLS)
+        feature_compatibility[weighted_default_cap] = (
+            (amp_details or {}).get(weighted_default_cap) is True)
         if weighted_passthrough_degraded:
             feature_compatibility['weighted_passthrough_degraded'] = True
         cookie_capability = (
@@ -618,10 +622,13 @@ class JinjaTemplater:
                                     'authentication support')
                     tcp = pool['protocol'] == PROTOCOL_MAP[
                         constants.PROTOCOL_TCP]
-                    tcp_auth_capability = (
-                        default_pool_tls_cap
-                        if listener.get('tcp_default_pool_tls') else
-                        constants.GATEWAY_CAPABILITY_TCP_TLS_BACKEND_AUTH)
+                    if listener.get('tcp_default_targets'):
+                        tcp_auth_capability = weighted_default_cap
+                    elif listener.get('tcp_default_pool_tls'):
+                        tcp_auth_capability = default_pool_tls_cap
+                    else:
+                        tcp_auth_capability = (
+                            constants.GATEWAY_CAPABILITY_TCP_TLS_BACKEND_AUTH)
                     if tcp and (amp_details or {}).get(
                             tcp_auth_capability) is not True:
                         raise driver_except.AmpVersionUnsupported(
@@ -963,6 +970,30 @@ class JinjaTemplater:
         else:
             ret_value['connection_limit'] = (
                 CONF.haproxy_amphora.default_connection_limit)
+
+        if getattr(listener, 'tcp_default_targets', None):
+            ret_value.update(l7policies=[], pools=[])
+            if (listener.protocol != constants.PROTOCOL_TCP or
+                    tcp_tls_termination or mixed_mode or default_pool_tls or
+                    listener.default_pool_id or listener.tls_certificate_id or
+                    listener.sni_containers or
+                    listener.client_ca_tls_certificate_id or
+                    listener.client_crl_container_id or
+                    any(policy.provisioning_status not in (
+                        constants.PENDING_DELETE, constants.DELETED)
+                        for policy in listener.l7policies)):
+                ret_value['enabled'] = False
+                return ret_value
+            ret_value.update(self._transform_tcp_default_targets(
+                listener, loadbalancer, tls_certs or {},
+                feature_compatibility))
+            return ret_value
+        if (getattr(listener, 'tcp_default_targets_status', None) ==
+                constants.ERROR and
+                not listener.tcp_default_targets_restrictive):
+            # An unrelated render must not reopen a failed scalar transition.
+            ret_value.update(enabled=False, l7policies=[], pools=[])
+            return ret_value
 
         if listener.tls_certificate_id or listener.sni_containers:
             ret_value['crt_list_filename'] = os.path.join(
@@ -1623,9 +1654,95 @@ class JinjaTemplater:
         tracing['pool'] = rendered
         return tracing
 
+    def _transform_tcp_default_targets(self, listener, loadbalancer, certs,
+                                       feature_compatibility):
+        closed = {'tcp_default_targets': [], 'tcp_default_target_weight': 0}
+        capability = constants.GATEWAY_CAPABILITY_TCP_WEIGHTED_DEFAULT_POOLS
+        if not feature_compatibility.get(capability):
+            return closed
+        try:
+            targets = validate.tcp_default_targets(
+                listener.tcp_default_targets)
+            if (getattr(listener, 'tcp_default_targets_status', None) ==
+                    constants.ERROR and
+                    not listener.tcp_default_targets_restrictive):
+                applied = validate.tcp_default_targets(
+                    listener.tcp_default_targets_applied or [])
+                targets = self._tcp_default_targets_safe_after_error(
+                    targets, applied)
+        except exceptions.ValidationException:
+            return closed
+        pool_ids = {target['pool_id'] for target in targets
+                    if 'pool_id' in target}
+        pools = {}
+        for pool in listener.pools:
+            if (pool.id not in pool_ids or not pool.enabled or
+                    pool.project_id != listener.project_id or
+                    pool.load_balancer_id != loadbalancer.id or
+                    pool.provisioning_status in
+                    (constants.PENDING_DELETE, constants.DELETED)):
+                continue
+            material = certs.get(pool.id)
+            try:
+                validate.validate_tcp_default_target_pool(
+                    pool.protocol, pool.tls_enabled, pool.backend_tls_hostname,
+                    pool.ca_tls_certificate_id, pool.backend_tls_system_ca,
+                    pool.tcp_connection_rejection)
+                monitor = pool.health_monitor
+                if (pool.tls_enabled and monitor and monitor.enabled and
+                        monitor.provisioning_status not in
+                        (constants.PENDING_DELETE, constants.DELETED)):
+                    validate.validate_tcp_tls_backend_monitor(monitor.type)
+            except exceptions.ValidationException:
+                continue
+            if pool.tls_enabled and not self._tcp_default_pool_tls_ready(
+                    pool, material, feature_compatibility, capability):
+                continue
+            rendered = self._transform_pool(
+                pool, feature_compatibility, False,
+                pool_tls_certs=material if pool.tls_enabled else None)
+            rendered.pop('alpn_protocols', None)
+            if rendered['enabled']:
+                pools[pool.id] = rendered
+
+        intervals = []
+        first = 0
+        for target in targets:
+            end = first + target['weight']
+            pool_id = target.get('pool_id')
+            pool_id = pool_id if pool_id in pools else None
+            intervals.append({'first': first, 'last': end - 1,
+                              'pool_id': pool_id})
+            first = end
+        return {'pools': list(pools.values()),
+                'tcp_default_targets': intervals if pools else [],
+                'tcp_default_target_weight': first}
+
     @staticmethod
-    def _tcp_default_pool_tls_ready(pool, certs, feature_compatibility):
-        capability = constants.GATEWAY_CAPABILITY_TCP_DEFAULT_POOL_TLS
+    def _tcp_default_targets_safe_after_error(targets, applied):
+        previous = set()
+        start = 0
+        for target in applied:
+            end = start + target['weight']
+            previous.add((start, end, target.get('pool_id')))
+            start = end
+        if start != sum(target['weight'] for target in targets):
+            previous.clear()
+        result = []
+        start = 0
+        for target in targets:
+            weight = target['weight']
+            end = start + weight
+            if (start, end, target.get('pool_id')) not in previous:
+                target = {'reject': True, 'weight': weight}
+            result.append(target)
+            start = end
+        return result
+
+    @staticmethod
+    def _tcp_default_pool_tls_ready(
+            pool, certs, feature_compatibility,
+            capability=constants.GATEWAY_CAPABILITY_TCP_DEFAULT_POOL_TLS):
         if (not feature_compatibility.get(capability) or not pool.enabled or
                 pool.provisioning_status == constants.DELETED or
                 not certs or certs.get('closed') or not certs.get('ca_cert') or

@@ -145,7 +145,13 @@ class HaproxyAmphoraLoadBalancerDriver(
 
         opted_in, protected = self._backend_tls_pools(loadbalancer)
         fallback, withdrawn = self._frontend_fallback_listeners(loadbalancer)
+        tcp_default_targets = (
+            utils.has_tcp_default_target_pools(loadbalancer) or
+            bool(utils.pending_tcp_default_target_revisions(loadbalancer)))
+        verify_tcp_defaults = finalizing_failover and tcp_default_targets
         with (
+            self._tcp_default_publication_result(
+                loadbalancer, required=verify_tcp_defaults),
             self._otlp_render_results(loadbalancer) as tracing_options,
             self._observe_http_persistence(
                 loadbalancer, target_id=amphora.id) as persistence_options,
@@ -158,11 +164,14 @@ class HaproxyAmphoraLoadBalancerDriver(
                     utils.active_http_retry_backoff_policies(loadbalancer) or
                     utils.has_tls_sni_passthrough_weighted_policies(
                         loadbalancer, active=False) or
+                    tcp_default_targets or
                     self._http_persistence_capabilities(loadbalancer)):
                 peers = {amp.id: amp for amp in loadbalancer.amphorae
                          if amp.status != consts.DELETED}
                 peers[amphora.id] = amphora
-                targets = list(peers.values()) if system_options else [amphora]
+                targets = (list(peers.values()) if
+                           system_options or verify_tcp_defaults else
+                           [amphora])
                 self._update_protected_tls_listeners(
                     loadbalancer, targets, peers.values(), protected,
                     fallback, withdrawn, timeout_dict=timeout_dict,
@@ -170,6 +179,8 @@ class HaproxyAmphoraLoadBalancerDriver(
                         'require_weighted_passthrough_topology': True,
                         'require_header_name_topology': True}
                        if finalizing_failover else {}),
+                    **({'require_tcp_default_target_topology': True}
+                       if verify_tcp_defaults else {}),
                     **tracing_options, **persistence_options,
                     **system_options)
             else:
@@ -749,10 +760,37 @@ class HaproxyAmphoraLoadBalancerDriver(
         return tuple(sorted((amp.id, amp.role) for amp in amphorae
                             if amp.status == consts.AMPHORA_ALLOCATED))
 
+    @contextlib.contextmanager
+    def _tcp_default_publication_result(self, loadbalancer, *, required):
+        revisions = (utils.pending_tcp_default_target_revisions(loadbalancer)
+                     if required else {})
+        if not revisions:
+            yield
+            return
+        repository = repo.ListenerRepository()
+        try:
+            yield
+            peers = self._allocated_amphorae(loadbalancer)
+            topology = (loadbalancer.topology,
+                        {amp.id: amp.role for amp in peers},
+                        loadbalancer.enabled)
+            with db_api.session().begin() as session:
+                confirmed = repository.set_tcp_default_targets_statuses(
+                    session, loadbalancer.id, revisions, consts.ACTIVE,
+                    topology=topology)
+            if not confirmed:
+                raise driver_except.ListenerProvisioningError()
+        except Exception:
+            with db_api.session().begin() as session:
+                repository.set_tcp_default_targets_statuses(
+                    session, loadbalancer.id, revisions, consts.ERROR)
+            raise
+
     def update(self, loadbalancer, *, l7policy_activation=False,
                l7policy_restoration=False, tcp_member_batch=False,
                http_header_name_withdrawal=False,
-               require_http_header_name_256=False):
+               require_http_header_name_256=False,
+               tcp_default_targets_update=False):
         amphorae = [amphora for amphora in loadbalancer.amphorae
                     if amphora.status != consts.DELETED]
         if tcp_member_batch and not any(
@@ -763,6 +801,10 @@ class HaproxyAmphoraLoadBalancerDriver(
             loadbalancer)
         weighted_passthrough = utils.has_tls_sni_passthrough_weighted_policies(
             loadbalancer, active=False)
+        verify_tcp_defaults = (
+            tcp_default_targets_update or
+            utils.has_tcp_default_target_pools(loadbalancer) or
+            bool(utils.pending_tcp_default_target_revisions(loadbalancer)))
         header_name_256 = (
             require_http_header_name_256 or
             validate.http_header_name_256_listeners(loadbalancer,
@@ -771,8 +813,10 @@ class HaproxyAmphoraLoadBalancerDriver(
             raise driver_except.HttpHeaderName256Unsupported()
         if (not amphorae and
                 (l7policy_activation or tcp_member_batch or backoff_policies or
-                 weighted_passthrough)):
-            raise driver_except.ListenerProvisioningError()
+                 weighted_passthrough or verify_tcp_defaults)):
+            with self._tcp_default_publication_result(
+                    loadbalancer, required=verify_tcp_defaults):
+                raise driver_except.ListenerProvisioningError()
         tcp_batch_configs = [] if tcp_member_batch else None
         batch_options = (
             {'tcp_batch_configs': tcp_batch_configs}
@@ -780,6 +824,8 @@ class HaproxyAmphoraLoadBalancerDriver(
         opted_in, protected = self._backend_tls_pools(loadbalancer)
         fallback, withdrawn = self._frontend_fallback_listeners(loadbalancer)
         with (
+            self._tcp_default_publication_result(
+                loadbalancer, required=verify_tcp_defaults),
             self._otlp_render_results(loadbalancer) as tracing_options,
             self._observe_http_persistence(
                 loadbalancer) as persistence_options,
@@ -788,7 +834,7 @@ class HaproxyAmphoraLoadBalancerDriver(
             if (amphorae and
                     (opted_in or fallback or withdrawn or
                      backoff_policies or weighted_passthrough or
-                     header_name_256 or
+                     header_name_256 or verify_tcp_defaults or
                      self._http_persistence_capabilities(loadbalancer))):
                 return self._update_protected_tls_listeners(
                     loadbalancer, amphorae, amphorae, protected, fallback,
@@ -803,6 +849,8 @@ class HaproxyAmphoraLoadBalancerDriver(
                        if header_name_256 else {}),
                     **({'require_weighted_passthrough_topology': True}
                        if weighted_passthrough else {}),
+                    **({'require_tcp_default_target_topology': True}
+                       if verify_tcp_defaults else {}),
                     **tracing_options, **batch_options, **persistence_options,
                     **system_options)
             for amphora in amphorae:
@@ -841,7 +889,8 @@ class HaproxyAmphoraLoadBalancerDriver(
         backoff_votes = {}
         verify_publication = (verify_publication or
                               utils.has_tls_sni_passthrough_weighted_policies(
-                                  loadbalancer))
+                                  loadbalancer) or
+                              utils.has_tcp_default_target_pools(loadbalancer))
         completed = False
         try:
             for (amphora, _, persistence_results, tracing_results,
@@ -892,9 +941,13 @@ class HaproxyAmphoraLoadBalancerDriver(
             loadbalancer, active=False)
         header_name_256 = validate.http_header_name_256_listeners(
             loadbalancer)
+        tcp_default_targets = (
+            utils.has_tcp_default_target_pools(loadbalancer) or
+            bool(utils.pending_tcp_default_target_revisions(loadbalancer)))
         coordinated = (opted_in or bool(fallback or withdrawn) or
                        header_name_256 or
                        tracing_pair or retry_backoff or weighted_passthrough or
+                       tcp_default_targets or
                        self._http_persistence_capabilities(loadbalancer))
         if coordinated and amphora_index == 0:
             system_ca = bool(utils.backend_tls_system_ca_pool_ids(
@@ -906,9 +959,11 @@ class HaproxyAmphoraLoadBalancerDriver(
                 if (amphorae_status.get(amp.id, {}).get(consts.UNREACHABLE) or
                     (amp.id not in amphorae_status and
                      (tracing_pair or retry_backoff or weighted_passthrough or
-                      system_ca or header_name_256)))
+                      system_ca or header_name_256 or tcp_default_targets)))
             }
             with (
+                self._tcp_default_publication_result(
+                    loadbalancer, required=tcp_default_targets),
                 self._otlp_render_results(loadbalancer) as tracing_options,
                 self._observe_http_persistence(
                     loadbalancer) as persistence_options,
@@ -926,6 +981,8 @@ class HaproxyAmphoraLoadBalancerDriver(
                        if retry_backoff else {}),
                     **({'require_weighted_passthrough_topology': True}
                        if weighted_passthrough else {}),
+                    **({'require_tcp_default_target_topology': True}
+                       if tcp_default_targets else {}),
                     **tracing_options, **persistence_options,
                     **system_options)
         return coordinated
@@ -1160,7 +1217,8 @@ class HaproxyAmphoraLoadBalancerDriver(
             require_weighted_passthrough_topology=False,
             system_ca_observed=None, require_header_name_topology=False,
             http_header_name_withdrawal=False,
-            require_http_header_name_256=False):
+            require_http_header_name_256=False,
+            require_tcp_default_target_topology=False):
         # Preflight the pair before staging material or reloading either peer.
         header_name_256 = validate.http_header_name_256_listeners(
             loadbalancer, include_new_rules=require_header_name_topology and
@@ -1210,7 +1268,9 @@ class HaproxyAmphoraLoadBalancerDriver(
         complete_topology = False
         weighted_present = utils.has_tls_sni_passthrough_weighted_policies(
             loadbalancer, active=False)
-        if persistence_capabilities or backoff_policies or weighted_present:
+        tcp_default_targets = utils.has_tcp_default_target_pools(loadbalancer)
+        if (persistence_capabilities or backoff_policies or weighted_present or
+                tcp_default_targets or require_tcp_default_target_topology):
             topology_peers = {amp.id: amp for amp in amphorae}
             try:
                 topology_peers.update(
@@ -1238,6 +1298,31 @@ class HaproxyAmphoraLoadBalancerDriver(
                     requests.RequestException, ValueError):
                 probe_failures.add(amphora.id)
                 details[amphora.id] = {}
+
+        tcp_default_capability = (
+            consts.GATEWAY_CAPABILITY_TCP_WEIGHTED_DEFAULT_POOLS)
+        tcp_default_errors = {}
+        if tcp_default_targets:
+            tcp_default_errors = {
+                amp_id: driver_except.ListenerProvisioningError()
+                for amp_id in topology_peers
+                if (details[amp_id].get(tcp_default_capability) is not True or
+                    details[amp_id].get(
+                        consts.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME)
+                    is not True)}
+            supported = complete_topology and not tcp_default_errors
+            for detail in details.values():
+                detail[tcp_default_capability] = supported
+            if not supported:
+                LOG.warning('Cannot qualify weighted default TCP pools for '
+                            'load balancer %s. Unqualified Amphorae: %s.',
+                            loadbalancer.id, sorted(tcp_default_errors))
+        tcp_default_topology_missing = (
+            require_tcp_default_target_topology and not complete_topology)
+        if require_tcp_default_target_topology:
+            tcp_default_errors.update(dict.fromkeys(
+                set(topology_peers) - requested_amp_ids,
+                driver_except.ListenerProvisioningError()))
 
         header_name_closed = set()
         if header_name_required:
@@ -1353,10 +1438,15 @@ class HaproxyAmphoraLoadBalancerDriver(
         clear_tcp_default_pools = {
             listener.default_pool_id for listener in tcp_tls_listeners
             if getattr(listener, 'tcp_default_pool_tls', False) is True}
+        weighted_tcp_pools = set().union(*(
+            utils.tcp_default_target_pool_ids(listener)
+            for listener in tcp_tls_listeners))
         terminated_tcp_pools = {
             pool.id for listener in tcp_tls_listeners
             if getattr(listener, 'tcp_tls_termination', False) is True
             for pool in listener.pools}
+        weighted_only_pools = weighted_tcp_pools - (
+            clear_tcp_default_pools | terminated_tcp_pools)
         for pool_id, (listener, pool) in protected.items():
             required = [consts.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME]
             system_ca = getattr(pool, 'backend_tls_system_ca', False) is True
@@ -1371,7 +1461,8 @@ class HaproxyAmphoraLoadBalancerDriver(
                 if pool_id in clear_tcp_default_pools:
                     required.append(
                         consts.GATEWAY_CAPABILITY_TCP_DEFAULT_POOL_TLS)
-                if (pool_id not in clear_tcp_default_pools or
+                if (pool_id not in (clear_tcp_default_pools |
+                                    weighted_only_pools) or
                         pool_id in terminated_tcp_pools):
                     required.append(
                         consts.GATEWAY_CAPABILITY_TCP_TLS_BACKEND_AUTH)
@@ -1418,10 +1509,12 @@ class HaproxyAmphoraLoadBalancerDriver(
                 certs[amphora.id][pool_id] = {'closed': True}
 
         if (tcp_batch_configs is not None and not weighted_partial and
-                closed - system_ca_pools):
+                closed - system_ca_pools - weighted_only_pools):
             raise driver_except.ListenerProvisioningError()
 
         reload_errors = dict(weighted_errors)
+        if require_tcp_default_target_topology:
+            reload_errors.update(tcp_default_errors)
         if system_ca_observed is not None:
             reload_errors.update(dict.fromkeys(
                 unreachable, driver_except.ListenerProvisioningError()))
@@ -1447,8 +1540,11 @@ class HaproxyAmphoraLoadBalancerDriver(
         def publish(amphora, *, tcp_only=False, **options):
             verify_publication = (
                 verify_header_publication or
+                require_tcp_default_target_topology or
                 (weighted_present and details[amphora.id].get(
-                    weighted_capability) is True))
+                    weighted_capability) is True) or
+                (tcp_default_targets and details[amphora.id].get(
+                    tcp_default_capability) is True))
             return self._update_amphora_listeners(
                 loadbalancer, amphora, timeout_dict=timeout_dict,
                 amp_details=details[amphora.id],
@@ -1486,7 +1582,8 @@ class HaproxyAmphoraLoadBalancerDriver(
                     http_persistence_observed, otlp_observed,
                     system_ca_observed,
                     closing=closing_system_ca or closing_header,
-                    verify_publication=verify_header_publication)
+                    verify_publication=(verify_header_publication or
+                                        require_tcp_default_target_topology))
             except Exception as error:
                 if not system_ca_pools and not verify_header_publication:
                     raise
@@ -1528,7 +1625,10 @@ class HaproxyAmphoraLoadBalancerDriver(
                 raise next(iter(reload_errors.values()))
             if batch_error is not None:
                 raise batch_error
-            if any(pool.id in closed and pool.tcp_member_batch_id not in (
+            if tcp_default_topology_missing:
+                raise driver_except.ListenerProvisioningError()
+            if any(pool.id in closed - weighted_only_pools and
+                   pool.tcp_member_batch_id not in (
                     None, consts.TCP_MEMBER_BATCH_FAILED)
                    for pool in loadbalancer.pools):
                 raise driver_except.ListenerProvisioningError()
@@ -1579,7 +1679,7 @@ class HaproxyAmphoraLoadBalancerDriver(
                 raise driver_except.CoordinatedListenerUpdateError(
                     reload_errors)
             raise next(iter(reload_errors.values()))
-        if weighted_topology_missing:
+        if weighted_topology_missing or tcp_default_topology_missing:
             raise driver_except.ListenerProvisioningError()
         if l7policy_activation:
             return recovered
@@ -2008,7 +2108,12 @@ class HaproxyAmphoraLoadBalancerDriver(
             if l7policy.redirect_pool:
                 pools.setdefault(l7policy.redirect_pool.id,
                                  l7policy.redirect_pool)
+        tcp_default_pools = utils.tcp_default_target_pool_ids(listener)
         for pool in pools.values():
+            if pool.id in tcp_default_pools:
+                # Weighted TLS material comes from coordinated staging.
+                # Clear targets ignore unrelated legacy TLS references.
+                continue
             # Protected pools are staged once for the pair, independently of
             # the listener's own credentials and the legacy pool path.
             if utils.is_protected_backend_tls_pool(pool):
