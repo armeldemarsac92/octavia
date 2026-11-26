@@ -17,6 +17,9 @@
 global
     daemon
     user nobody
+    {% if loadbalancer.get('http_header_name_256') %}
+    {{ constants.HAPROXY_HTTP_HEADER_NAME_256_OPTION }}
+    {% endif %}
     {% if loadbalancer.external_auth_body_buffer_bytes is defined %}
     tune.octavia-auth-body-max-memory {{ loadbalancer.external_auth_body_buffer_bytes }}
     {% endif %}

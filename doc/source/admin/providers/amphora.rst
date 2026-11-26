@@ -410,10 +410,39 @@ disable them or delete them. Drain them before downgrading the workers.
 
 Amphora compares the UTF-8 bytes of the configured value with the request
 field content. A MySQL-compatible database connection must support
-``utf8mb4`` for four-byte characters. HAProxy rejects field names over
-255 bytes before evaluating rules. The API value character limit applies
+``utf8mb4`` for four-byte characters. The API value character limit applies
 independently of the byte limits imposed by the HTTP transport, HAProxy
 request buffers and the total size of the request headers.
+
+To accept a 256-byte ASCII field name, qualify the Amphora agent and
+the native HAProxy build ending in ``-http-header-name-256-v1`` on every
+eligible Amphora, including standby and replacement images. Keep
+exact header matching enabled and set the additional enrollment on
+the API and workers.
+
+.. code-block:: ini
+
+   [api_settings]
+   enabled_http_header_exact_providers = amphora
+   enabled_http_header_name_256_providers = amphora
+
+The provider then advertises ``http_header_name_256_v1``. Octavia checks
+the Amphora capability before publishing a configuration that depends
+on it. The generated global ``tune.octavia.http-header-name-256`` directive
+enables the extended limit for the HAProxy process when it serves an
+enabled 256-byte exact header rule. HAProxy otherwise retains its
+255-byte parsing limit.
+
+Remove the additional enrollment to block new and restored 256-byte
+matches. Workers recheck enrollment for queued changes that introduce or
+reactivate a dependent match. A publication for an active/standby load
+balancer requires both allocated roles and support on both Amphorae.
+If a pair cannot be qualified, a withdrawal can still close the affected
+frontends on reachable Amphorae while applying independent closures.
+To withdraw an active policy with several predicates, disable the policy
+before removing a predicate that would widen its match. Disable or remove
+every remaining dependency before replacing eligible Amphorae with older
+images or downgrading the workers.
 
 
 Exact HTTP method matching

@@ -112,6 +112,45 @@ class TestAmphoraDriverTasks(base.TestCase):
             topology=topology, enabled=True, listeners=[listener])
 
     @mock.patch('octavia.db.repositories.LoadBalancerRepository.get')
+    def test_256_byte_header_stops_unqualified_failover(
+            self, mock_lb_get, mock_driver, mock_generate_uuid, mock_log,
+            mock_get_session, mock_listener_repo_get,
+            mock_listener_repo_update, mock_amphora_repo_get,
+            mock_amphora_repo_update):
+        rule = data_models.L7Rule(
+            key='X-' + 'a' * 254, type=constants.L7RULE_TYPE_HTTP_HEADER_EXACT,
+            enabled=True, provisioning_status=constants.ACTIVE)
+        policy = data_models.L7Policy(enabled=True, l7rules=[rule])
+        lb = data_models.LoadBalancer(
+            topology=constants.TOPOLOGY_ACTIVE_STANDBY, enabled=True,
+            listeners=[data_models.Listener(
+                id=LISTENER_ID, enabled=True, protocol=constants.PROTOCOL_HTTP,
+                l7policies=[policy])])
+        mock_lb_get.return_value = lb
+        mock_amphora_repo_get.return_value = _db_amphora_mock
+        mock_driver.update_amphora_listeners.side_effect = (
+            driver_except.ListenerProvisioningError())
+        self.assertRaises(
+            driver_except.ListenerProvisioningError,
+            amphora_driver_tasks.AmpListenersUpdate().execute,
+            _LB_mock, _amphora_mock)
+
+        mock_driver.update_failover_listeners.side_effect = (
+            driver_except.CoordinatedListenerUpdateError({
+                AMP_ID: driver_except.ListenerProvisioningError()}))
+        self.assertRaises(
+            driver_except.CoordinatedListenerUpdateError,
+            amphora_driver_tasks.AmphoraIndexListenerUpdate().execute,
+            _LB_mock, 0, [_amphora_mock], {}, AMP_ID)
+
+        mock_driver.reload.side_effect = (
+            driver_except.ListenerProvisioningError())
+        self.assertRaises(
+            driver_except.ListenerProvisioningError,
+            amphora_driver_tasks.AmphoraIndexListenersReload().execute,
+            _LB_mock, 0, [_amphora_mock], {}, AMP_ID)
+
+    @mock.patch('octavia.db.repositories.LoadBalancerRepository.get')
     def test_amp_listeners_update(self,
                                   mock_lb_get,
                                   mock_driver,

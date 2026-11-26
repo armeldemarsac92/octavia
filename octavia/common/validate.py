@@ -546,6 +546,37 @@ def _validate_literal_http_path(l7rule):
             'of at most 1024 ASCII bytes.'))
 
 
+def is_http_header_name_256(rule_type, key):
+    return (rule_type == constants.L7RULE_TYPE_HTTP_HEADER_EXACT and
+            isinstance(key, str) and
+            len(key) == constants.MAX_L7RULE_HTTP_HEADER_EXACT_KEY_LENGTH)
+
+
+def http_header_name_256_listeners(loadbalancer, listeners=None, *,
+                                   include_new_rules=False):
+    """Identify frontends with rendered or newly staged extended names."""
+    if loadbalancer is None:
+        return set()
+    inactive = (constants.PENDING_DELETE, constants.DELETED)
+    if listeners is None:
+        listeners = loadbalancer.listeners
+    return {
+        listener.id for listener in listeners
+        if (listener.provisioning_status not in inactive and
+            listener.protocol in (constants.PROTOCOL_HTTP,
+                                  constants.PROTOCOL_TERMINATED_HTTPS))
+        if any(
+            is_http_header_name_256(rule.type, rule.key) and (
+                (include_new_rules and
+                 rule.provisioning_status == constants.PENDING_CREATE) or
+                (loadbalancer.enabled and listener.enabled and
+                 policy.enabled and rule.enabled))
+            for policy in listener.l7policies
+            if policy.provisioning_status not in inactive
+            for rule in policy.l7rules
+            if rule.provisioning_status not in inactive)}
+
+
 # Note that we can evaluate this outside the context of any L7 Policy because
 # L7 rules must be internally consistent.
 def l7rule_data(l7rule, *, validate_request_value=False):
@@ -574,7 +605,8 @@ def l7rule_data(l7rule, *, validate_request_value=False):
                 'HTTP_QUERY_PARAM_EXACT requires a valid UTF-8 value.')) from e
         return True
 
-    if l7rule.key and len(l7rule.key) > constants.MAX_L7RULE_KEY_LENGTH:
+    if (l7rule.type != constants.L7RULE_TYPE_HTTP_HEADER_EXACT and
+            l7rule.key and len(l7rule.key) > constants.MAX_L7RULE_KEY_LENGTH):
         raise exceptions.InvalidL7Rule(msg=_(
             'L7 rule keys are limited to 255 characters.'))
     long_http_hostname = is_long_http_hostname_regex(
@@ -591,7 +623,8 @@ def l7rule_data(l7rule, *, validate_request_value=False):
                 'HTTP_HEADER_EXACT requires EQUAL_TO.'))
         if not l7rule.key or not _HEADER_NAME_RE.fullmatch(l7rule.key):
             raise exceptions.InvalidL7Rule(msg=_(
-                'HTTP_HEADER_EXACT requires a valid HTTP header name.'))
+                'HTTP_HEADER_EXACT requires an HTTP header name of '
+                '1 to 256 ASCII bytes.'))
         if (len(l7rule.value) > constants.MAX_L7RULE_HEADER_VALUE_LENGTH or
                 l7rule.value != l7rule.value.strip(' \t') or
                 _HEADER_VALUE_CONTROL_RE.search(l7rule.value)):

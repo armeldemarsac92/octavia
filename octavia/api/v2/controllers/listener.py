@@ -124,9 +124,17 @@ def validate_policy_options_on_create(
             policy['https_listener_hostname'] = hostname
         action = policy.get('action')
         for rule in policy.get('rules') or []:
+            exact_header = (
+                rule['type'] == constants.L7RULE_TYPE_HTTP_HEADER_EXACT)
+            if exact_header:
+                try:
+                    validate.l7rule_data(data_models.L7Rule.from_dict(rule))
+                except exceptions.InvalidL7Rule as e:
+                    raise exceptions.L7RuleValidation(error=e) from e
             driver_utils.validate_l7rule_context(
                 driver, rule['type'], protocol,
-                compare_type=rule['compare_type'], value=rule['value'],
+                compare_type=rule['compare_type'], key=rule.get('key'),
+                value=rule['value'],
                 tcp_tls_termination=tcp_tls_termination)
             long_http_hostname = validate.is_long_http_hostname_regex(
                 rule['type'], rule['compare_type'], rule['value'])

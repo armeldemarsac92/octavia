@@ -465,6 +465,12 @@ class JinjaTemplater:
             tls_certs,
             feature_compatibility, otlp_tls_certs=otlp_tls_certs,
             amp_details=amp_details)
+        if validate.http_header_name_256_listeners(
+                loadbalancer_obj, listeners):
+            capability = constants.GATEWAY_CAPABILITY_HTTP_HEADER_NAME_256
+            if (amp_details or {}).get(capability) is not True:
+                raise driver_except.ListenerProvisioningError()
+            loadbalancer['http_header_name_256'] = True
         if system_ca_results is not None:
             for pool in (loadbalancer.get('grpc_auth_pools', []) +
                          loadbalancer.get('listener_auth_pools', [])):

@@ -1781,6 +1781,35 @@ class TestInitialL7Rules(base.BaseAPITest):
         self.assertFalse(any(policy['admin_state_up']
                              for policy in self._activation_policies(path)))
 
+    def test_256_byte_header_initial_rules_and_batch_recheck(self):
+        option = 'enabled_http_header_name_256_providers'
+        self.conf.config(
+            group='api_settings',
+            enabled_http_header_exact_providers=['amphora'])
+        self.rules[1].update(type='HTTP_HEADER_EXACT',
+                             compare_type='EQUAL_TO',
+                             key='X-' + 'a' * 254, value='one, other')
+        self._post_policy(status=501)
+        self.rpc.cast.assert_not_called()
+        self.conf.config(group='api_settings', **{option: ['amphora']})
+        path, payload = self._prepare_activation_group()
+        policy = self._activation_policies(path)[0]
+        saved = next(rule for rule in policy['rules']
+                     if rule['type'] == 'HTTP_HEADER_EXACT')
+        self.assertEqual(self.rules[1],
+                         {field: saved[field] for field in self.rules[1]})
+        self.conf.config(group='api_settings', **{option: []})
+        self.post(path, payload, status=501)
+        self.rpc.cast.assert_not_called()
+
+        self.conf.config(group='api_settings', **{option: ['amphora']})
+        self.post(path, payload, status=204)
+        delivery = self.rpc.cast.call_args
+        self.conf.config(group='api_settings', **{option: []})
+        endpoints.Endpoints().activate_l7policies({}, **delivery.kwargs)
+        self.assertFalse(any(policy['admin_state_up']
+                             for policy in self._activation_policies(path)))
+
     def test_create_initial_rules_in_one_worker_operation(self):
         response = self._post_policy()['l7policy']
         self.assertFalse(response['admin_state_up'])
@@ -6729,11 +6758,14 @@ class TestL7Policy(base.BaseAPITest):
         listener['protocol'] = 'TCP'
         self.post(self.LBS_PATH, body, status=400)
         listener['protocol'] = 'HTTP'
-        original_key = rule['key']
         rule['key'] = 'X-' + 'a' * 254
+        self.post(self.LBS_PATH, body, status=501)
+        self.conf.config(group='api_settings',
+                         enabled_http_header_name_256_providers=['amphora'])
+        rule['key'] += 'a'
         self.post(self.LBS_PATH, body, status=400)
         rpc.return_value.cast.assert_not_called()
-        rule['key'] = original_key
+        rule['key'] = rule['key'][:-1]
         lb = self.post(self.LBS_PATH, body).json['loadbalancer']
         saved_rule = lb['listeners'][0]['l7policies'][0]['rules'][0]
         self.assertEqual(rule, {key: saved_rule[key] for key in rule})

@@ -292,6 +292,20 @@ frontend probe
 """
 
 
+_HTTP_HEADER_NAME_256_PROBE = f"""global
+    {constants.HAPROXY_HTTP_HEADER_NAME_256_OPTION}
+defaults
+    mode http
+    timeout client 1s
+    timeout connect 1s
+    timeout server 1s
+frontend probe
+    bind 127.0.0.1:12345
+    acl long_name req.fhdr({"a" * 256}) -m bin 796573
+    http-request return status 204 if long_name
+"""
+
+
 def get_haproxy_capabilities():
     haproxy_cmd = CONF.haproxy_amphora.haproxy_cmd
     try:
@@ -332,6 +346,17 @@ def get_haproxy_capabilities():
     tracing_backoff = f'{otlp_tracing}-route-retry-backoff-v1'
     grpc_mirror = f'{backoff}-grpc-mirror-v1 '
     tracing_grpc_mirror = f'{tracing_backoff}-grpc-mirror-v1 '
+    header_name_suffix = '-http-header-name-256-v1'
+    # Preserve the complete set of existing probes for each native build.
+    for legacy in (grpc_mirror, tracing_grpc_mirror):
+        extended = f'{legacy.rstrip()}{header_name_suffix} '
+        if output.startswith(extended):
+            output = legacy + output[len(extended):]
+            if _valid_haproxy_config(
+                    haproxy_cmd, _HTTP_HEADER_NAME_256_PROBE):
+                capability = constants.GATEWAY_CAPABILITY_HTTP_HEADER_NAME_256
+                capabilities[capability] = True
+            break
     retry_budget_builds = (
         f'{retry_budget} ', f'{backoff} ', grpc_mirror)
     otlp_tracing_builds = (

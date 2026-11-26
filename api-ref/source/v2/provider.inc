@@ -574,6 +574,12 @@ terminated HTTPS listeners. This capability requires the provider name in
 ``[api_settings] enabled_http_header_exact_providers`` after the regional
 database, API services, workers and Amphora fleet are upgraded.
 
+``http_header_name_256_v1`` extends ``HTTP_HEADER_EXACT`` to 256-byte
+ASCII field names. This capability requires ``http_header_exact_v1``
+and explicit enrollment in
+``[api_settings] enabled_http_header_name_256_providers`` after
+qualifying the regional Amphora fleet.
+
 ``http_method_match_v1`` enables ``HTTP_METHOD`` rules for HTTP and
 terminated HTTPS listeners. This capability requires the provider name in
 ``[api_settings] enabled_http_method_match_providers``. Apply the database

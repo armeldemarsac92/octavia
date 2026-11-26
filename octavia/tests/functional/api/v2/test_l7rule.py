@@ -17,10 +17,12 @@ from oslo_config import cfg
 from oslo_config import fixture as oslo_fixture
 from oslo_utils import uuidutils
 
+from octavia.amphorae.driver_exceptions import exceptions as driver_except
 from octavia.common import constants
 import octavia.common.context
 from octavia.common import data_models
 from octavia.common import exceptions
+from octavia.controller.worker.v2.tasks import amphora_driver_tasks
 from octavia.db import repositories
 from octavia.tests.functional.api.v2 import base
 
@@ -711,7 +713,7 @@ class TestL7Rule(base.BaseAPITest):
         self.set_lb_status(lb_id)
 
         key = 'X-' + 'a' * 253
-        oversized_key = key + 'a'
+        extended_key = key + 'a'
         value = 'one, ' + 'x' * 4091
         rpc.return_value.cast.reset_mock()
         self.create_l7rule(policy['id'], 'HTTP_HEADER_EXACT', 'EQUAL_TO',
@@ -719,9 +721,9 @@ class TestL7Rule(base.BaseAPITest):
         self.conf.config(group='api_settings',
                          enabled_http_header_exact_providers=['amphora'])
         self.create_l7rule(policy['id'], 'HTTP_HEADER_EXACT', 'EQUAL_TO',
-                           value, key=oversized_key, status=400)
+                           value, key=extended_key, status=501)
         self.create_l7rule(policy['id'], 'HEADER', 'EQUAL_TO',
-                           'one', key=oversized_key, status=400)
+                           'one', key=extended_key, status=400)
         self.create_l7rule(policy['id'], 'HEADER', 'EQUAL_TO',
                            'x' * 256, key='X-Version', status=400)
         self.create_l7rule(policy['id'], 'HTTP_HEADER_EXACT', 'REGEX',
@@ -739,7 +741,7 @@ class TestL7Rule(base.BaseAPITest):
                                        l7rule_id=rule['id'])
         self.set_lb_status(lb_id)
         rpc.return_value.cast.reset_mock()
-        self.put(path, {'rule': {'key': oversized_key}}, status=400)
+        self.put(path, {'rule': {'key': extended_key}}, status=501)
         self.put(path, {'rule': {'type': 'HEADER'}}, status=400)
         rpc.return_value.cast.assert_not_called()
         self.assertEqual(key, self.get(path).json['rule']['key'])
@@ -789,6 +791,151 @@ class TestL7Rule(base.BaseAPITest):
         reopened = self.put(policy_path, {
             'l7policy': {'admin_state_up': True}}).json['l7policy']
         self.assertTrue(reopened['admin_state_up'])
+
+    @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
+    def test_256_byte_exact_header_admission_and_withdrawal(self, rpc):
+        options = self.conf.config
+        extended = 'enabled_http_header_name_256_providers'
+        options(group='api_settings',
+                enabled_http_header_exact_providers=['amphora'],
+                **{extended: ['amphora']})
+        lb_id = self.create_load_balancer(
+            uuidutils.generate_uuid(),
+            provider='amphora')['loadbalancer']['id']
+        self.set_lb_status(lb_id)
+        listener_id = self.create_listener(
+            'HTTP', 80, lb_id)['listener']['id']
+        self.set_lb_status(lb_id)
+        policy_id = self.create_l7policy(
+            listener_id, 'REJECT')['l7policy']['id']
+        self.set_lb_status(lb_id)
+        key = 'X-' + 'a' * 254
+        rule_type = 'HTTP_HEADER_EXACT'
+        value = 'one, café'
+        for invalid_key in (key + 'a', key[:-1] + 'é'):
+            self.create_l7rule(policy_id, rule_type, 'EQUAL_TO', value,
+                               key=invalid_key, status=400)
+        rule = self.create_l7rule(policy_id, rule_type, 'EQUAL_TO', value,
+                                  key=key)['rule']
+        self.assertEqual(key, rpc.return_value.cast.call_args.kwargs[
+            'l7rule']['key'])
+        rule_path = self.L7RULE_PATH.format(l7policy_id=policy_id,
+                                            l7rule_id=rule['id'])
+        self.set_lb_status(lb_id)
+        self.assertEqual(key, self.get(rule_path).json['rule']['key'])
+        updated_key = key[:-1] + 'b'
+        self.put(rule_path, {'rule': {'key': updated_key}})
+        self.set_lb_status(lb_id)
+        self.assertEqual(updated_key,
+                         self.get(rule_path).json['rule']['key'])
+        self.create_l7rule(policy_id, 'PATH', 'STARTS_WITH', '/private')
+        self.set_lb_status(lb_id)
+
+        options(group='api_settings', **{extended: []})
+        self.put(rule_path, {'rule': {'value': 'other'}}, status=501)
+        self.put(rule_path, {'rule': {'key': 'X-Edition'}}, status=501)
+        self.assertEqual(updated_key,
+                         self.get(rule_path).json['rule']['key'])
+        self.put(rule_path, {'rule': {'admin_state_up': False}}, status=501)
+        self.delete(rule_path, status=501)
+        listener_path = self.LISTENER_PATH.format(listener_id=listener_id)
+        for parent_path, tag in (
+                (listener_path, 'listener'),
+                (self.LB_PATH.format(lb_id=lb_id), 'loadbalancer')):
+            self.put(parent_path, {tag: {'admin_state_up': False}})
+            self.set_lb_status(lb_id)
+            self.put(parent_path, {tag: {'admin_state_up': True}}, status=501)
+            options(group='api_settings', **{extended: ['amphora']})
+            self.put(parent_path, {tag: {'admin_state_up': True}})
+            self.set_lb_status(lb_id)
+            options(group='api_settings', **{extended: []})
+        policy_path = self.L7POLICY_PATH.format(l7policy_id=policy_id)
+        self.put(policy_path, {'l7policy': {'admin_state_up': False}})
+        self.set_lb_status(lb_id)
+        self.put(policy_path, {'l7policy': {'admin_state_up': True}},
+                 status=501)
+        self.put(rule_path, {'rule': {'key': 'X-Edition'}})
+        self.set_lb_status(lb_id)
+        self.put(policy_path, {'l7policy': {'admin_state_up': True}})
+
+    @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
+    def test_queued_256_byte_header_rechecks_capability(self, rpc):
+        lb_id = self.create_load_balancer(
+            uuidutils.generate_uuid(),
+            provider='amphora')['loadbalancer']['id']
+        self.set_lb_status(lb_id)
+        listener = self.create_listener('HTTP', 80, lb_id)['listener']
+        self.set_lb_status(lb_id)
+        policy = self.create_l7policy(listener['id'], 'REJECT')['l7policy']
+        self.set_lb_status(lb_id)
+        self.conf.config(
+            group='api_settings',
+            enabled_http_header_exact_providers=['amphora'],
+            enabled_http_header_name_256_providers=['amphora'])
+        key = 'X-' + 'a' * 254
+        declared = self.create_l7rule(policy['id'], 'HTTP_HEADER_EXACT',
+                                      'EQUAL_TO', 'yes', key=key)['rule']
+        task = amphora_driver_tasks.ListenersUpdate()
+        path = self.L7RULE_PATH.format(l7policy_id=policy['id'],
+                                       l7rule_id=declared['id'])
+        with mock.patch.object(task.amphora_driver, 'update') as update:
+            self.conf.config(group='api_settings',
+                             enabled_http_header_name_256_providers=[])
+            self.assertRaises(exceptions.ProviderUnsupportedOptionError,
+                              task.execute, lb_id)
+            update.assert_not_called()
+            self.assertFalse(self.get(path).json['rule']['admin_state_up'])
+
+            self.set_lb_status(lb_id)
+            self.conf.config(
+                group='api_settings',
+                enabled_http_header_name_256_providers=['amphora'])
+            self.put(path, {'rule': {'admin_state_up': True}})
+            delivery = rpc.return_value.cast.call_args.kwargs
+            self.conf.config(group='api_settings',
+                             enabled_http_header_exact_providers=[])
+            self.assertRaises(exceptions.ProviderUnsupportedOptionError,
+                              task.execute, lb_id, delivery['original_l7rule'],
+                              delivery['l7rule_updates'])
+            update.assert_not_called()
+            self.assertFalse(self.get(path).json['rule']['admin_state_up'])
+            self.set_lb_status(lb_id)
+            self.conf.config(
+                group='api_settings',
+                enabled_http_header_exact_providers=['amphora'])
+            self.put(path, {'rule': {'admin_state_up': True}})
+            delivery = rpc.return_value.cast.call_args.kwargs
+            update.side_effect = driver_except.HttpHeaderName256Unsupported()
+            self.assertRaises(driver_except.HttpHeaderName256Unsupported,
+                              task.execute, lb_id, delivery['original_l7rule'],
+                              delivery['l7rule_updates'])
+            self.assertFalse(self.get(path).json['rule']['admin_state_up'])
+            update.assert_called_once()
+            update.reset_mock(side_effect=True)
+
+            self.set_lb_status(lb_id)
+            self.put(path, {'rule': {'admin_state_up': True}})
+            self.set_lb_status(lb_id)
+            self.conf.config(group='api_settings',
+                             enabled_http_header_name_256_providers=[])
+            task.execute(lb_id)
+            update.assert_called_once()
+            self.assertTrue(self.get(path).json['rule']['admin_state_up'])
+
+            independent = self.create_listener(
+                'HTTP', 81, lb_id)['listener']
+            self.set_lb_status(lb_id)
+            independent_path = self.LISTENER_PATH.format(
+                listener_id=independent['id'])
+            self.put(independent_path, {
+                'listener': {'admin_state_up': False}})
+            delivery = rpc.return_value.cast.call_args.kwargs
+            update.reset_mock()
+            task.execute(lb_id, delivery['original_listener'],
+                         delivery['listener_updates'])
+            update.assert_called_once()
+            self.assertTrue(
+                update.call_args.kwargs['http_header_name_withdrawal'])
 
     @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
     def test_literal_http_path_rule_admission_and_lifecycle(self, rpc):
