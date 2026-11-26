@@ -394,6 +394,10 @@ def gateway_capabilities(driver):
             constants.GATEWAY_CAPABILITY_BACKEND_TLS_SUBJECT_ALT_NAMES)
     if driver_factory.tcp_default_pool_tls_available(driver.name, driver):
         capabilities.append(constants.GATEWAY_CAPABILITY_TCP_DEFAULT_POOL_TLS)
+    if driver_factory.tcp_weighted_default_pools_available(
+            driver.name, driver):
+        capabilities.append(
+            constants.GATEWAY_CAPABILITY_TCP_WEIGHTED_DEFAULT_POOLS)
     if (api_settings.allow_tls_terminated_listeners and driver.name in
             api_settings.enabled_tcp_tls_termination_providers and
             getattr(driver, 'supports_tcp_tls_termination', False) is True):
@@ -1041,9 +1045,19 @@ def require_tcp_default_pool_tls(driver):
                 'TCP listener is unavailable for this provider.'))
 
 
+def require_tcp_weighted_default_pools(driver):
+    if not driver_factory.tcp_weighted_default_pools_available(
+            driver.name, driver):
+        raise exceptions.ProviderUnsupportedOptionError(
+            prov=driver.name, user_msg=_(
+                'Weighted default TCP pools are unavailable for this '
+                'provider.'))
+
+
 def require_tcp_pool_tls_auth(driver):
     capabilities = gateway_capabilities(driver)
-    if not {constants.GATEWAY_CAPABILITY_TCP_DEFAULT_POOL_TLS,
+    if not {constants.GATEWAY_CAPABILITY_TCP_WEIGHTED_DEFAULT_POOLS,
+            constants.GATEWAY_CAPABILITY_TCP_DEFAULT_POOL_TLS,
             constants.GATEWAY_CAPABILITY_TCP_TLS_BACKEND_AUTH}.intersection(
                 capabilities):
         raise exceptions.ProviderUnsupportedOptionError(
@@ -1564,6 +1578,15 @@ def listener_dict_to_provider_dict(listener_dict, for_delete=False,
     if (not driver_factory.TCP_DEFAULT_POOL_TLS_PAYLOAD_AVAILABLE or
             not include_default_pool_tls):
         new_listener_dict.pop('tcp_default_pool_tls', None)
+    if (not driver_factory.TCP_DEFAULT_TARGETS_PAYLOAD_AVAILABLE or
+            new_listener_dict.get('tcp_default_targets') is None):
+        new_listener_dict.pop('tcp_default_targets', None)
+    if (not driver_factory.TCP_DEFAULT_TARGETS_PAYLOAD_AVAILABLE or
+            not new_listener_dict.get('tcp_default_targets_revision')):
+        new_listener_dict.pop('tcp_default_targets_revision', None)
+    new_listener_dict.pop('tcp_default_targets_status', None)
+    new_listener_dict.pop('tcp_default_targets_applied', None)
+    new_listener_dict.pop('tcp_default_targets_restrictive', None)
     if (not TCP_TLS_MIXED_MODE_PAYLOAD_AVAILABLE or
             not new_listener_dict.get('tcp_tls_mixed_mode')):
         new_listener_dict.pop('tcp_tls_mixed_mode', None)

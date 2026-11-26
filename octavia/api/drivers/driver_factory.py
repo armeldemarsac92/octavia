@@ -26,6 +26,9 @@ CONF = cfg.CONF
 LOG = logging.getLogger(__name__)
 TCP_DEFAULT_POOL_TLS_PAYLOAD_AVAILABLE = hasattr(
     driver_dm.Listener(), 'tcp_default_pool_tls')
+TCP_DEFAULT_TARGETS_PAYLOAD_AVAILABLE = all(
+    hasattr(driver_dm.Listener(), attribute) for attribute in
+    ('tcp_default_targets', 'tcp_default_targets_revision'))
 
 
 def get_driver(provider):
@@ -92,6 +95,26 @@ def tcp_default_pool_tls_available(provider, driver=None):
         driver, 'supports_tcp_default_pool_tls', False)
     supports_hostname = getattr(driver, 'supports_backend_tls_hostname', False)
     return supports_default_tls is True and supports_hostname is True
+
+
+def tcp_weighted_default_pools_available(provider, driver=None):
+    provider = provider or 'amphora'
+    api = CONF.api_settings
+    if (not TCP_DEFAULT_TARGETS_PAYLOAD_AVAILABLE or
+            provider not in api.enabled_provider_drivers or
+            provider not in api.enabled_tcp_weighted_default_pool_providers or
+            provider not in api.enabled_backend_tls_hostname_providers):
+        return False
+    if driver is None:
+        try:
+            driver = stevedore_driver.DriverManager(
+                namespace='octavia.api.drivers', name=provider,
+                invoke_on_load=False).driver
+        except RuntimeError:
+            return False
+    return (getattr(driver, 'supports_tcp_weighted_default_pools', False)
+            is True and
+            getattr(driver, 'supports_backend_tls_hostname', False) is True)
 
 
 def supports_udp_packet_drop(driver):

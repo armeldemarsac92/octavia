@@ -23,6 +23,7 @@ from oslo_config import cfg
 from oslo_config import fixture as oslo_fixture
 from oslo_utils import uuidutils
 
+from octavia.amphorae.driver_exceptions import exceptions as driver_exceptions
 from octavia.amphorae.drivers.haproxy import rest_api_driver
 from octavia.api.drivers.noop_driver import driver as noop_driver
 from octavia.common import constants
@@ -30,6 +31,7 @@ import octavia.common.context
 from octavia.common import data_models
 from octavia.common import exceptions
 from octavia.controller.worker.v2.tasks import amphora_driver_tasks
+from octavia.controller.worker.v2.tasks import database_tasks
 from octavia.db import api as db_api
 from octavia.tests.common import constants as c_const
 from octavia.tests.common import sample_certs
@@ -78,6 +80,427 @@ class TestListener(base.BaseAPITest):
         listener = self.listener_repo.get(session, id=listener_id)
         self.listener_repo.set_otlp_tracing_statuses(session, {
             listener_id: (tracing, listener.otlp_tracing_revision, status)})
+
+    def _record_weighted_target_receipt(self, lb_id, listener_id):
+        with db_api.session().begin() as session:
+            self.lb_repo.update(session, lb_id,
+                                topology=constants.TOPOLOGY_SINGLE)
+            lb = self.lb_repo.get(session, id=lb_id)
+            peers = {amp.id: amp.role for amp in lb.amphorae}
+            if not peers:
+                amp_id = uuidutils.generate_uuid()
+                self.amphora_repo.create(
+                    session, id=amp_id,
+                    role=constants.ROLE_STANDALONE, load_balancer_id=lb_id,
+                    lb_network_ip='192.0.2.1',
+                    status=constants.AMPHORA_ALLOCATED)
+                peers[amp_id] = constants.ROLE_STANDALONE
+            listener = self.listener_repo.get(session, id=listener_id)
+            recorded = self.listener_repo.set_tcp_default_targets_statuses(
+                session, lb_id,
+                {listener_id: listener.tcp_default_targets_revision},
+                constants.ACTIVE, topology=(lb.topology, peers, lb.enabled))
+            self.assertTrue(recorded)
+
+    @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
+    def test_weighted_tcp_default_targets_lifecycle(self, rpc):
+        self.cert_manager_mock().get_secret.return_value = (
+            sample_certs.X509_CA_CERT)
+        self.conf.config(
+            group='api_settings',
+            enabled_backend_tls_hostname_providers=['amphora'],
+            enabled_tls_sni_providers=['amphora'],
+            enabled_tcp_connection_rejection_providers=['amphora'])
+        lb = self.create_load_balancer(
+            uuidutils.generate_uuid(), provider='amphora')['loadbalancer']
+        lb_id = lb['id']
+        self.set_lb_status(lb_id)
+        capability = constants.GATEWAY_CAPABILITY_TCP_WEIGHTED_DEFAULT_POOLS
+        caps = self.PROVIDERS_PATH + '/{}/gateway_capabilities'
+        self.assertNotIn(capability, self.get(caps.format('amphora')).json[
+            'gateway_capabilities'])
+        reject = {'reject': True, 'weight': 1}
+        self.create_listener('TCP', 8443, lb_id, tcp_default_targets=[reject],
+                             status=501)
+
+        option = 'enabled_tcp_weighted_default_pool_providers'
+        self.conf.config(group='api_settings',
+                         **{option: ['amphora', 'noop_driver']})
+        self.assertIn(capability, self.get(caps.format('amphora')).json[
+            'gateway_capabilities'])
+        self.assertNotIn(capability, self.get(caps.format('noop_driver')).json[
+            'gateway_capabilities'])
+        clear = self.create_pool(lb_id, 'TCP', 'ROUND_ROBIN')['pool']
+        self.set_lb_status(lb_id)
+        tls = self.create_pool(
+            lb_id, 'TCP', 'ROUND_ROBIN', tls_enabled=True,
+            backend_tls_hostname='origin.example.test',
+            ca_tls_container_ref=uuidutils.generate_uuid())['pool']
+        self.set_lb_status(lb_id)
+        targets = [{'pool_id': clear['id'], 'weight': 3}, reject,
+                   {'pool_id': tls['id'], 'weight': 2}]
+        created = self.create_listener(
+            'TCP', 8443, lb_id, tcp_default_targets=targets)['listener']
+        self.set_lb_status(lb_id)
+        listener_id = created['id']
+        self._record_weighted_target_receipt(lb_id, listener_id)
+        path = self.listener_path.format(listener_id=listener_id)
+        pool_path = self.POOL_PATH.format(pool_id=tls['id'])
+        self.assertEqual(targets, created['tcp_default_targets'])
+        self.assertEqual(targets, self.get(path).json['listener'][
+            'tcp_default_targets'])
+        self.assertEqual([{'id': listener_id}],
+                         self.get(pool_path).json['pool']['listeners'])
+        listed = self.get(self.POOLS_PATH).json['pools']
+        self.assertEqual([{'id': listener_id}], next(
+            pool['listeners'] for pool in listed if pool['id'] == tls['id']))
+        self.delete(pool_path, status=409)
+        members = self.MEMBERS_PATH.format(pool_id=clear['id'])
+        self.put(members, {
+            'members': [{'address': '192.0.2.34', 'protocol_port': 9000}],
+            'tcp_connection_rejection': {
+                'reject_weight': 1, 'total_weight': 4}}, status=400)
+        self.put(members, {'members': [], 'tcp_connection_rejection': None},
+                 status=202)
+        self.set_lb_status(lb_id)
+        self.create_pool(lb_id, 'TCP', 'ROUND_ROBIN',
+                         listener_id=listener_id, status=400)
+        self.put(path, {'listener': {'default_pool_id': clear['id']}},
+                 status=400)
+        self.create_l7policy(listener_id, 'REDIRECT_TO_POOL',
+                             redirect_pool_id=clear['id'], status=400)
+
+        # The regional opt-out permits closing a share and clearing from
+        # ERROR, but cannot widen or reopen traffic.
+        self.conf.config(group='api_settings', **{option: []})
+        self.assertEqual(targets, self.get(path).json['listener'][
+            'tcp_default_targets'])
+        self.put(path, {'listener': {'tcp_default_targets': [targets[0]]}},
+                 status=501)
+        self.set_lb_status(lb_id, status=constants.ERROR)
+        remaining = [targets[0], reject, {'reject': True, 'weight': 2}]
+        put = self.put(path, {'listener': {'tcp_default_targets': remaining}})
+        self.assertEqual(remaining,
+                         put.json['listener']['tcp_default_targets'])
+        self.assertEqual(remaining, rpc.return_value.cast.call_args.kwargs[
+            constants.LISTENER_UPDATES]['tcp_default_targets'])
+        self.assertEqual([{'id': listener_id}],
+                         self.get(pool_path).json['pool']['listeners'])
+        self.set_lb_status(lb_id, status=constants.ERROR)
+        self.assertTrue(self.get(path).json['listener'][
+            'tcp_default_targets_retryable'])
+        self.put(path, {'listener': {'tcp_default_targets': remaining}})
+        self.set_object_status(self.lb_repo, lb_id, constants.ACTIVE)
+        self.set_object_status(self.listener_repo, listener_id,
+                               constants.ERROR)
+        self.put(path, {'listener': {'tcp_default_targets': remaining}})
+        self.set_lb_status(lb_id, status=constants.ERROR)
+        self.put(path, {'listener': {'tcp_default_targets': []}})
+        self.assertEqual([], rpc.return_value.cast.call_args.kwargs[
+            constants.LISTENER_UPDATES]['tcp_default_targets'])
+        self.assertEqual([], self.get(path).json['listener'][
+            'tcp_default_targets'])
+        self.set_lb_status(lb_id, status=constants.ERROR)
+        self.put(path, {'listener': {'tcp_default_targets': []}})
+        self._record_weighted_target_receipt(lb_id, listener_id)
+        self.assertEqual([], self.get(pool_path).json['pool']['listeners'])
+        self.assertEqual(constants.ACTIVE, self.get(path).json['listener'][
+            'tcp_default_targets_status'])
+        self.conf.config(group='api_settings', **{option: ['amphora']})
+        self.assertEqual([], self.get(path).json['listener'][
+            'tcp_default_targets'])
+
+    @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
+    def test_weighted_tcp_default_targets_effective_topology(self, rpc):
+        self.conf.config(
+            group='api_settings',
+            enabled_backend_tls_hostname_providers=['amphora'],
+            enabled_tcp_weighted_default_pool_providers=['amphora'])
+        lb = self.create_load_balancer(
+            uuidutils.generate_uuid(), provider='amphora')['loadbalancer']
+        lb_id = lb['id']
+        self.set_lb_status(lb_id)
+        clear = self.create_pool(lb_id, 'TCP', 'ROUND_ROBIN')['pool']
+        self.set_lb_status(lb_id)
+        reject = {'reject': True, 'weight': 1}
+        self.create_listener('HTTP', 8443, lb_id, tcp_default_targets=[reject],
+                             status=400)
+        self.create_listener('TCP', 8443, lb_id, tcp_tls_termination=True,
+                             tcp_default_targets=[reject], status=400)
+        self.create_listener('TCP', 8443, lb_id, tcp_default_pool_tls=True,
+                             tcp_default_targets=[reject], status=400)
+        self.create_listener('TCP', 8443, lb_id, tcp_default_targets=[
+            {'pool_id': self.pool_id, 'weight': 1}], status=404)
+        created = self.create_listener(
+            'TCP', 8443, lb_id, default_pool_id=clear['id'])['listener']
+        self.set_lb_status(lb_id)
+        path = self.listener_path.format(listener_id=created['id'])
+        self.assertNotIn('tcp_default_targets', created)
+        self.put(path, {'listener': {'tcp_default_targets': [reject]}},
+                 status=400)
+        for bad in (None, dict(reject), [{'reject': True, 'weight': False}],
+                    [{'reject': False, 'weight': 1}],
+                    [{'reject': True, 'weight': 1000001}], [reject] * 17):
+            self.put(path, {'listener': {'tcp_default_targets': bad,
+                                         'default_pool_id': None}},
+                     status=400)
+        weighted = self.put(path, {'listener': {
+            'default_pool_id': None, 'tcp_default_targets': [reject]}})
+        self.assertIsNone(weighted.json['listener']['default_pool_id'])
+        self.assertEqual([reject], weighted.json['listener'][
+            'tcp_default_targets'])
+        self.set_lb_status(lb_id)
+        self._record_weighted_target_receipt(lb_id, created['id'])
+        scalar = self.put(path, {'listener': {
+            'default_pool_id': clear['id'], 'tcp_default_targets': []}})
+        self.assertEqual(clear['id'], scalar.json['listener'][
+            'default_pool_id'])
+        self.assertNotIn('tcp_default_targets', scalar.json['listener'])
+
+    @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
+    def test_weighted_tcp_default_targets_failover_checks_pair(self, rpc):
+        self.cert_manager_mock().get_secret.return_value = (
+            sample_certs.X509_CA_CERT)
+        self.conf.config(
+            group='api_settings',
+            enabled_backend_tls_hostname_providers=['amphora'],
+            enabled_tcp_weighted_default_pool_providers=['amphora'])
+        lb = self.create_load_balancer(
+            uuidutils.generate_uuid(), provider='amphora')['loadbalancer']
+        lb_id = lb['id']
+        self.set_lb_status(lb_id)
+        clear = self.create_pool(lb_id, 'TCP', 'ROUND_ROBIN')['pool']
+        self.set_lb_status(lb_id)
+        protected = self.create_pool(
+            lb_id, 'TCP', 'ROUND_ROBIN', tls_enabled=True,
+            backend_tls_hostname='origin.example.test',
+            ca_tls_container_ref=uuidutils.generate_uuid())['pool']
+        self.set_lb_status(lb_id)
+        targets = [
+            {'pool_id': clear['id'], 'weight': 3},
+            {'pool_id': protected['id'], 'weight': 1}]
+        listener = self.create_listener(
+            'TCP', 8443, lb_id, tcp_default_targets=targets)['listener']
+        listener_id = listener['id']
+        self.set_lb_status(lb_id)
+        self.create_member(clear['id'], '192.0.2.11', 8080)
+        self.assertEqual(constants.PENDING_UPDATE,
+                         self.get_listener(listener_id)['listener'][
+                             'provisioning_status'])
+        self.set_lb_status(lb_id)
+        self.create_member(protected['id'], '192.0.2.12', 8081)
+        self.set_lb_status(lb_id)
+
+        peers = {}
+        with db_api.session().begin() as session:
+            self.lb_repo.update(
+                session, lb_id, topology=constants.TOPOLOGY_ACTIVE_STANDBY)
+            for role, ip in ((constants.ROLE_MASTER, '192.0.2.1'),
+                             (constants.ROLE_BACKUP, '192.0.2.2')):
+                amp_id = uuidutils.generate_uuid()
+                self.amphora_repo.create(
+                    session, id=amp_id, role=role, load_balancer_id=lb_id,
+                    lb_network_ip=ip, status=constants.AMPHORA_ALLOCATED)
+                peers[amp_id] = {constants.UNREACHABLE: False}
+            graph = self.lb_repo.get(session, id=lb_id)
+        first, second = peers
+        driver = rest_api_driver.HaproxyAmphoraLoadBalancerDriver()
+        driver.clients['base'] = mock.Mock()
+        driver.clients['base'].get_api_version.return_value = {
+            'api_version': '1.0'}
+        client = driver.clients['1.0'] = mock.Mock()
+        client.get_info.return_value = {'haproxy_version': '3.0.19'}
+        cap = constants.GATEWAY_CAPABILITY_TCP_WEIGHTED_DEFAULT_POOLS
+        details = {cap: True,
+                   constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME: True}
+        client.get_details.return_value = details
+
+        def acknowledge(amphora, lb_id, otlp_publication=None, **kwargs):
+            return mock.Mock(status_code=202, headers={
+                constants.HAPROXY_OTLP_PUBLICATION_HEADER: otlp_publication})
+
+        client.reload_listener.side_effect = acknowledge
+        with mock.patch.object(driver, '_process_pool_certs',
+                               return_value={'ca_cert': '/amphora/ca.pem'}):
+            self.assertTrue(driver.update_failover_listeners(graph, 0, peers))
+            published = {
+                call.args[0].id: call.args[2]
+                for call in client.upload_config.call_args_list}
+            self.assertEqual({first, second}, set(published))
+            for config in published.values():
+                self.assertIn('192.0.2.11:8080', config)
+                self.assertIn('192.0.2.12:8081', config)
+                self.assertIn('verifyhost-strict origin.example.test', config)
+                self.assertIn('rand(4)', config)
+            client.reload_listener.reset_mock()
+            client.reload_listener.side_effect = (
+                lambda amp, *args, **kwargs:
+                acknowledge(amp, *args, **kwargs) if amp.id == first
+                else mock.Mock(status_code=202, headers={}))
+            self.assertRaises(driver_exceptions.ListenerProvisioningError,
+                              driver.update, graph, tcp_member_batch=True)
+            self.assertEqual({first, second}, {
+                call.args[0].id
+                for call in client.reload_listener.call_args_list
+            })
+            client.reload_listener.side_effect = acknowledge
+            client.upload_config.reset_mock()
+            client.get_details.side_effect = lambda amp, **_: (
+                details if amp.id == first else {})
+            self.assertRaises(
+                driver_exceptions.CoordinatedListenerUpdateError,
+                driver.update_failover_listeners, graph, 0, peers)
+            published = {
+                call.args[0].id: call.args[2]
+                for call in client.upload_config.call_args_list}
+            self.assertEqual({first, second}, set(published))
+            for config in published.values():
+                self.assertIn('tcp-request connection reject\n', config)
+                self.assertNotIn('rand(4)', config)
+
+    @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
+    def test_weighted_tcp_withdrawal_waits_for_both_receipts(self, rpc):
+        self.conf.config(
+            group='api_settings',
+            enabled_backend_tls_hostname_providers=['amphora'],
+            enabled_tcp_weighted_default_pool_providers=['amphora'])
+        lb = self.create_load_balancer(
+            uuidutils.generate_uuid(), provider='amphora')['loadbalancer']
+        lb_id = lb['id']
+        self.set_lb_status(lb_id)
+        pool = self.create_pool(lb_id, 'TCP', 'ROUND_ROBIN')['pool']
+        self.set_lb_status(lb_id)
+        targets = [{'pool_id': pool['id'], 'weight': 1}]
+        main = self.create_listener('TCP', 8443, lb_id,
+                                    tcp_default_targets=targets)['listener']
+        self.set_lb_status(lb_id)
+        witness = self.create_listener('TCP', 8444, lb_id,
+                                       default_pool_id=pool['id'])['listener']
+        self.set_lb_status(lb_id)
+        target_id = main['id']
+        self._record_weighted_target_receipt(lb_id, target_id)
+        self.conf.config(group='api_settings',
+                         enabled_tcp_weighted_default_pool_providers=[])
+        path = self.LISTENER_PATH.format(listener_id=target_id)
+        pool_path = self.POOL_PATH.format(pool_id=pool['id'])
+        body = {'listener': {'tcp_default_targets': [{'reject': True,
+                                                      'weight': 1}]}}
+        self.put(path, body)
+        operation = rpc.return_value.cast.call_args.kwargs
+        with db_api.session().begin() as session:
+            self.lb_repo.update(
+                session, lb_id, topology=constants.TOPOLOGY_ACTIVE_STANDBY)
+            primary = self.lb_repo.get(session, id=lb_id).amphorae[0]
+            self.amphora_repo.update(session, primary.id,
+                                     role=constants.ROLE_MASTER)
+        driver = rest_api_driver.HaproxyAmphoraLoadBalancerDriver()
+        driver.clients['base'] = mock.Mock()
+        driver.clients['base'].get_api_version.return_value = {
+            'api_version': '1.0'}
+        client = driver.clients['1.0'] = mock.Mock()
+        client.get_info.return_value = {'haproxy_version': '3.0.19'}
+        client.get_details.return_value = {}
+        client.reload_listener.return_value = mock.Mock(
+            status_code=202, headers={})
+        task = amphora_driver_tasks.ListenersUpdate()
+        task.amphora_driver = driver
+
+        def render(payload):
+            task._update(lb_id, original=payload[constants.ORIGINAL_LISTENER],
+                         updates=payload[constants.LISTENER_UPDATES])
+
+        self.assertRaises(driver_exceptions.ListenerProvisioningError,
+                          render, operation)
+        self.assertIn('tcp-request connection reject\n',
+                      client.upload_config.call_args.args[2])
+        self.assertTrue(client.reload_listener.call_args.kwargs[
+            'otlp_publication'])
+        task.revert(lb_id, original=operation[constants.ORIGINAL_LISTENER],
+                    updates=operation[constants.LISTENER_UPDATES])
+        self.set_object_status(self.lb_repo, lb_id, constants.ERROR)
+        self.assertEqual(constants.ACTIVE,
+                         self.get_listener(witness['id'])['listener'][
+                             'provisioning_status'])
+        failed = self.get(path).json['listener']
+        self.assertEqual(constants.ERROR,
+                         failed['tcp_default_targets_status'])
+        self.assertTrue(failed['tcp_default_targets_retryable'])
+        self.assertCountEqual([{'id': target_id}, {'id': witness['id']}],
+                              self.get(pool_path).json['pool']['listeners'])
+        self.assertIn(f"default_backend {pool['id']}:{witness['id']}",
+                      client.upload_config.call_args.args[2])
+
+        self.put(path, body)
+        replay = rpc.return_value.cast.call_args.kwargs
+        self.assertNotEqual(
+            operation[constants.LISTENER_UPDATES][
+                'tcp_default_targets_revision'],
+            replay[constants.LISTENER_UPDATES]['tcp_default_targets_revision'])
+        client.upload_config.reset_mock()
+        render(operation)
+        client.upload_config.assert_not_called()
+        with db_api.session().begin() as session:
+            self.amphora_repo.create(
+                session, id=uuidutils.generate_uuid(),
+                role=constants.ROLE_BACKUP,
+                load_balancer_id=lb_id, lb_network_ip='192.0.2.2',
+                status=constants.AMPHORA_ALLOCATED)
+
+        def acknowledge(amphora, lb_id, *, otlp_publication, **kwargs):
+            return mock.Mock(status_code=202, headers={
+                constants.HAPROXY_OTLP_PUBLICATION_HEADER: otlp_publication})
+
+        client.reload_listener.side_effect = acknowledge
+        render(replay)
+        complete = database_tasks.MarkLBAndListenersActiveInDB()
+        complete.execute(lb_id, [replay[constants.ORIGINAL_LISTENER]])
+        recorded = self.get(path).json['listener']
+        self.assertEqual(constants.ACTIVE, recorded['provisioning_status'])
+        self.assertEqual(constants.ACTIVE,
+                         recorded['tcp_default_targets_status'])
+        self.assertFalse(recorded['tcp_default_targets_retryable'])
+        self.assertEqual([{'id': witness['id']}],
+                         self.get(pool_path).json['pool']['listeners'])
+        self.put(path, {'listener': {'tcp_default_targets': []}})
+        clearing = rpc.return_value.cast.call_args.kwargs
+        render(clearing)
+        complete.execute(lb_id, [clearing[constants.ORIGINAL_LISTENER]])
+        recorded = self.get(path).json['listener']
+        self.assertEqual([], recorded['tcp_default_targets'])
+        self.assertEqual(constants.ACTIVE,
+                         recorded['tcp_default_targets_status'])
+
+    @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
+    def test_weighted_tcp_failed_enrollment_allows_only_restriction(self, rpc):
+        self.conf.config(
+            group='api_settings',
+            enabled_backend_tls_hostname_providers=['amphora'],
+            enabled_tcp_weighted_default_pool_providers=['amphora'])
+        lb = self.create_load_balancer(
+            uuidutils.generate_uuid(), provider='amphora')['loadbalancer']
+        lb_id = lb['id']
+        self.set_lb_status(lb_id)
+        pool = self.create_pool(lb_id, 'TCP', 'ROUND_ROBIN')['pool']
+        self.set_lb_status(lb_id)
+        targets = [{'pool_id': pool['id'], 'weight': 1}]
+        main = self.create_listener('TCP', 8443, lb_id,
+                                    tcp_default_targets=targets)['listener']
+        self.set_lb_status(lb_id, status=constants.ERROR)
+        self.conf.config(group='api_settings',
+                         enabled_tcp_weighted_default_pool_providers=[])
+        path = self.LISTENER_PATH.format(listener_id=main['id'])
+        self.assertFalse(self.get(path).json['listener'][
+            'tcp_default_targets_retryable'])
+        self.put(path, {'listener': {'tcp_default_targets': targets}},
+                 status=409)
+        self.put(path, {'listener': {'admin_state_up': False,
+                                     'tcp_default_targets': targets}},
+                 status=409)
+        response = self.put(path, {'listener': {'admin_state_up': False}})
+        saved = response.json['listener']
+        self.assertFalse(saved['admin_state_up'])
+        self.assertEqual(constants.PENDING_UPDATE,
+                         saved['tcp_default_targets_status'])
 
     @mock.patch('octavia.api.drivers.amphora_driver.v2.driver.rpc.get_client')
     def test_otlp_failover_recovery_requires_the_current_pair(self, rpc):

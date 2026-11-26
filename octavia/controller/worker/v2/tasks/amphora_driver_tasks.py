@@ -392,6 +392,9 @@ class ListenersUpdate(BaseAmphoraTask):
         unsupported = None
         changes = []
         withdrawal = False
+        weighted_update = self._is_tcp_default_targets_update(updates)
+        target_id = (original or {}).get(constants.LISTENER_ID)
+        revision = (updates or {}).get('tcp_default_targets_revision')
         with session.begin():
             if self.loadbalancer_repo.batch_owns_graph(
                     session, loadbalancer_id):
@@ -399,6 +402,9 @@ class ListenersUpdate(BaseAmphoraTask):
             loadbalancer = self.loadbalancer_repo.get(session,
                                                       id=loadbalancer_id)
             if loadbalancer:
+                if revision and utils.pending_tcp_default_target_revisions(
+                        loadbalancer).get(target_id) != revision:
+                    return
                 changes = _http_header_name_changes(
                     loadbalancer, original, updates)
                 if changes:
@@ -428,7 +434,9 @@ class ListenersUpdate(BaseAmphoraTask):
                     **({'http_header_name_withdrawal': True}
                        if withdrawal else {}),
                     **({'require_http_header_name_256': True}
-                       if changes else {}))
+                       if changes else {}),
+                    **({'tcp_default_targets_update': True}
+                       if weighted_update else {}))
             except driver_except.HttpHeaderName256Unsupported:
                 # The capability preflight failed before any publication.
                 if changes:
@@ -439,9 +447,43 @@ class ListenersUpdate(BaseAmphoraTask):
             LOG.error('Load balancer %s for listeners update not found. '
                       'Skipping update.', loadbalancer_id)
 
-    def revert(self, loadbalancer_id, *args, **kwargs):
+    @staticmethod
+    def _is_tcp_default_targets_update(updates):
+        return bool({'tcp_default_targets', 'tcp_default_targets_revision'}
+                    .intersection(updates or {}))
+
+    def revert(self, loadbalancer_id, original=None, updates=None,
+               *args, **kwargs):
         """Handle failed listeners updates."""
+        target = (original or {}).get(constants.LISTENER_ID)
+        if target and self._is_tcp_default_targets_update(updates):
+            revision = updates.get('tcp_default_targets_revision')
+            self._mark_tcp_default_targets_error(
+                loadbalancer_id, target, revision)
+            return
         self._mark_listeners_error(loadbalancer_id)
+
+    def _mark_tcp_default_targets_error(self, lb_id, target, revision):
+        session = db_apis.get_session()
+        with session.begin():
+            lb = self.loadbalancer_repo.get_for_update(session, lb_id)
+            if lb is None:
+                return
+            listener_repository = repo.ListenerRepository()
+            listener = listener_repository.get_orm(
+                session, id=target, load_balancer_id=lb_id,
+                project_id=lb.project_id)
+            if (listener is None or
+                    listener.provisioning_status in (
+                        constants.PENDING_DELETE, constants.DELETED) or
+                    (revision and
+                     listener.tcp_default_targets_revision != revision)):
+                return
+            if (listener.tcp_default_targets_status ==
+                    constants.PENDING_UPDATE):
+                listener.tcp_default_targets_status = constants.ERROR
+            listener_repository.update(
+                session, target, provisioning_status=constants.ERROR)
 
     def _mark_listeners_error(self, loadbalancer_id, pool_id=None):
         LOG.warning("Reverting listeners updates.")

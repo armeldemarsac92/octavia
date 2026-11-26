@@ -306,6 +306,23 @@ frontend probe
 """
 
 
+_TCP_WEIGHTED_DEFAULT_POOLS_PROBE = (
+    """defaults
+    mode tcp
+    timeout connect 1s
+    timeout client 1s
+    timeout server 1s
+frontend probe
+    bind 127.0.0.1:1
+    tcp-request connection set-var(sess.octavia_tcp_default_draw) rand(2)
+    tcp-request connection reject if """
+    """{ var(sess.octavia_tcp_default_draw) -m int 0:0 }
+    use_backend target if { var(sess.octavia_tcp_default_draw) -m int 1:1 }
+backend target
+    server destination 127.0.0.1:2
+""")
+
+
 def get_haproxy_capabilities():
     haproxy_cmd = CONF.haproxy_amphora.haproxy_cmd
     try:
@@ -375,6 +392,9 @@ def get_haproxy_capabilities():
     # The clear frontend uses the same native TCP server options and strict
     # DNS verifier as TLS re-encryption behind a terminating frontend.
     capabilities[constants.GATEWAY_CAPABILITY_TCP_DEFAULT_POOL_TLS] = True
+    if _valid_haproxy_config(haproxy_cmd, _TCP_WEIGHTED_DEFAULT_POOLS_PROBE):
+        capabilities[
+            constants.GATEWAY_CAPABILITY_TCP_WEIGHTED_DEFAULT_POOLS] = True
     if output.startswith(strict_dns_builds[1:]):
         capabilities[constants.GATEWAY_CAPABILITY_BACKEND_TLS_H2_ALPN] = True
     if output.startswith(strict_dns_builds[2:]):

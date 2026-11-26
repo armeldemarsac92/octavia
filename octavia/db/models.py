@@ -41,6 +41,7 @@ from octavia.api.v2.types import pool
 from octavia.api.v2.types import quotas
 from octavia.common import constants
 from octavia.common import data_models
+from octavia.common import utils
 from octavia.common import validate
 from octavia.db import base_models
 from octavia.i18n import _
@@ -389,6 +390,9 @@ class Pool(base_models.BASE, base_models.IdMixin, base_models.ProjectMixin,
     _otlp_tracing_listeners = orm.relationship(
         "Listener", secondary="listener_otlp_collector_pool",
         viewonly=True)
+    _tcp_default_target_listeners = orm.relationship(
+        "Listener", secondary="listener_tcp_default_target_pool",
+        viewonly=True)
     _request_filter_listeners = orm.relationship(
         "Listener", secondary="listener_request_filter_pool",
         viewonly=True)
@@ -478,6 +482,7 @@ class Pool(base_models.BASE, base_models.IdMixin, base_models.ProjectMixin,
                               constants.PENDING_DELETE, constants.DELETED)]
         for li in (l7_listeners + auth_listeners +
                    self._request_filter_listeners +
+                   self._tcp_default_target_listeners +
                    self._otlp_tracing_listeners):
             if li.id not in _l_ids:
                 _listeners.append(li)
@@ -690,6 +695,22 @@ class ListenerRequestFilterPool(base_models.BASE):
         primary_key=True, index=True)
 
 
+class ListenerTcpDefaultTargetPool(base_models.BASE):
+    """Hold each pool referenced by a listener's ordered target list."""
+
+    __tablename__ = 'listener_tcp_default_target_pool'
+
+    listener_id = sa.Column(
+        sa.String(36), sa.ForeignKey(
+            'listener.id', ondelete='CASCADE',
+            name='fk_tcp_default_target_listener_id'),
+        primary_key=True)
+    pool_id = sa.Column(
+        sa.String(36), sa.ForeignKey(
+            'pool.id', name='fk_tcp_default_target_pool_id'),
+        primary_key=True, index=True)
+
+
 class Listener(base_models.BASE, base_models.IdMixin,
                base_models.ProjectMixin, models.TimestampMixin,
                base_models.NameMixin, base_models.TagMixin):
@@ -724,6 +745,11 @@ class Listener(base_models.BASE, base_models.IdMixin,
                                    server_default=sa.false())
     tcp_default_pool_tls = sa.Column(sa.Boolean(), nullable=False,
                                      server_default=sa.false())
+    tcp_default_targets = sa.Column(sa.JSON(none_as_null=True))
+    tcp_default_targets_revision = sa.Column(sa.String(36))
+    tcp_default_targets_status = sa.Column(sa.String(16))
+    tcp_default_targets_applied = sa.Column(sa.JSON(none_as_null=True))
+    tcp_default_targets_restrictive = sa.Column(sa.Boolean())
     default_http_response = sa.Column(sa.JSON(none_as_null=True))
     https_virtual_hosts = sa.Column(sa.JSON(none_as_null=True))
     request_filter_sections = sa.Column(sa.JSON(none_as_null=True))
@@ -750,6 +776,9 @@ class Listener(base_models.BASE, base_models.IdMixin,
     default_pool = orm.relationship("Pool", uselist=False,
                                     back_populates="_default_listeners",
                                     cascade_backrefs=False)
+    _tcp_default_target_pools = orm.relationship(
+        "Pool", secondary="listener_tcp_default_target_pool",
+        viewonly=True)
     sni_containers = orm.relationship(
         'SNI', cascade='all,delete-orphan',
         uselist=True, backref=orm.backref('listener', uselist=False))
@@ -810,7 +839,10 @@ class Listener(base_models.BASE, base_models.IdMixin,
                     if policy.l7rules and policy.enabled is True
                     for pool in policy._linked_pools(
                         include_redirect=policy.id not in withdrawn_policies)]
-        for p in l7_pools:
+        target_ids = utils.tcp_default_target_pool_ids(self)
+        target_pools = ([pool for pool in self._tcp_default_target_pools
+                         if pool.id in target_ids] if target_ids else [])
+        for p in l7_pools + target_pools:
             if p.id not in _p_ids:
                 _pools.append(p)
                 _p_ids.append(p.id)

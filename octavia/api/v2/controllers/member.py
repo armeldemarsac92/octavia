@@ -165,10 +165,17 @@ class MemberController(base.BaseController):
         capabilities = driver_utils.gateway_capabilities(driver)
         pool_auth_capabilities = {
             constants.GATEWAY_CAPABILITY_TCP_TLS_BACKEND_AUTH,
-            constants.GATEWAY_CAPABILITY_TCP_DEFAULT_POOL_TLS}
+            constants.GATEWAY_CAPABILITY_TCP_DEFAULT_POOL_TLS,
+            constants.GATEWAY_CAPABILITY_TCP_WEIGHTED_DEFAULT_POOLS}
+        listeners = self.repositories.listener
         required_pool_auth = set()
+        weighted_capability = (
+            constants.GATEWAY_CAPABILITY_TCP_WEIGHTED_DEFAULT_POOLS)
+        if (weighted_capability not in capabilities and
+                listeners.get_tcp_default_target_listener_using_pool(
+                    session, pool.id)):
+            required_pool_auth.add(weighted_capability)
         if transport.backend_tls_hostname is not None:
-            listeners = self.repositories.listener
             if listeners.has_default_pool_listener(
                     session, pool.id, tcp_tls_termination=False,
                     tcp_default_pool_tls=True):
@@ -232,6 +239,8 @@ class MemberController(base.BaseController):
                         desired[field] != getattr(previous, field)
                         for field in ('monitor_address', 'monitor_port',
                                       'subnet_id'))):
+                if weighted_capability in withdrawn_pool_auth:
+                    driver_utils.require_tcp_weighted_default_pools(driver)
                 if (constants.GATEWAY_CAPABILITY_TCP_DEFAULT_POOL_TLS in
                         withdrawn_pool_auth):
                     driver_utils.require_tcp_default_pool_tls(driver)
@@ -683,6 +692,13 @@ class MembersController(MemberController):
                     self._validate_drop_batch(
                         driver, lb, db_pool, drop, members, additive_only)
                 else:
+                    if (rejection is not None and
+                            self.repositories.listener
+                            .get_tcp_default_target_listener_using_pool(
+                                session, db_pool.id)):
+                        raise exceptions.ValidationException(detail=_(
+                            'A weighted default target pool cannot have '
+                            'pool-level connection rejection.'))
                     self._validate_rejection_batch(
                         driver, db_pool, rejection, additive_only,
                         replay=replay)

@@ -115,11 +115,15 @@ class HAProxyCompatTestCase(base.TestCase):
         self.assertEqual(3, minor)
 
     @mock.patch.object(haproxy_compatibility.subprocess, 'check_output')
-    def test_backend_tls_capabilities(self, check_output):
+    @mock.patch.object(haproxy_compatibility, '_valid_haproxy_config',
+                       return_value=False)
+    def test_backend_tls_capabilities(self, validate, check_output):
         hostname = constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME
         tcp_auth = constants.GATEWAY_CAPABILITY_TCP_TLS_BACKEND_AUTH
         system_ca = constants.GATEWAY_CAPABILITY_BACKEND_TLS_SYSTEM_CA
-        authenticated = {hostname: True, tcp_auth: True, system_ca: True}
+        scalar_default = constants.GATEWAY_CAPABILITY_TCP_DEFAULT_POOL_TLS
+        authenticated = {hostname: True, tcp_auth: True, system_ca: True,
+                         scalar_default: True}
         h2_alpn = constants.GATEWAY_CAPABILITY_BACKEND_TLS_H2_ALPN
         sans = constants.GATEWAY_CAPABILITY_BACKEND_TLS_SUBJECT_ALT_NAMES
         policy = constants.GATEWAY_CAPABILITY_HTTP_REQUEST_POLICY
@@ -144,6 +148,22 @@ class HAProxyCompatTestCase(base.TestCase):
                     version, subprocess.CalledProcessError(1, 'haproxy')]
                 result = haproxy_compatibility.get_haproxy_capabilities()
                 self.assertEqual(expected, result)
+
+    @mock.patch.object(haproxy_compatibility.subprocess, 'check_output')
+    @mock.patch.object(haproxy_compatibility, '_valid_haproxy_config')
+    def test_weighted_default_tcp_needs_strict_dns_and_the_connection_probe(
+            self, validate, check_output):
+        strict_dns = 'HAProxy version 3.0.19-ade9c1262-octavia-strict-dns-v1 '
+        capability = constants.GATEWAY_CAPABILITY_TCP_WEIGHTED_DEFAULT_POOLS
+        for version, parses, expected in (
+                ('HAProxy version 3.0.19-ade9c1262 ', True, False),
+                (strict_dns, False, False), (strict_dns, True, True)):
+            with self.subTest(version=version, parses=parses):
+                check_output.return_value = version
+                validate.side_effect = lambda _, config: (
+                    parses and 'octavia_tcp_default_draw' in config)
+                features = haproxy_compatibility.get_haproxy_capabilities()
+                self.assertEqual(expected, features.get(capability, False))
 
     @mock.patch.object(haproxy_compatibility.subprocess, 'check_output')
     @mock.patch.object(haproxy_compatibility, '_valid_haproxy_config')

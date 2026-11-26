@@ -24,6 +24,7 @@ from unittest import mock
 from octavia_lib.common import constants as lib_consts
 from oslo_config import cfg
 from oslo_config import fixture as oslo_fixture
+from oslo_utils import uuidutils
 
 from octavia.amphorae.driver_exceptions import exceptions as driver_except
 from octavia.common import constants
@@ -1777,6 +1778,91 @@ class TestHaproxyCfg(base.TestCase):
             ['exact', 'first', 'conjoined narrow', 'broad'],
             [line.split(' if ')[1] for line in config.splitlines()
              if line.strip().startswith('use_backend ')])
+
+    def test_render_weighted_tcp_default_targets(self):
+        samples = sample_configs_combined
+        original = samples.sample_listener_tuple(
+            proto='TCP', persistence=False, tls=False)
+        common = {
+            'project_id': original.project_id,
+            'load_balancer_id': original.load_balancer.id,
+            'tcp_connection_rejection': None,
+            'backend_tls_system_ca': False,
+        }
+        clear = SimpleNamespace(**dict(
+            original.default_pool._asdict(), **common,
+            id=uuidutils.generate_uuid(), backend_tls_hostname=None))
+        tls = SimpleNamespace(**dict(
+            clear.__dict__, id=uuidutils.generate_uuid(), tls_enabled=True,
+            backend_tls_hostname='origin.example.test',
+            alpn_protocols=CONF.api_settings.default_pool_alpn_protocols,
+            ca_tls_certificate_id='ca-ref', tls_certificate_id='client-ref'))
+        rejected = SimpleNamespace(**dict(
+            tls.__dict__, id=uuidutils.generate_uuid(),
+            backend_tls_hostname='unavailable.example.test'))
+        targets = [{'pool_id': clear.id, 'weight': 3},
+                   {'pool_id': tls.id, 'weight': 2},
+                   {'reject': True, 'weight': 1},
+                   {'pool_id': rejected.id, 'weight': 4}]
+        listener = SimpleNamespace(**dict(
+            original._asdict(), default_pool_id=None, default_pool=None,
+            pools=[clear, tls, rejected], l7policies=[],
+            tcp_default_targets=targets))
+        timeouts = ['3', '0']
+        amphora = samples.sample_amphora_tuple()
+        capability = constants.GATEWAY_CAPABILITY_TCP_WEIGHTED_DEFAULT_POOLS
+        details = {capability: True,
+                   constants.GATEWAY_CAPABILITY_BACKEND_TLS_HOSTNAME: True}
+        material = {tls.id: {'ca_cert': '/path/to/backend-ca.pem',
+                             'client_cert': '/path/to/client.pem'}}
+        config = self.jinja_cfg.build_config(
+            amphora, [listener], material, timeouts, details)
+        self.assertEqual(1, config.count('rand(10)'))
+        self.assertIn(f'use_backend {clear.id}:{listener.id} if '
+                      '{ var(sess.octavia_tcp_default_draw) -m int 0:2 }',
+                      config)
+        self.assertIn(f'use_backend {tls.id}:{listener.id} if '
+                      '{ var(sess.octavia_tcp_default_draw) -m int 3:4 }',
+                      config)
+        for interval in ('5:5', '6:9'):
+            self.assertIn('tcp-request connection reject if '
+                          '{ var(sess.octavia_tcp_default_draw) -m int '
+                          f'{interval} }}', config)
+        self.assertNotIn(rejected.id, config)
+        self.assertNotIn('inspect-delay', config)
+        self.assertNotIn('req.ssl_', config)
+        self.assertNotIn('default_backend', config)
+        self.assertNotIn('check-alpn', config)
+        self.assertNotIn(' alpn ', config)
+        clear_backend, tls_backend = config.split(
+            f'\nbackend {tls.id}:{listener.id}\n')
+        self.assertNotIn('verifyhost-strict', clear_backend)
+        self.assertIn('verifyhost-strict origin.example.test', tls_backend)
+        self.assertIn('check-ssl check-sni origin.example.test', tls_backend)
+        self.assertIn('crt /path/to/client.pem', tls_backend)
+        self.assertIn('ca-file /path/to/backend-ca.pem verify required',
+                      tls_backend)
+
+        listener.tcp_default_targets_status = constants.ERROR
+        listener.tcp_default_targets_restrictive = False
+        listener.tcp_default_targets_applied = [
+            targets[0], {'reject': True, 'weight': 7}]
+        recovered = self.jinja_cfg.build_config(
+            amphora, [listener], material, timeouts, details)
+        self.assertIn(f'use_backend {clear.id}:{listener.id}', recovered)
+        self.assertNotIn(f'use_backend {tls.id}:{listener.id}', recovered)
+        listener.tcp_default_targets = [targets[0]]
+        wider_share = self.jinja_cfg.build_config(
+            amphora, [listener], material, timeouts, details)
+        self.assertIn('tcp-request connection reject\n', wider_share)
+        self.assertNotIn('use_backend', wider_share)
+
+        del details[capability]
+        config = self.jinja_cfg.build_config(
+            amphora, [listener], material, timeouts, details)
+        self.assertIn('tcp-request connection reject\n', config)
+        self.assertNotIn('rand(', config)
+        self.assertNotIn('use_backend', config)
 
     def test_render_clear_tcp_default_pool_tls(self):
         samples = sample_configs_combined

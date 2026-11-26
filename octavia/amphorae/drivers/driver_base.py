@@ -44,7 +44,8 @@ class AmphoraLoadBalancerDriver(metaclass=abc.ABCMeta):
 
     @abc.abstractmethod
     def update(self, loadbalancer, *, l7policy_activation=False,
-               l7policy_restoration=False, tcp_member_batch=False):
+               l7policy_restoration=False, tcp_member_batch=False,
+               tcp_default_targets_update=False):
         """Update the amphora with a new configuration.
 
         :param loadbalancer: loadbalancer object, need to use its
@@ -52,6 +53,8 @@ class AmphoraLoadBalancerDriver(metaclass=abc.ABCMeta):
         :type loadbalancer: octavia.db.models.LoadBalancer
         :param tcp_member_batch: Prepare and publish the combined HAProxy
                                  configuration for a TCP member batch.
+        :param tcp_default_targets_update: Attempt publication on every
+                                           peer after changing TCP targets.
         :param l7policy_activation: Update the combined HAProxy configuration
                                     for a group activation, failing if any
                                     of its listeners cannot be rendered.
