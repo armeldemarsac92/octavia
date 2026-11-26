@@ -46,8 +46,14 @@ def _integer(value, min_value, max_value):
 
 
 def validate_spec(spec):
-    if set(spec) != {'vip', 'port', 'fraction', 'has_service', 'destinations'}:
+    fields = set(spec)
+    extended_weights = spec.get('extended_member_weights') is True
+    if extended_weights:
+        fields.remove('extended_member_weights')
+    if fields != {'vip', 'port', 'fraction', 'has_service', 'destinations'}:
         raise ValueError(_('Invalid UDP guard specification'))
+    max_weight = (constants.MAX_UDP_EXTENDED_MEMBER_WEIGHT
+                  if extended_weights else constants.MAX_WEIGHT)
     vip = str(ipaddress.IPv4Address(spec['vip']))
     port = _integer(spec['port'], 1, 65535)
     fraction = spec['fraction']
@@ -66,7 +72,7 @@ def validate_spec(spec):
         address = str(ipaddress.IPv4Address(destination['address']))
         target_port = _integer(destination['port'], 1, 65535)
         weight = _integer(destination['weight'], constants.MIN_WEIGHT,
-                          constants.MAX_WEIGHT)
+                          max_weight)
         if (address, target_port) in seen:
             raise ValueError(_('Duplicate UDP guard destination'))
         seen.add((address, target_port))
@@ -74,9 +80,16 @@ def validate_spec(spec):
                              'weight': weight})
     if has_service != bool(destinations):
         raise ValueError(_('UDP guard service and destinations disagree'))
-    return {'vip': vip, 'port': port, 'has_service': has_service,
-            'fraction': {'numerator': numerator, 'denominator': denominator},
-            'destinations': destinations}
+    validated = {
+        'vip': vip, 'port': port, 'has_service': has_service,
+        'fraction': {'numerator': numerator, 'denominator': denominator},
+        'destinations': destinations,
+    }
+    if extended_weights:
+        # An older guard must also reject this state during activation,
+        # including when the extended weights belong to disabled members.
+        validated['extended_member_weights'] = True
+    return validated
 
 
 def write_file(path, body, mode=0o600):

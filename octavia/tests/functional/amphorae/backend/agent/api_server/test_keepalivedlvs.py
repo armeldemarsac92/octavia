@@ -445,6 +445,52 @@ class GuardedKeepalivedLvsTestCase(base.TestCase):
         return [call.kwargs['input'] for call in self.nft.call_args_list
                 if 'input' in call.kwargs][-1]
 
+    def test_extended_udp_weights_require_negotiation_and_exact_readback(self):
+        capability_url = server.PATH_PREFIX + '/udp_guard'
+        self.assertEqual({'udp_packet_drop_v1': True},
+                         self.client.get(capability_url).json)
+        response = self.client.get(
+            capability_url + '?extended_member_weights=true')
+        self.assertEqual(200, response.status_code)
+        self.assertEqual({'udp_extended_member_weights_v1': True},
+                         response.json)
+
+        guard_url = self.listener_url + '/udp_guard'
+        destination = self.candidate['guard']['destinations'][0]
+        destination['weight'] = 1_000_000
+        self.assertEqual(400, self.client.put(
+            guard_url, json=self.candidate).status_code)
+        self.assertFalse(self.guard.path.exists())
+        self.candidate['guard']['extended_member_weights'] = True
+        self.assertEqual(200, self.client.put(
+            guard_url, json=self.candidate).status_code)
+        self.assertTrue(self.guard.read()['spec']['extended_member_weights'])
+
+        service = self.IPVS_HEADER + 'UDP C000021E:4685 wrr\n'
+        self.ipvs.return_value = service + ' -> C633640B:3A99 Masq 256 0 0\n'
+        with mock.patch.object(udp_guard, 'CONVERGENCE_TIMEOUT', 0):
+            self.assertEqual(500, self.client.put(self.reload_url).status_code)
+        self.assertFalse(self.guard.read()['committed'])
+        self.assertNotIn('numgen', self._last_rules())
+
+        self.ipvs.return_value = service + (
+            ' -> C633640B:3A99 Masq 1000000 0 0\n')
+        response = self.client.put(self.reload_url)
+        self.assertEqual(202, response.status_code)
+        self.assertEqual('1', response.headers[udp_guard.CONFIRMATION_HEADER])
+        self.assertTrue(self.guard.read()['committed'])
+        self.assertIn('numgen', self._last_rules())
+
+        self.candidate['guard'].pop('extended_member_weights')
+        destination['weight'] = 256
+        self.assertEqual(200, self.client.put(
+            guard_url, json=self.candidate).status_code)
+        self.ipvs.return_value = service + ' -> C633640B:3A99 Masq 256 0 0\n'
+        self.assertEqual(202, self.client.put(self.reload_url).status_code)
+        self.assertNotIn('extended_member_weights', self.guard.read()['spec'])
+        self.assertEqual(256, self.guard.read()['spec']['destinations'][0][
+            'weight'])
+
     def test_failed_restart_keeps_listener_closed_until_ipvs_matches(self):
         response = self.client.put(self.listener_url + '/udp_guard',
                                    json=self.candidate)
@@ -480,6 +526,23 @@ class GuardedKeepalivedLvsTestCase(base.TestCase):
         self.assertTrue(self.guard.read()['committed'])
         self.assertIn('ip daddr 192.0.2.30 udp dport 18053 '
                       'numgen inc mod 4 < 1 counter drop', self._last_rules())
+
+        # Closure uses the native guard contract and remains durable on boot.
+        self.candidate['guard'].update(has_service=False, destinations=[])
+        self.assertEqual(200, self.client.put(
+            self.listener_url + '/udp_guard',
+            json=self.candidate).status_code)
+        self.ipvs.return_value = self.IPVS_HEADER + neighboring_service
+        response = self.client.put(self.reload_url)
+        self.assertEqual(202, response.status_code)
+        self.assertEqual('1', response.headers[udp_guard.CONFIRMATION_HEADER])
+        state = self.guard.read()
+        self.assertTrue(state['committed'])
+        self.assertFalse(state['retiring'])
+        self.guard.restore(state)
+        self.assertIn('ip daddr 192.0.2.30 udp dport 18053 counter drop',
+                      self._last_rules())
+        self.assertNotIn('18054', self._last_rules())
 
     def test_stale_zero_weight_or_persistent_service_keeps_guard_closed(self):
         response = self.client.put(self.listener_url + '/udp_guard',

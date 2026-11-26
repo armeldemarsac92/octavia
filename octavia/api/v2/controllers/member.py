@@ -26,6 +26,7 @@ from oslo_utils import strutils
 from oslo_utils import uuidutils
 from pecan import request as pecan_request
 from sqlalchemy.orm import exc as sa_exception
+from wsme import exc as wsme_exc
 from wsme import types as wtypes
 from wsmeext import pecan as wsme_pecan
 
@@ -548,7 +549,7 @@ class MembersController(MemberController):
                     'TCP connection rejection is unavailable.'))
 
     def _validate_drop_batch(self, driver, lb, pool, drop, members,
-                             additive_only):
+                             additive_only, *, extended_weights):
         if additive_only or drop is None:
             raise exceptions.ValidationException(detail=_(
                 'udp_packet_drop requires a full batch with a fraction.'))
@@ -581,11 +582,17 @@ class MembersController(MemberController):
             raise exceptions.ValidationException(detail=_(
                 'udp_packet_drop requires enabled members of positive '
                 'weight exactly when some datagrams are admitted.'))
-        if (constants.GATEWAY_CAPABILITY_UDP_PACKET_DROP not in
-                driver_utils.gateway_capabilities(driver)):
+        capabilities = driver_utils.gateway_capabilities(driver)
+        if constants.GATEWAY_CAPABILITY_UDP_PACKET_DROP not in capabilities:
             raise exceptions.ProviderUnsupportedOptionError(
                 prov=driver.name,
                 user_msg=_('UDP packet drop is unavailable.'))
+        if (extended_weights and
+                constants.GATEWAY_CAPABILITY_UDP_EXTENDED_MEMBER_WEIGHTS
+                not in capabilities):
+            raise exceptions.ProviderUnsupportedOptionError(
+                prov=driver.name,
+                user_msg=_('Extended UDP member weights are unavailable.'))
 
     @staticmethod
     def _managed_batch_digest(option, value, members):
@@ -604,6 +611,31 @@ class MembersController(MemberController):
         driver_utils.call_provider(
             driver.name, apply_batch, lb_id, pool_id, batch_id)
 
+    @staticmethod
+    def _validate_batch_weights(members, *, udp):
+        max_weight = (constants.MAX_UDP_EXTENDED_MEMBER_WEIGHT if udp else
+                      constants.MAX_WEIGHT)
+        weight_type = wtypes.IntegerType(minimum=constants.MIN_WEIGHT,
+                                         maximum=max_weight)
+        extended = False
+        for member in members or ():
+            weight = member.weight
+            if udp and type(weight) is not int:
+                raise wsme_exc.InvalidInput(
+                    'weight', weight, _('Expected a JSON integer.'))
+            if weight is None:
+                continue
+            try:
+                if not udp:
+                    weight = weight_type.frombasetype(weight)
+                weight_type.validate(weight)
+            except (TypeError, ValueError, OverflowError) as error:
+                raise wsme_exc.InvalidInput('weight', member.weight,
+                                            str(error)) from error
+            member.weight = weight
+            extended = extended or weight > constants.MAX_WEIGHT
+        return extended
+
     @wsme_pecan.wsexpose(None, wtypes.text,
                          body=member_types.MembersRootPUT, status_code=202)
     def put(self, additive_only=False, members_=None):
@@ -613,6 +645,8 @@ class MembersController(MemberController):
         drop = members_.udp_packet_drop
         explicit_rejection = rejection is not wtypes.Unset
         explicit_drop = drop is not wtypes.Unset
+        extended_weights = self._validate_batch_weights(
+            members, udp=explicit_drop)
         if explicit_rejection and explicit_drop:
             raise exceptions.ValidationException(detail=_(
                 'Specify one of tcp_connection_rejection or udp_packet_drop.'))
@@ -690,7 +724,8 @@ class MembersController(MemberController):
                         resource='Load Balancer', id=lb_id)
                 if explicit_drop:
                     self._validate_drop_batch(
-                        driver, lb, db_pool, drop, members, additive_only)
+                        driver, lb, db_pool, drop, members, additive_only,
+                        extended_weights=extended_weights)
                 else:
                     if (rejection is not None and
                             self.repositories.listener

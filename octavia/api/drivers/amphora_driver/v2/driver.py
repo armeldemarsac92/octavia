@@ -102,6 +102,7 @@ class AmphoraProviderDriver(driver_base.ProviderDriver):
     supports_l7policy_closed_listener_removal = True
     supports_tcp_connection_rejection = True
     supports_udp_packet_drop = True
+    supports_udp_extended_member_weights = True
     supports_http_header_exact = True
     supports_http_header_name_256 = True
     supports_http_long_hostname = True

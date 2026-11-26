@@ -1389,6 +1389,116 @@ class TestHaproxyAmphoraLoadBalancerDriverTest(base.TestCase):
         client.upload_udp_config.assert_not_called()
         client.activate_udp_guard.assert_not_called()
 
+    def test_udp_batch_verifies_extended_weights_on_all_amphorae(self):
+        graph, listener = self._guarded_udp_graph()
+        graph.listeners.append(listener._replace(id='sibling',
+                                                 default_pool=None))
+        pool = listener.default_pool
+        pool.members[0] = pool.members[0]._replace(weight=1000)
+        self.driver.lvs_jinja = jinja_udp_cfg.LvsJinjaTemplater()
+        client = self.driver.clients[API_VERSION]
+        client.check_udp_extended_member_weights.side_effect = [
+            None, driver_except.AmpDriverNotImplementedError()]
+        self.assertRaises(driver_except.AmpDriverNotImplementedError,
+                          self.driver.apply_udp_member_batch, graph,
+                          listener.id)
+        self.assertEqual(2, client.stage_udp_guard.call_count)
+        for amp, staged in zip(graph.amphorae,
+                               client.stage_udp_guard.call_args_list):
+            self.assertEqual((amp, listener.id), staged.args[:2])
+            self.assertNotIn('virtual_server', staged.args[2])
+            closed_guard = staged.args[3]
+            self.assertNotIn('extended_member_weights', closed_guard)
+            self.assertFalse(closed_guard['has_service'])
+            self.assertFalse(closed_guard['retiring'])
+            self.assertEqual([], closed_guard['destinations'])
+        self.assertEqual([
+            mock.call(amp, timeout_dict=None) for amp in graph.amphorae
+        ], client.check_udp_guard.call_args_list)
+        self.assertEqual([
+            mock.call(amp, listener.id, timeout_dict=None)
+            for amp in graph.amphorae
+        ], client.activate_udp_guard.call_args_list)
+        client.reload_listener.assert_not_called()
+
+        client.reset_mock()
+        client.check_udp_extended_member_weights.side_effect = None
+        self.assertEqual(2, len(self.driver.apply_udp_member_batch(
+            graph, listener.id)))
+        _, _, config, guard = client.stage_udp_guard.call_args.args
+        self.assertIn('weight 1000', config)
+        self.assertTrue(guard['extended_member_weights'])
+        self.assertEqual(1000, guard['destinations'][0]['weight'])
+        client.check_udp_guard.assert_not_called()
+
+        # A disabled member still belongs to the desired graph.
+        pool.members[0] = pool.members[0]._replace(enabled=False)
+        client.reset_mock()
+        self.assertEqual(2, len(self.driver.apply_udp_member_batch(
+            graph, listener.id)))
+        _, _, config, guard = client.stage_udp_guard.call_args.args
+        self.assertNotIn('weight 1000', config)
+        self.assertTrue(guard['extended_member_weights'])
+        self.assertEqual([], guard['destinations'])
+        self.assertEqual(2,
+                         client.check_udp_extended_member_weights.call_count)
+
+    def test_udp_extended_batch_attempts_withdrawal_on_both_peers(self):
+        graph, listener = self._guarded_udp_graph()
+        pool = listener.default_pool
+        pool.members[0] = pool.members[0]._replace(weight=1000)
+        primary, secondary = graph.amphorae
+        client = self.driver.clients[API_VERSION]
+        client.check_udp_extended_member_weights.side_effect = [
+            None, driver_except.AmpDriverNotImplementedError()]
+        unconfirmed = driver_except.ListenerProvisioningError()
+        client.activate_udp_guard.side_effect = [unconfirmed, None]
+        error = self.assertRaises(driver_except.ListenerProvisioningError,
+                                  self.driver.apply_udp_member_batch, graph,
+                                  listener.id)
+        self.assertIs(unconfirmed, error)
+        self.assertEqual([
+            mock.call(primary, listener.id, timeout_dict=None),
+            mock.call(secondary, listener.id, timeout_dict=None),
+        ], client.activate_udp_guard.call_args_list)
+
+    def test_udp_update_preflights_extended_weights_before_staging(self):
+        graph, listener = self._guarded_udp_graph()
+        pool = listener.default_pool
+        pool.members[0] = pool.members[0]._replace(weight=1000)
+        primary, secondary = graph.amphorae
+        client = self.driver.clients[API_VERSION]
+        self.driver.lvs_jinja.build_config.return_value = 'fake_udp_config'
+        self.driver.update(graph)
+        guard = client.stage_udp_guard.call_args.args[3]
+        self.assertTrue(guard['extended_member_weights'])
+        relevant = {'check_udp_extended_member_weights', 'stage_udp_guard',
+                    'activate_udp_guard'}
+        self.assertEqual([
+            ('check_udp_extended_member_weights', primary),
+            ('check_udp_extended_member_weights', secondary),
+            ('stage_udp_guard', primary), ('activate_udp_guard', primary),
+            ('stage_udp_guard', secondary), ('activate_udp_guard', secondary),
+        ], [(call[0], call.args[0]) for call in client.mock_calls
+            if call[0] in relevant])
+
+    def test_udp_restart_refuses_to_start_when_peer_lacks_extended_weights(
+            self):
+        graph, listener = self._guarded_udp_graph()
+        pool = listener.default_pool
+        pool.members[0] = pool.members[0]._replace(weight=1000)
+        client = self.driver.clients[API_VERSION]
+        for restart in (self.driver.start, self.driver.reload):
+            with self.subTest(restart=restart.__name__):
+                client.reset_mock()
+                client.check_udp_extended_member_weights.side_effect = [
+                    None, driver_except.AmpDriverNotImplementedError()]
+                self.assertRaises(driver_except.AmpDriverNotImplementedError,
+                                  restart, graph)
+                client.start_listener.assert_not_called()
+                client.reload_listener.assert_not_called()
+                self.assertEqual(2, client.activate_udp_guard.call_count)
+
     def test_udp_batch_rejects_missing_standby_before_staging(self):
         graph, listener = self._guarded_udp_graph()
         graph.amphorae.pop()
@@ -2644,6 +2754,18 @@ class TestAmphoraAPIClientTest(base.TestCase):
                           self.driver.activate_udp_guard,
                           self.amp, FAKE_UUID_1)
         self.driver.activate_udp_guard(self.amp, FAKE_UUID_1)
+
+    @requests_mock.mock()
+    def test_udp_extended_weights_reject_legacy_agent_reply(self, router):
+        url = f'{self.base_url_ver}/udp_guard?extended_member_weights=true'
+        router.get(url, [
+            {'json': {'udp_packet_drop_v1': True}},
+            {'json': {'udp_extended_member_weights_v1': True}},
+        ], complete_qs=True)
+        self.assertRaises(driver_except.AmpDriverNotImplementedError,
+                          self.driver.check_udp_extended_member_weights,
+                          self.amp)
+        self.driver.check_udp_extended_member_weights(self.amp)
 
     @requests_mock.mock()
     def test_guarded_udp_delete_requires_kernel_receipt(self, router):

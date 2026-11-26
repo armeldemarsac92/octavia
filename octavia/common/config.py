@@ -377,6 +377,11 @@ api_opts = [
                        'support proportional IPv4 UDP packet drop. Enable '
                        'after upgrading the database, API, workers and all '
                        'Amphora images to support guarded LVS reloads.')),
+    cfg.ListOpt('enabled_udp_extended_member_weights_providers', default=[],
+                help=_('Providers whose regional Amphora fleets support '
+                       'member weights up to 1000000 in full managed UDP '
+                       'batches. Requires UDP packet drop. Enable after '
+                       'upgrading the API, workers and all Amphora images.')),
     cfg.IntOpt('udp_connect_min_interval_health_monitor',
                default=3,
                help=_("The minimum health monitor delay interval for the "

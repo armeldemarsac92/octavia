@@ -291,6 +291,20 @@ only that the agent no longer reports the listener. The withdrawal remains in
 old Amphora with a guard-capable image, then retry the deletion.
 Use the affected VIP and UDP port to inspect residual configuration.
 
+For extended managed UDP member weights, use Amphora images whose agent
+and UDP guard helper support ``udp_extended_member_weights_v1``, and verify
+Keepalived and IPVS can install the full weight range. Upgrade the regional
+API, workers and Amphorae before adding the provider to
+``[api_settings] enabled_udp_extended_member_weights_providers``. Keep
+``enabled_udp_packet_drop_providers`` enabled for the same provider.
+
+To roll back, remove the provider from the extended weights setting to
+stop admission of batches with weights above 256. Complete or replace
+already accepted batches. Use full managed batches with weights through
+256 or delete the affected pools, and wait for provisioning and withdrawal
+to complete before replacing an Amphora with an older image. Use a
+compatible agent to reconcile any remaining extended guard state.
+
 Using distribution packages for amphora agent
 ---------------------------------------------
 By default, amphora agent is installed from Octavia Git repository.

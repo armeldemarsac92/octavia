@@ -73,7 +73,10 @@ class KeepalivedLvs(lvs_listener_base.LvsListenerApiServerBase):
     def check_udp_guard(self):
         self._guard_command()
         udp_guard.check_support()
-        return webob.Response(json={'udp_packet_drop_v1': True})
+        capability = consts.GATEWAY_CAPABILITY_UDP_PACKET_DROP
+        if flask.request.args.get('extended_member_weights') == 'true':
+            capability = consts.GATEWAY_CAPABILITY_UDP_EXTENDED_MEMBER_WEIGHTS
+        return webob.Response(json={capability: True})
 
     def stage_udp_guard(self, listener_id):
         try:

@@ -417,6 +417,12 @@ drop requires at least one enabled member with positive weight. A full
 drop requires no enabled member with positive weight. Backup members
 are unsupported.
 
+With ``udp_extended_member_weights_v1``, the same full batch accepts
+JSON integer member weights from ``0`` to ``1000000``. For example, the batch
+can preserve relative weights of ``1000``, ``1`` and ``1``. Weights from
+``257`` to ``1000000`` require both regional capabilities. All other
+member writes use the standard range from ``0`` to ``256``.
+
 The pool exposes the desired fraction after a 202. Wait for its
 ``provisioning_status`` to reach ``ACTIVE`` before treating the new
 configuration as applied. Repeat an identical request to redeliver a
@@ -424,6 +430,10 @@ pending batch. A different full batch on the same pool replaces a pending
 UDP batch when the render lock is free. An update in progress returns 409.
 The pool reports ``ERROR`` if activation fails and accepts a new full batch
 when the capability is enabled.
+
+After extended weights are disabled, a full batch using only weights
+through ``256`` can replace the graph while ``udp_packet_drop_v1``
+remains available. A previously accepted batch can still finish.
 
 Delete the pool to remove its managed configuration from the listener.
 Deleting the pool can replace its pending batch and remains available when
@@ -471,7 +481,7 @@ Request
    - tags: tags-optional
    - tcp_connection_rejection: tcp-connection-rejection-request
    - udp_packet_drop: udp-packet-drop-request
-   - weight: weight-optional
+   - weight: weight-batch-optional
 
 Request Example
 ---------------
