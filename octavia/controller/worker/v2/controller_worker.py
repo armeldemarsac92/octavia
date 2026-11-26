@@ -347,6 +347,13 @@ class ControllerWorker:
                         constants.PENDING_UPDATE)
             db_lb = e.last_attempt.result()
 
+        revision = listener_updates.get('tcp_default_targets_revision')
+        if revision:
+            pending = (utils.pending_tcp_default_target_revisions(db_lb)
+                       if db_lb is not None else {})
+            if pending.get(listener[constants.LISTENER_ID]) != revision:
+                return
+
         session = db_apis.get_session()
         flavor_dict = {}
         if db_lb.flavor_id:

@@ -19,6 +19,7 @@ from oslo_config import cfg
 from oslo_db import exception as odb_exceptions
 from oslo_log import log as logging
 from oslo_utils import excutils
+from oslo_utils import uuidutils
 from pecan import expose as pecan_expose
 from pecan import request as pecan_request
 from wsme import types as wtypes
@@ -58,6 +59,16 @@ def _validate_frontend_client_auth_fallback(
             'default or SNI server certificate reference.'))
 
 
+def _validate_tcp_default_target_topology(protocol, tcp_tls_termination,
+                                          mixed_mode, default_pool,
+                                          default_tls, has_policies):
+    if (protocol != constants.PROTOCOL_TCP or tcp_tls_termination or
+            mixed_mode or default_pool or default_tls or has_policies):
+        raise exceptions.ValidationException(detail=_(
+            'tcp_default_targets requires a clear TCP listener without '
+            'a scalar default pool or L7 policies.'))
+
+
 def validate_policy_options_on_create(
         driver, listener, *, creating_load_balancer=False):
     protocol = listener['protocol']
@@ -95,6 +106,16 @@ def validate_policy_options_on_create(
             listener.get('default_pool_id') or listener.get('default_pool'))
         driver_utils.require_tcp_tls_mixed_mode(driver)
 
+    if 'tcp_default_targets' in listener:
+        listener['tcp_default_targets'] = validate.tcp_default_targets(
+            listener['tcp_default_targets'])
+        _validate_tcp_default_target_topology(
+            listener['protocol'], listener.get('tcp_tls_termination'),
+            listener.get('tcp_tls_mixed_mode'),
+            listener.get('default_pool_id') or listener.get('default_pool'),
+            listener.get('tcp_default_pool_tls'), listener.get('l7policies'))
+        if listener['tcp_default_targets']:
+            driver_utils.require_tcp_weighted_default_pools(driver)
     tcp_default_pool_tls = listener.get('tcp_default_pool_tls', False)
     if not isinstance(tcp_default_pool_tls, bool):
         raise exceptions.ValidationException(detail=_(
@@ -310,6 +331,17 @@ class ListenersController(base.BaseController):
             raise exceptions.NotFound(
                 resource=data_models.Pool._name(), id=pool_id)
         self._validate_protocol(listener_protocol, db_pool.protocol)
+
+    def _validate_tcp_default_target_pools(self, session, lb_id,
+                                           project_id, targets):
+        for pool_id in sorted({target['pool_id'] for target in targets
+                               if 'pool_id' in target}):
+            pool = self.repositories.pool.get_on_load_balancer_for_update(
+                session, lb_id, project_id, pool_id)
+            validate.validate_tcp_default_target_pool(
+                pool.protocol, pool.tls_enabled, pool.backend_tls_hostname,
+                pool.ca_tls_certificate_id, pool.backend_tls_system_ca,
+                pool.tcp_connection_rejection)
 
     def _has_tls_container_refs(self, listener_dict):
         return (listener_dict.get('tls_certificate_id') or
@@ -529,6 +561,11 @@ class ListenersController(base.BaseController):
 
         validate.check_hsts_options(listener_dict)
 
+        if listener_dict.get('tcp_default_targets'):
+            self._validate_tcp_default_target_pools(
+                lock_session, lb_id, listener_dict['project_id'],
+                listener_dict['tcp_default_targets'])
+
         if listener_dict.get('default_pool_id'):
             pool = self.repositories.pool.get_transport_for_update(
                 lock_session, listener_dict['default_pool_id'])
@@ -608,6 +645,8 @@ class ListenersController(base.BaseController):
                 listener.to_dict(render_unsets=True), None)
             if listener.request_filter_sections is wtypes.Unset:
                 listener_dict.pop('request_filter_sections', None)
+            if listener.tcp_default_targets is wtypes.Unset:
+                listener_dict.pop('tcp_default_targets', None)
             validate_policy_options_on_create(driver, listener_dict)
 
             if listener_dict['default_pool_id']:
@@ -808,6 +847,73 @@ class ListenersController(base.BaseController):
                 fallback = db_listener.client_authentication_insecure_fallback
             self._validate_client_ca_and_crl_refs(
                 ca_ref, crl_ref, require_ca_bundle=fallback is True)
+
+    @staticmethod
+    def _is_tcp_default_targets_withdrawal(listener, updates):
+        if (listener.protocol != constants.PROTOCOL_TCP or
+                not (listener.tcp_default_targets_revision or
+                     listener.tcp_default_targets)):
+            return False
+        if updates == {'enabled': False}:
+            return (bool(listener.tcp_default_targets) or
+                    listener.tcp_default_targets_status in (
+                        constants.PENDING_UPDATE, constants.ERROR))
+        if (listener.tcp_tls_termination or listener.tcp_tls_mixed_mode or
+                listener.tcp_default_pool_tls or listener.default_pool_id):
+            return False
+        if updates.keys() != {'tcp_default_targets'}:
+            return False
+        targets = updates['tcp_default_targets']
+        current = listener.tcp_default_targets or []
+        if targets == current:
+            return validate.tcp_default_targets_retryable(listener)
+        if targets == []:
+            return True
+        if not validate.tcp_default_targets_withdrawal(current, targets):
+            return False
+        # A failed broadening may have configured an unconfirmed target on
+        # only one peer. A restrictive write must not admit that target.
+        applied = listener.tcp_default_targets_applied
+        return (all(target.get('reject') is True for target in targets) or
+                validate.tcp_default_targets_withdrawal(applied, targets))
+
+    def _validate_tcp_default_targets_update(self, session, listener,
+                                             updates, driver, reopening, *,
+                                             withdrawing=False):
+        if withdrawing and updates == {'enabled': False}:
+            return
+        if (listener.tcp_default_targets_status in (
+                constants.PENDING_UPDATE, constants.ERROR) and
+                (updates.get('default_pool_id') or
+                 updates.get('tcp_default_pool_tls') is True)):
+            raise exceptions.ValidationException(detail=_(
+                'Confirm withdrawal of the weighted TCP targets before '
+                'enrolling a scalar default pool.'))
+        current = listener.tcp_default_targets
+        replacing = 'tcp_default_targets' in updates
+        targets = (validate.tcp_default_targets(updates['tcp_default_targets'])
+                   if replacing else current)
+        if replacing:
+            updates['tcp_default_targets'] = targets
+        if not targets:
+            if replacing and not current and listener.protocol != (
+                    constants.PROTOCOL_TCP):
+                raise exceptions.ValidationException(detail=_(
+                    'tcp_default_targets is available on TCP listeners.'))
+            return
+        _validate_tcp_default_target_topology(
+            listener.protocol, listener.tcp_tls_termination,
+            listener.tcp_tls_mixed_mode,
+            updates.get('default_pool_id', listener.default_pool_id),
+            updates.get('tcp_default_pool_tls',
+                        listener.tcp_default_pool_tls),
+            self.repositories.l7policy.has_listener_policy(
+                session, listener.id))
+        if reopening or (replacing and not withdrawing):
+            driver_utils.require_tcp_weighted_default_pools(driver)
+            self._validate_tcp_default_target_pools(
+                session, listener.load_balancer_id, listener.project_id,
+                targets)
 
     def _validate_tcp_tls_update(self, session, listener, updates, driver,
                                  reopening):
@@ -1088,12 +1194,24 @@ class ListenersController(base.BaseController):
                 db_listener.tcp_default_pool_tls and
                 listener_dict == {'tcp_default_pool_tls': False,
                                   'default_pool_id': None})
+            withdrawing_targets = self._is_tcp_default_targets_withdrawal(
+                db_listener, listener_dict)
+            target_revision = db_listener.tcp_default_targets_revision
             self._test_lb_and_listener_statuses(
                 context.session, load_balancer_id,
-                allow_error=withdrawing_otlp or withdrawing_default_tls)
+                allow_error=(withdrawing_otlp or withdrawing_default_tls or
+                             withdrawing_targets))
             db_listener = self.repositories.listener.get_for_update(
                 context.session, id, show_deleted=False)
-            if ((withdrawing_default_tls and
+            if ((withdrawing_targets and (
+                 db_listener.load_balancer_id != load_balancer_id or
+                 db_listener.project_id != project_id or
+                 db_listener.provisioning_status not in (
+                     constants.ACTIVE, constants.ERROR) or
+                 db_listener.tcp_default_targets_revision != target_revision or
+                 not self._is_tcp_default_targets_withdrawal(
+                     db_listener, listener_dict))) or
+                (withdrawing_default_tls and
                  not db_listener.tcp_default_pool_tls) or
                 (withdrawing_otlp and
                  listener_dict['otlp_tracing'] is not None and
@@ -1145,6 +1263,9 @@ class ListenersController(base.BaseController):
                     withdrawing=withdrawing_filters)
             self._validate_frontend_client_auth_fallback_update(
                 db_listener, listener_dict, driver, reopening)
+            self._validate_tcp_default_targets_update(
+                context.session, db_listener, listener_dict, driver,
+                reopening, withdrawing=withdrawing_targets)
             self._validate_tcp_tls_update(context.session, db_listener,
                                           listener_dict, driver, reopening)
             if (reopening or 'default_http_response' in listener_dict or
@@ -1188,6 +1309,15 @@ class ListenersController(base.BaseController):
                     driver_utils.require_tls_sni_suffix(driver)
 
             db_listener.provisioning_status = constants.PENDING_UPDATE
+            track_targets = (
+                ('tcp_default_targets' in listener_dict and
+                 (target_revision or
+                  listener_dict['tcp_default_targets'])) or
+                ('enabled' in listener_dict and
+                 db_listener.tcp_default_targets) or withdrawing_targets)
+            if track_targets:
+                listener_dict['tcp_default_targets_revision'] = (
+                    uuidutils.generate_uuid())
 
             # Prepare the data for the driver data model
             provider_listener_dict = (
@@ -1215,7 +1345,11 @@ class ListenersController(base.BaseController):
                 old_provider_listener,
                 driver_dm.Listener.from_dict(provider_listener_dict))
 
-            # Update the database to reflect what the driver just accepted
+            # Update the database to reflect what the driver just accepted.
+            if track_targets:
+                listener_dict.update(
+                    tcp_default_targets_status=constants.PENDING_UPDATE,
+                    tcp_default_targets_restrictive=withdrawing_targets)
             self.repositories.listener.update(
                 context.session, id, **listener_dict)
 

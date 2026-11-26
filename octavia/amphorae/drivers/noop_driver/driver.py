@@ -155,7 +155,8 @@ class NoopAmphoraLoadBalancerDriver(
     def update(self, loadbalancer, *, l7policy_activation=False,
                l7policy_restoration=False, tcp_member_batch=False,
                http_header_name_withdrawal=False,
-               require_http_header_name_256=False):
+               require_http_header_name_256=False,
+               tcp_default_targets_update=False):
         self.driver.update(loadbalancer)
 
     def start(self, loadbalancer, amphora=None, timeout_dict=None):

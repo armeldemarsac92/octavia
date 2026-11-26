@@ -738,6 +738,59 @@ qualified Amphora support and prepared certificate material closes
 connections. Withdraw the association with ``tcp_default_pool_tls: false``
 and ``default_pool_id: null`` before downgrading the region.
 
+Weighted default TCP pools on clear listeners
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Upgrade octavia-lib, the database, the API, the workers and all Amphora
+agents before enrolling the provider in
+``[api_settings] enabled_tcp_weighted_default_pool_providers``. Also enable
+backend TLS hostname authentication for that provider. Confirm that the API
+and each Amphora agent report ``tcp_weighted_default_pools_v1``.
+
+On a clear TCP listener, set the entire ordered list on creation or with
+``PUT /v2/lbaas/listeners/{listener_id}``::
+
+    {"listener": {"tcp_default_targets": [
+        {"pool_id": "70bd5ca0-95fd-4f5e-9e81-840ae2693907", "weight": 3},
+        {"reject": true, "weight": 1}
+    ]}}
+
+Supply up to 16 entries, each with a weight from 1 to 1,000,000. Pool
+references must belong to the listener's load balancer. The listener
+cannot also use a scalar default pool, TLS termination or L7 policies.
+Configure any rejected share directly on the listener. Target pools
+cannot also have pool-level connection rejection.
+Octavia draws once per connection before inspecting any payload and closes
+the selected share if the target is rejected, disabled or unavailable.
+
+Clear TCP pools carry the stream as received. For each authenticated pool,
+set ``tls_enabled: true``, a literal DNS ``backend_tls_hostname`` and
+``ca_tls_container_ref``. Set ``tls_container_ref`` when the backend requires
+a client certificate. The fixed SNI and exact DNS certificate verification
+apply to connections and configured health probes. The association sends
+no application ALPN on either. Different pools can use the same backend
+address with different credentials and DNS names.
+
+An eligible listener with an empty list returns ``tcp_default_targets: []``.
+The API accepts an empty list to clear the configuration. To close just one
+share, replace its pool entry with an explicit reject at the same position
+and weight. Listener responses give the desired list and a read-only
+``tcp_default_targets_status`` once the feature has been used. Wait for
+``ACTIVE`` on that field and the disappearance of the relevant reverse links
+before deleting retired pools. Until every allocated Amphora has confirmed
+the same configuration generation, the status remains ``PENDING_UPDATE``
+or ``ERROR`` and the old pool references remain held.
+
+Regional opt-out still allows clearing or changing a pool entry to reject.
+The empty list remains readable for a previously managed listener whose
+topology still permits weighted targets. A scalar default pool excludes
+weighted targets, including after opt-out. When the API reports
+``tcp_default_targets_retryable: true`` on a failed restrictive update, send
+the identical desired list to retry publication. A failed enrollment cannot
+be retried through this path. A standalone update to
+``admin_state_up: false`` can close an affected listener in error. Clear
+existing lists and wait for their confirmation before downgrading.
+
 Authenticated TLS backends on terminating TCP listeners
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

@@ -1280,6 +1280,7 @@ class PoolRepository(BaseRepository):
         pool = self.model_class
         row = (session.query(pool.protocol, pool.backend_h2c, pool.tls_enabled,
                              pool.enabled, pool.udp_packet_drop,
+                             pool.tcp_connection_rejection,
                              pool.backend_tls_hostname,
                              pool.backend_tls_require_h2,
                              pool.backend_tls_subject_alt_names,
@@ -1319,6 +1320,7 @@ class PoolRepository(BaseRepository):
         # no-load (blank) the tables we don't need
         query_options = (
             subqueryload(models.Pool._default_listeners),
+            subqueryload(models.Pool._tcp_default_target_listeners),
             subqueryload(models.Pool._request_filter_listeners),
             (subqueryload(models.Pool._l7policy_auth_refs).
              subqueryload(models.L7PolicyExternalAuthPool.l7policy).options(
@@ -1546,12 +1548,75 @@ class ListenerRepository(BaseRepository):
         for pool_id in sorted(requested - existing):
             session.add(ref(listener_id=listener_id, pool_id=pool_id))
 
+    def get_tcp_default_target_listener_using_pool(self, session, pool_id):
+        refs = models.ListenerTcpDefaultTargetPool
+        return (session.query(refs.listener_id).filter_by(pool_id=pool_id)
+                .with_for_update().limit(1).scalar())
+
+    @staticmethod
+    def _sync_tcp_default_target_pool_refs(session, listener, *, confirmed):
+        ref = models.ListenerTcpDefaultTargetPool
+        listener_id = listener.id
+        requested = utils.tcp_default_target_pool_ids(listener)
+        query = session.query(ref).filter_by(listener_id=listener_id)
+        existing = {row.pool_id for row in query.with_for_update()}
+        removed = existing - requested
+        if confirmed and removed:
+            query.filter(ref.pool_id.in_(removed)).delete(
+                synchronize_session='fetch')
+        for pool_id in sorted(requested - existing):
+            session.add(ref(listener_id=listener_id, pool_id=pool_id))
+        session.flush()
+
+    def set_tcp_default_targets_statuses(self, session, lb_id, revisions,
+                                         status, *, topology=None):
+        lb = LoadBalancerRepository().get_for_update(session, lb_id)
+        if lb is None or lb.provisioning_status in (
+                consts.PENDING_DELETE, consts.DELETED):
+            return False
+        if status == consts.ACTIVE:
+            expected_mode, expected_peers, enabled = topology
+            amphora = models.Amphora
+            allocated = session.execute(select(amphora.id, amphora.role).where(
+                amphora.load_balancer_id == lb_id,
+                amphora.status == consts.AMPHORA_ALLOCATED).with_for_update())
+            if (lb.topology != expected_mode or lb.enabled != enabled or
+                    not utils.amphora_roles_match_topology(
+                        expected_mode, expected_peers.values()) or
+                    dict(allocated.all()) != expected_peers):
+                return False
+        model = self.model_class
+        listeners = (session.query(model).filter(
+            model.load_balancer_id == lb_id, model.project_id == lb.project_id,
+            model.id.in_(revisions),
+            model.provisioning_status.notin_(
+                (consts.PENDING_DELETE, consts.DELETED)))
+            .options(lazyload('*')).populate_existing().order_by(model.id)
+            .with_for_update().all())
+        if (len(listeners) != len(revisions) or any(
+                listener.tcp_default_targets_revision != revisions[listener.id]
+                for listener in listeners)):
+            return False
+        for listener in listeners:
+            if listener.tcp_default_targets_status not in (
+                    consts.PENDING_UPDATE, consts.ERROR):
+                continue
+            listener.tcp_default_targets_status = status
+            if status == consts.ACTIVE:
+                listener.tcp_default_targets_applied = (
+                    listener.tcp_default_targets if
+                    lb.enabled and listener.enabled else None)
+                self._sync_tcp_default_target_pool_refs(
+                    session, listener, confirmed=True)
+        return True
+
     def get_active_tcp_tls_listeners(self, session, load_balancer_id):
         listener = self.model_class
         return (session.query(listener)
                 .filter_by(load_balancer_id=load_balancer_id, enabled=True)
                 .filter(listener.tcp_tls_termination.is_(True) |
-                        listener.tcp_default_pool_tls.is_(True))
+                        listener.tcp_default_pool_tls.is_(True) |
+                        listener.tcp_default_targets.is_not(None))
                 .filter(listener.provisioning_status.notin_(
                     (consts.PENDING_DELETE, consts.DELETED)))
                 .populate_existing().with_for_update().all())
@@ -1780,9 +1845,15 @@ class ListenerRepository(BaseRepository):
         if 'request_filter_sections' in model_kwargs:
             self._replace_request_filter_pool_refs(
                 session, id, model_kwargs['request_filter_sections'])
+        if 'tcp_default_targets' in model_kwargs:
+            targets = model_kwargs['tcp_default_targets'] or None
+            model_kwargs['tcp_default_targets'] = targets
         if marks_error and listener_db.frontend_fallback_owns_error is True:
             listener_db.frontend_fallback_owns_error = False
         listener_db.update(model_kwargs)
+        if 'tcp_default_targets' in model_kwargs:
+            self._sync_tcp_default_target_pool_refs(
+                session, listener_db, confirmed=False)
 
     def create(self, session, **model_kwargs):
         """Creates a new Listener with some validation."""
@@ -1791,10 +1862,17 @@ class ListenerRepository(BaseRepository):
         model_kwargs['allowed_cidrs'] = [
             models.ListenerCidr(listener_id=listener_id, cidr=cidr)
             for cidr in allowed_cidrs]
+        if 'tcp_default_targets' in model_kwargs:
+            model_kwargs['tcp_default_targets'] = (
+                model_kwargs['tcp_default_targets'] or None)
         model = self.model_class(**model_kwargs)
         if model.otlp_tracing:
             model.otlp_tracing_status = consts.PENDING_UPDATE
             model.otlp_tracing_revision = uuidutils.generate_uuid()
+        if model.tcp_default_targets:
+            model.tcp_default_targets_revision = uuidutils.generate_uuid()
+            model.tcp_default_targets_status = consts.PENDING_UPDATE
+            model.tcp_default_targets_restrictive = False
         if model.default_pool_id:
             model.default_pool = self._pool_check(
                 session, model.default_pool_id,
@@ -1803,7 +1881,8 @@ class ListenerRepository(BaseRepository):
             model.peer_port = self._find_next_peer_port(
                 session, lb_id=model.load_balancer_id)
         session.add(model)
-        if model.request_filter_sections or model.otlp_tracing:
+        if (model.request_filter_sections or model.otlp_tracing or
+                model.tcp_default_targets):
             session.flush()
         if model.otlp_tracing:
             self._hold_otlp_collector_pool(session, listener_id,
@@ -1811,6 +1890,9 @@ class ListenerRepository(BaseRepository):
         if model.request_filter_sections:
             self._replace_request_filter_pool_refs(
                 session, listener_id, model.request_filter_sections)
+        if model.tcp_default_targets:
+            self._sync_tcp_default_target_pool_refs(
+                session, model, confirmed=False)
         return model.to_data_model()
 
     def prov_status_active_if_not_error(self, session, listener_id):

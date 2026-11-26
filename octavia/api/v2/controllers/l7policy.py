@@ -844,6 +844,12 @@ class L7PolicyController(base.BaseController):
                 listener_ids=[listener_id])
             listener = self.repositories.listener.get_for_update(
                 lock_session, listener_id, show_deleted=False)
+            if (listener.tcp_default_targets or
+                    listener.tcp_default_targets_status in (
+                        constants.PENDING_UPDATE, constants.ERROR)):
+                raise exceptions.ValidationException(detail=_(
+                    'L7 policies are unavailable on tcp_default_targets '
+                    'listeners.'))
             if listener.tcp_default_pool_tls:
                 raise exceptions.ValidationException(detail=_(
                     'L7 policies are unavailable on tcp_default_pool_tls '

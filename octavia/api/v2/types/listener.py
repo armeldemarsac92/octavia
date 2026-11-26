@@ -74,6 +74,18 @@ class RequestFilterSections(wtypes.UserType):
             raise ValueError(str(exc)) from exc
 
 
+class TcpDefaultTargets(wtypes.UserType):
+    basetype = object
+    name = 'tcp_default_targets'
+
+    @staticmethod
+    def validate(value):
+        try:
+            return validate.tcp_default_targets(value)
+        except exceptions.ValidationException as exc:
+            raise wsme_exc.ClientSideError(str(exc)) from None
+
+
 class BaseListenerType(types.BaseType):
     _type_to_db_map = {
         'admin_state_up': 'enabled',
@@ -96,6 +108,10 @@ class ListenerResponse(BaseListenerType):
     tcp_tls_termination = wtypes.wsattr(bool)
     tcp_tls_mixed_mode = wtypes.wsattr(bool)
     tcp_default_pool_tls = wtypes.wsattr(bool)
+    tcp_default_targets = wtypes.wsattr(TcpDefaultTargets())
+    tcp_default_targets_status = wtypes.wsattr(wtypes.Enum(
+        str, constants.PENDING_UPDATE, constants.ACTIVE, constants.ERROR))
+    tcp_default_targets_retryable = wtypes.wsattr(bool)
     protocol_port = wtypes.wsattr(wtypes.IntegerType())
     connection_limit = wtypes.wsattr(wtypes.IntegerType())
     default_tls_container_ref = wtypes.wsattr(wtypes.StringType())
@@ -165,6 +181,28 @@ class ListenerResponse(BaseListenerType):
                 False if load_balancer and
                 driver_factory.tcp_default_pool_tls_available(
                     load_balancer.provider) else wtypes.Unset)
+        result.tcp_default_targets_status = (
+            db_obj.tcp_default_targets_status or wtypes.Unset)
+        result.tcp_default_targets_retryable = (
+            validate.tcp_default_targets_retryable(db_obj)
+            if db_obj.tcp_default_targets_revision else wtypes.Unset)
+        targets = db_obj.tcp_default_targets
+        if targets:
+            result.tcp_default_targets = targets
+        else:
+            eligible = (
+                db_obj.protocol == constants.PROTOCOL_TCP and
+                not (db_obj.tcp_tls_termination or db_obj.tcp_tls_mixed_mode or
+                     db_obj.tcp_default_pool_tls or db_obj.default_pool_id) and
+                not any(policy.provisioning_status not in (
+                    constants.PENDING_DELETE, constants.DELETED)
+                    for policy in db_obj.l7policies))
+            lb = db_obj.load_balancer if eligible else None
+            known = eligible and (
+                db_obj.tcp_default_targets_revision or
+                (lb and driver_factory.tcp_weighted_default_pools_available(
+                    lb.provider)))
+            result.tcp_default_targets = [] if known else wtypes.Unset
         if result.client_authentication_insecure_fallback is None:
             result.client_authentication_insecure_fallback = wtypes.Unset
         if db_obj.default_http_response is not None:
@@ -246,6 +284,7 @@ class ListenerPOST(BaseListenerType):
     tcp_tls_termination = wtypes.wsattr(bool, default=False)
     tcp_tls_mixed_mode = wtypes.wsattr(bool, default=False)
     tcp_default_pool_tls = wtypes.wsattr(bool, default=False)
+    tcp_default_targets = wtypes.wsattr(TcpDefaultTargets())
     default_pool = wtypes.wsattr(pool_types.PoolSingleCreate)
     l7policies = wtypes.wsattr(
         [l7policy_types.L7PolicySingleCreate], default=[])
@@ -304,6 +343,7 @@ class ListenerPUT(BaseListenerType):
     tcp_tls_termination = wtypes.wsattr(bool)
     tcp_tls_mixed_mode = wtypes.wsattr(bool)
     tcp_default_pool_tls = wtypes.wsattr(bool)
+    tcp_default_targets = wtypes.wsattr(TcpDefaultTargets())
     insert_headers = wtypes.wsattr(
         wtypes.DictType(str, wtypes.StringType(max_length=255)))
     timeout_client_data = wtypes.wsattr(
@@ -364,6 +404,7 @@ class ListenerSingleCreate(BaseListenerType):
     tcp_tls_termination = wtypes.wsattr(bool, default=False)
     tcp_tls_mixed_mode = wtypes.wsattr(bool, default=False)
     tcp_default_pool_tls = wtypes.wsattr(bool, default=False)
+    tcp_default_targets = wtypes.wsattr(TcpDefaultTargets())
     default_pool = wtypes.wsattr(pool_types.PoolSingleCreate)
     l7policies = wtypes.wsattr(
         [l7policy_types.L7PolicySingleCreate], default=[])

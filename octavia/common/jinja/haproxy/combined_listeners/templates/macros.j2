@@ -633,6 +633,19 @@ frontend {{ listener.id }}
     http-after-response lua.octavia-grpc-auth-response if { var(txn.octavia_grpc_auth_allowed) -m bool } !{ var(txn.octavia_grpc_auth_response_applied) -m bool }
     http-after-response set-status 503 if { var(txn.octavia_grpc_auth_allowed) -m bool } !{ var(txn.octavia_grpc_auth_response_applied) -m bool }
     {% endif %}
+    {% if listener.tcp_default_targets is defined %}
+        {% if listener.tcp_default_targets %}
+    tcp-request connection set-var(sess.octavia_tcp_default_draw) rand({{ listener.tcp_default_target_weight }})
+            {% for target in listener.tcp_default_targets if not target.pool_id %}
+    tcp-request connection reject if { var(sess.octavia_tcp_default_draw) -m int {{ target.first }}:{{ target.last }} }
+            {% endfor %}
+            {% for target in listener.tcp_default_targets if target.pool_id %}
+    use_backend {{ target.pool_id }}:{{ listener.id }} if { var(sess.octavia_tcp_default_draw) -m int {{ target.first }}:{{ target.last }} }
+            {% endfor %}
+        {% else %}
+    tcp-request connection reject
+        {% endif %}
+    {% endif %}
     {% set tcp_weighted = policies|selectattr('tcp_weighted_targets', 'defined')|list %}
     {% if listener.inspect_tls_sni is defined %}
     tcp-request inspect-delay {{ listener.timeout_tcp_inspect }}
@@ -707,7 +720,7 @@ frontend {{ listener.id }}
     default_backend {{ listener.default_pool.id }}:{{ listener.id }}
     {% endif %}
     timeout client {{ listener.timeout_client_data }}
-    {% if listener.timeout_tcp_inspect and listener.inspect_tls_sni is not defined and not listener.tcp_tls_termination %}
+    {% if listener.timeout_tcp_inspect and listener.inspect_tls_sni is not defined and not listener.tcp_tls_termination and listener.tcp_default_targets is not defined %}
     tcp-request inspect-delay {{ listener.timeout_tcp_inspect }}
     {% endif %}
     {% if listener.protocol == lib_consts.PROTOCOL_PROMETHEUS and

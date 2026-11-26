@@ -496,7 +496,11 @@ class Listener(BaseDataModel):
                  frontend_fallback_owns_error=None,
                  request_filter_sections=None, otlp_tracing=None,
                  otlp_tracing_status=None, otlp_tracing_revision=None,
-                 *, tcp_default_pool_tls=False):
+                 *, tcp_default_pool_tls=False, tcp_default_targets=None,
+                 tcp_default_targets_revision=None,
+                 tcp_default_targets_status=None,
+                 tcp_default_targets_applied=None,
+                 tcp_default_targets_restrictive=None):
         self.id = id
         self.project_id = project_id
         self.name = name
@@ -511,6 +515,11 @@ class Listener(BaseDataModel):
         self.tcp_tls_termination = tcp_tls_termination
         self.tcp_tls_mixed_mode = tcp_tls_mixed_mode
         self.tcp_default_pool_tls = tcp_default_pool_tls
+        self.tcp_default_targets = tcp_default_targets
+        self.tcp_default_targets_revision = tcp_default_targets_revision
+        self.tcp_default_targets_status = tcp_default_targets_status
+        self.tcp_default_targets_applied = tcp_default_targets_applied
+        self.tcp_default_targets_restrictive = tcp_default_targets_restrictive
         self.load_balancer_id = load_balancer_id
         self.protocol = protocol
         self.protocol_port = protocol_port

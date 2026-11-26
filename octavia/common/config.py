@@ -309,6 +309,11 @@ api_opts = [
                 help=_('Providers with qualified Amphora fleets that can '
                        'authenticate the default TCP pool of a clear TCP '
                        'listener. Requires backend TLS hostname support.')),
+    cfg.ListOpt('enabled_tcp_weighted_default_pool_providers', default=[],
+                help=_('Providers with qualified Amphora fleets that can '
+                       'split connections across independently configured '
+                       'TCP pools on a clear listener. Requires backend TLS '
+                       'hostname support.')),
     cfg.ListOpt('enabled_tcp_tls_termination_providers', default=[],
                 help=_('Providers whose regional Amphora fleets support TLS '
                        'termination on TCP listeners. Enable after upgrading '
