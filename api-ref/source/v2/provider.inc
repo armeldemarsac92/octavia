@@ -419,6 +419,16 @@ IPVS service before forwarding the admitted share. Each Amphora applies
 the update separately, so the port may briefly be unavailable and peers
 may temporarily apply different configurations.
 
+``udp_extended_member_weights_v1`` extends the range of ``weight`` to
+``0..1000000`` for full ``udp_packet_drop`` member batches. Enable the
+provider in ``[api_settings] enabled_udp_extended_member_weights_providers``
+after upgrading the regional API, workers and participating Amphora
+images. The provider must also advertise ``udp_packet_drop_v1``.
+For a batch containing an extended weight, every allocated Amphora must
+report extended weight support before the worker stages the graph. The
+pool reaches ``ACTIVE`` after the peers verify the IPVS configuration,
+including the exact destination weights.
+
 ``backend_retry_budget_v1`` enables ``backend_retry_budget`` on HTTP
 pools forwarding ingress on HTTP and ``TERMINATED_HTTPS`` listeners. It
 shares request and retry history among participating pools with the same

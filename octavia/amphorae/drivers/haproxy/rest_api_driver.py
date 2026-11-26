@@ -56,6 +56,7 @@ class HaproxyAmphoraLoadBalancerDriver(
         vrrp_rest_driver.KeepalivedAmphoraDriverMixin):
 
     supports_listener_closure_publication = True
+    supports_udp_extended_member_weights = True
 
     def __init__(self):
         super().__init__()
@@ -382,7 +383,8 @@ class HaproxyAmphoraLoadBalancerDriver(
             http_retry_backoff_observed=None, required_backoff_policies=(),
             verify_publication=False, weighted_passthrough_degraded=False,
             system_ca_observed=None, read_http_header_key=None,
-            tcp_only=False, closure_publications=None):
+            tcp_only=False, closure_publications=None,
+            extended_udp_weights_checked=False):
         if not loadbalancer.listeners:
             LOG.debug('No listeners found to update.')
             return set()
@@ -410,7 +412,8 @@ class HaproxyAmphoraLoadBalancerDriver(
                         tcp_batch_configs is not None):
                     continue
                 self._update_udp_amphora(
-                    listener, amphora, timeout_dict=timeout_dict)
+                    listener, amphora, timeout_dict=timeout_dict,
+                    extended_weights_checked=extended_udp_weights_checked)
             else:
                 has_tcp = True
                 obj_id = loadbalancer.id
@@ -621,6 +624,15 @@ class HaproxyAmphoraLoadBalancerDriver(
                 getattr(listener.default_pool, 'udp_packet_drop', None)
                 is not None)
 
+    def _has_udp_extended_weights(self, listener):
+        if not self._has_udp_guard(listener):
+            return False
+        pool = listener.default_pool
+        return (pool.provisioning_status not in jinja_udp_cfg.REMOVED and
+                any(member.provisioning_status not in jinja_udp_cfg.REMOVED and
+                    member.weight > consts.MAX_WEIGHT
+                    for member in pool.members))
+
     def _udp_guard_config(self, listener):
         if not self._has_udp_guard(listener):
             return None
@@ -648,25 +660,35 @@ class HaproxyAmphoraLoadBalancerDriver(
                         'port': member.protocol_port,
                         'weight': member.weight,
                     })
-        return {'vip': lb.vip.ip_address, 'port': listener.protocol_port,
-                'fraction': fraction, 'has_service': bool(destinations),
-                'destinations': destinations, 'retiring': retiring}
+        guard = {'vip': lb.vip.ip_address, 'port': listener.protocol_port,
+                 'fraction': fraction, 'has_service': bool(destinations),
+                 'destinations': destinations, 'retiring': retiring}
+        # Negotiate the capability even while an extended member is disabled.
+        # The staging marker also fences an agent downgrade after preflight.
+        if self._has_udp_extended_weights(listener):
+            guard['extended_member_weights'] = True
+        return guard
 
-    def _check_udp_guard(self, amphora, timeout_dict=None):
+    def _check_udp_guard(self, amphora, timeout_dict=None, *,
+                         extended_weights=False):
+        client = self.clients[amphora.api_version]
+        check = (client.check_udp_extended_member_weights if extended_weights
+                 else client.check_udp_guard)
         try:
-            self.clients[amphora.api_version].check_udp_guard(
-                amphora, timeout_dict=timeout_dict)
+            check(amphora, timeout_dict=timeout_dict)
         except exc.NotFound as error:
             raise driver_except.AmpDriverNotImplementedError() from error
 
     def _update_udp_amphora(self, listener, amphora, timeout_dict=None, *,
-                            delete=False):
+                            delete=False, close=False,
+                            extended_weights_checked=False):
         guard = self._udp_guard_config(listener)
         client = self.clients[amphora.api_version]
-        if delete:
-            # Stage the closed VIP/port even when a prior DELETE already
-            # removed the files. A fresh kernel proof is required on retry.
-            guard.update(has_service=False, destinations=[], retiring=True)
+        if delete or close:
+            # A fresh kernel proof is required even if this listener was
+            # already removed. Keep the guard installed for a closed pool.
+            guard.update(has_service=False, destinations=[], retiring=delete)
+            guard.pop('extended_member_weights', None)
             config = f'net_namespace {consts.AMPHORA_NAMESPACE}\n'
         else:
             config = self.lvs_jinja.build_config(listener=listener)
@@ -678,9 +700,12 @@ class HaproxyAmphoraLoadBalancerDriver(
             return
 
         try:
-            self._check_udp_guard(amphora, timeout_dict)
+            extended_weights = guard.get('extended_member_weights', False)
+            if not (extended_weights and extended_weights_checked):
+                self._check_udp_guard(amphora, timeout_dict,
+                                      extended_weights=extended_weights)
         except driver_except.AmpDriverNotImplementedError:
-            if guard['retiring']:
+            if guard['retiring'] or close:
                 client.close_legacy_udp_listener(amphora, listener.id,
                                                  timeout_dict=timeout_dict)
                 LOG.error('Amphora %(amphora)s no longer reports UDP '
@@ -707,6 +732,54 @@ class HaproxyAmphoraLoadBalancerDriver(
             raise driver_except.ListenerProvisioningError()
         return amphorae
 
+    def _preflight_extended_udp_weights(
+            self, loadbalancer, listeners, *, targets=(), timeout_dict=None):
+        listeners = [listener for listener in listeners
+                     if self._has_udp_extended_weights(listener)]
+        if not listeners:
+            return False
+
+        peers = {amp.id: amp for amp in self._allocated_amphorae(loadbalancer)}
+        peers.update((amp.id, amp) for amp in targets)
+        refusal = None
+        errors = []
+        for amphora in peers.values():
+            try:
+                self._populate_amphora_api_version(amphora, timeout_dict)
+                self._check_udp_guard(amphora, timeout_dict,
+                                      extended_weights=True)
+            except driver_except.AmpDriverNotImplementedError as error:
+                refusal = error
+            except Exception as error:
+                errors.append(error)
+        if refusal is not None:
+            # The previous graph may still be serving. Publish a native
+            # guarded closure for the affected VIP/port on each peer.
+            self._close_udp_guards(listeners, peers.values(), timeout_dict,
+                                   refusal)
+        if errors:
+            raise errors[0]
+        return True
+
+    def _close_udp_guards(self, listeners, amphorae, timeout_dict, refusal):
+        errors = []
+        for amphora in amphorae:
+            for listener in listeners:
+                try:
+                    self._populate_amphora_api_version(amphora, timeout_dict)
+                    self._update_udp_amphora(listener, amphora, timeout_dict,
+                                             close=True)
+                except Exception as error:
+                    errors.append(error)
+                    LOG.warning('Could not confirm UDP listener %(listener)s '
+                                'closure on Amphora %(amphora)s (%(error)s).',
+                                {'listener': listener.id,
+                                 'amphora': amphora.id,
+                                 'error': type(error).__name__})
+        if errors:
+            raise errors[0] from refusal
+        raise refusal
+
     def apply_udp_member_batch(self, loadbalancer, listener_id):
         listener = next((listener for listener in loadbalancer.listeners
                          if listener.id == listener_id), None)
@@ -720,9 +793,10 @@ class HaproxyAmphoraLoadBalancerDriver(
         # Replacement Amphorae use the single-peer failover render method.
         amphorae = self._allocated_amphorae(loadbalancer)
         config = self.lvs_jinja.build_config(listener=listener)
-        for amphora in amphorae:
-            self._populate_amphora_api_version(amphora)
-            self._check_udp_guard(amphora)
+        if not self._preflight_extended_udp_weights(loadbalancer, [listener]):
+            for amphora in amphorae:
+                self._populate_amphora_api_version(amphora)
+                self._check_udp_guard(amphora)
         for amphora in amphorae:
             self.clients[amphora.api_version].stage_udp_guard(
                 amphora, listener.id, config, guard)
@@ -752,12 +826,17 @@ class HaproxyAmphoraLoadBalancerDriver(
         else:
             amphorae = [amp for amp in loadbalancer.amphorae
                         if amp.status != consts.DELETED]
+        extended_weights_checked = (
+            not delete and self._preflight_extended_udp_weights(
+                loadbalancer, listeners))
         errors = []
         for amphora in amphorae:
             try:
                 self._populate_amphora_api_version(amphora)
                 for listener in listeners:
-                    self._update_udp_amphora(listener, amphora, delete=delete)
+                    self._update_udp_amphora(
+                        listener, amphora, delete=delete,
+                        extended_weights_checked=extended_weights_checked)
             except Exception as error:
                 errors.append(error)
         if errors:
@@ -838,6 +917,12 @@ class HaproxyAmphoraLoadBalancerDriver(
                 loadbalancer) as persistence_options,
             self._system_ca_render_results(loadbalancer) as system_options
         ):
+            udp_options = {}
+            if (not l7policy_activation and not tcp_member_batch and
+                    self._preflight_extended_udp_weights(
+                        loadbalancer, loadbalancer.listeners,
+                        targets=amphorae)):
+                udp_options['extended_udp_weights_checked'] = True
             if (amphorae and
                     (opted_in or fallback or withdrawn or
                      backoff_policies or weighted_passthrough or
@@ -859,13 +944,13 @@ class HaproxyAmphoraLoadBalancerDriver(
                     **({'require_tcp_default_target_topology': True}
                        if verify_tcp_defaults else {}),
                     **tracing_options, **batch_options, **persistence_options,
-                    **system_options, **closure_options)
+                    **system_options, **closure_options, **udp_options)
             for amphora in amphorae:
                 self._update_amphora_listeners(
                     loadbalancer, amphora,
                     l7policy_activation=l7policy_activation,
                     **tracing_options, **batch_options, **persistence_options,
-                    **system_options, **closure_options)
+                    **system_options, **closure_options, **udp_options)
             if tcp_member_batch:
                 self._reload_tcp_batch_configs(
                     loadbalancer, tcp_batch_configs, backoff_policies,
@@ -1226,7 +1311,7 @@ class HaproxyAmphoraLoadBalancerDriver(
             http_header_name_withdrawal=False,
             require_http_header_name_256=False,
             require_tcp_default_target_topology=False,
-            closure_publications=None):
+            closure_publications=None, extended_udp_weights_checked=False):
         # Preflight the pair before staging material or reloading either peer.
         header_name_256 = validate.http_header_name_256_listeners(
             loadbalancer, include_new_rules=require_header_name_topology and
@@ -1530,6 +1615,8 @@ class HaproxyAmphoraLoadBalancerDriver(
         render_options = {}
         if closure_publications is not None:
             render_options['closure_publications'] = closure_publications
+        if extended_udp_weights_checked:
+            render_options['extended_udp_weights_checked'] = True
         if otlp_observed is not None:
             render_options['otlp_observed'] = otlp_observed
         if http_persistence_observed is not None:
@@ -1778,26 +1865,30 @@ class HaproxyAmphoraLoadBalancerDriver(
         self._populate_amphora_api_version(amp)
         self.clients[amp.api_version].update_cert_for_rotation(amp, pem)
 
-    def _apply(self, func_name, loadbalancer, amphora=None, *args, **kwargs):
+    def _apply(self, func_name, loadbalancer, amphora, timeout_dict):
         if amphora is None:
-            amphorae = loadbalancer.amphorae
+            amphorae = [amp for amp in loadbalancer.amphorae
+                        if amp.status != consts.DELETED]
+            self._preflight_extended_udp_weights(
+                loadbalancer, loadbalancer.listeners, targets=amphorae,
+                timeout_dict=timeout_dict)
         else:
             amphorae = [amphora]
 
         for amp in amphorae:
             if amp.status != consts.DELETED:
                 self._populate_amphora_api_version(
-                    amp, timeout_dict=args[0])
+                    amp, timeout_dict=timeout_dict)
                 has_tcp = False
                 for listener in loadbalancer.listeners:
                     if listener.protocol in consts.LVS_PROTOCOLS:
                         getattr(self.clients[amp.api_version], func_name)(
-                            amp, listener.id, *args)
+                            amp, listener.id, timeout_dict)
                     else:
                         has_tcp = True
                 if has_tcp:
                     getattr(self.clients[amp.api_version], func_name)(
-                        amp, loadbalancer.id, *args)
+                        amp, loadbalancer.id, timeout_dict)
 
     def reload(self, loadbalancer, amphora=None, timeout_dict=None):
         if validate.http_header_name_256_listeners(loadbalancer):
@@ -2551,11 +2642,22 @@ class AmphoraAPIClient1_0(AmphoraAPIClientBase):
         return exc.check_exception(r)
 
     def check_udp_guard(self, amp, timeout_dict=None):
-        response = self.get(amp, 'udp_guard', timeout_dict=timeout_dict,
+        self._check_udp_guard_capability(
+            amp, 'udp_guard', consts.GATEWAY_CAPABILITY_UDP_PACKET_DROP,
+            timeout_dict)
+
+    def check_udp_extended_member_weights(self, amp, timeout_dict=None):
+        self._check_udp_guard_capability(
+            amp, 'udp_guard?extended_member_weights=true',
+            consts.GATEWAY_CAPABILITY_UDP_EXTENDED_MEMBER_WEIGHTS,
+            timeout_dict)
+
+    def _check_udp_guard_capability(self, amp, path, capability, timeout_dict):
+        response = self.get(amp, path, timeout_dict=timeout_dict,
                             retry_404=False)
         exc.check_exception(response)
-        if response.status_code != 200 or response.json() != {
-                'udp_packet_drop_v1': True}:
+        if (response.status_code != 200 or
+                response.json() != {capability: True}):
             raise driver_except.AmpDriverNotImplementedError()
 
     def stage_udp_guard(self, amp, listener_id, config, guard,

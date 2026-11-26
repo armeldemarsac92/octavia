@@ -117,8 +117,12 @@ def tcp_weighted_default_pools_available(provider, driver=None):
             getattr(driver, 'supports_backend_tls_hostname', False) is True)
 
 
-def supports_udp_packet_drop(driver):
+def supports_udp_packet_drop(driver, *, extended_weights=False):
     if getattr(type(driver), 'supports_udp_packet_drop', False) is not True:
+        return False
+    if extended_weights and getattr(
+            type(driver), 'supports_udp_extended_member_weights',
+            False) is not True:
         return False
     try:
         amphora_driver = stevedore_driver.DriverManager(
@@ -127,7 +131,11 @@ def supports_udp_packet_drop(driver):
             invoke_on_load=False).driver
     except RuntimeError:
         return False
-    return callable(getattr(amphora_driver, 'apply_udp_member_batch', None))
+    return (
+        callable(getattr(amphora_driver, 'apply_udp_member_batch', None)) and
+        (not extended_weights or getattr(
+            amphora_driver, 'supports_udp_extended_member_weights',
+            False) is True))
 
 
 def remove_providers(providers):

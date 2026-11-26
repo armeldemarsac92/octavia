@@ -12,10 +12,12 @@
 
 from unittest import mock
 
+from octavia_lib.api.drivers import data_models as provider_models
 from oslo_utils import uuidutils
 
 from octavia.amphorae.driver_exceptions import exceptions as driver_except
 from octavia.amphorae.drivers.noop_driver import driver as amphora_noop
+from octavia.api.drivers import utils as driver_utils
 from octavia.common import constants
 from octavia.common import policy
 from octavia.controller.queue.v2 import endpoints
@@ -60,6 +62,12 @@ class TestUDPPacketDrop(base.BaseAPITest):
             group='api_settings', enabled_udp_packet_drop_providers=(
                 ['amphora', 'noop_driver'] if enabled else []))
 
+    def _enroll_extended_weights(self, enabled=True):
+        self.conf.config(
+            group='api_settings',
+            enabled_udp_extended_member_weights_providers=(
+                ['amphora', 'noop_driver'] if enabled else []))
+
     def _pool(self):
         return self.get(self.pool_path).json['pool']
 
@@ -85,6 +93,95 @@ class TestUDPPacketDrop(base.BaseAPITest):
         return mock.patch.object(
             amphora_noop.NoopAmphoraLoadBalancerDriver,
             'apply_udp_member_batch', create=True, **kwargs)
+
+    @staticmethod
+    def _extended_weight_amphora_support():
+        return mock.patch.object(
+            amphora_noop.NoopAmphoraLoadBalancerDriver,
+            'supports_udp_extended_member_weights', True, create=True)
+
+    def test_extended_weights_require_both_capabilities_and_full_udp_batch(
+            self):
+        capability = 'udp_extended_member_weights_v1'
+        members = [
+            {'address': f'192.0.2.{i}', 'protocol_port': 9000,
+             'weight': weight}
+            for i, weight in enumerate((1000, 1, 1), start=3)
+        ]
+        provider_path = (self.PROVIDERS_PATH +
+                         '/amphora/gateway_capabilities')
+
+        self._enroll()
+        with self._amphora_support():
+            self.assertNotIn(capability, self.get(provider_path).json[
+                'gateway_capabilities'])
+            self._batch(0, 1, members, status=501)
+            self._enroll_extended_weights()
+            self.assertNotIn(capability, self.get(provider_path).json[
+                'gateway_capabilities'])
+            self._batch(0, 1, members, status=501)
+
+            with self._extended_weight_amphora_support():
+                self._enroll(False)
+                self.assertNotIn(capability, self.get(provider_path).json[
+                    'gateway_capabilities'])
+                self._enroll()
+                self.assertIn(capability, self.get(provider_path).json[
+                    'gateway_capabilities'])
+                self.create_member(self.pool_id, '192.0.2.3', 9000,
+                                   weight=1000, status=400)
+                stock_member = self.create_member(
+                    self.pool_id, '192.0.2.4', 9000)['member']
+                self.set_lb_status(self.lb_id)
+                self.put(self.batch_path + '/' + stock_member['id'], {
+                    'member': {'weight': 1000}}, status=400)
+                self.create_pool(self.lb_id, 'UDP', 'ROUND_ROBIN',
+                                 members=members, status=400)
+                for query in ('', '?additive_only=true'):
+                    self.put(self.batch_path + query, {'members': members},
+                             status=400)
+                self.put(self.batch_path + '?additive_only=true', {
+                    'members': members,
+                    'udp_packet_drop': {'numerator': 0, 'denominator': 1},
+                }, status=400)
+                tcp_pool = self.create_pool(
+                    self.lb_id, 'TCP', 'ROUND_ROBIN')['pool']
+                self.set_lb_status(self.lb_id)
+                tcp_path = self.MEMBERS_PATH.format(pool_id=tcp_pool['id'])
+                self.put(tcp_path, {'members': members}, status=400)
+                self.put(tcp_path, {
+                    'members': members,
+                    'udp_packet_drop': {'numerator': 0, 'denominator': 1},
+                }, status=400)
+                self._batch(0, 1, [dict(members[0], weight=1000001)],
+                            status=400)
+                for weight in (1000000.5, 1000.0, '1000', 1.5, True, None):
+                    with self.subTest(weight=weight):
+                        self._batch(0, 1, [dict(members[0], weight=weight),
+                                           *members[1:]], status=400)
+                first = self._batch(0, 1, members)
+                self.assertEqual([1, 1, 1000], sorted(
+                    member['weight'] for member in self.get(
+                        self.batch_path).json['members']))
+                with db_api.session().begin() as session:
+                    member = self.member_repo.get(
+                        session, pool_id=self.pool_id, ip_address='192.0.2.3')
+                    provider_member = (
+                        driver_utils.db_member_to_provider_member(member))
+                    converted = provider_models.Member.from_dict(
+                        provider_member.to_dict())
+                    self.assertEqual(1000, converted.weight)
+
+                self._enroll_extended_weights(False)
+                self.assertNotIn(capability, self.get(provider_path).json[
+                    'gateway_capabilities'])
+                self._batch(0, 1, members, status=501)
+                members[0]['weight'] = 256
+                latest = self._batch(0, 1, members)
+                self.assertNotEqual(first['batch_id'], latest['batch_id'])
+                self.assertEqual([1, 1, 256], sorted(
+                    member['weight'] for member in self.get(
+                        self.batch_path).json['members']))
 
     def test_capability_requires_region_and_compatible_driver(self):
         capability = constants.GATEWAY_CAPABILITY_UDP_PACKET_DROP
@@ -128,14 +225,18 @@ class TestUDPPacketDrop(base.BaseAPITest):
             self._batch(1, 4, [member], status=501)
 
         self.put(self.batch_path, {
-            'members': [{'address': '192.0.2.3', 'protocol_port': 9000}],
+            'members': [{'address': '192.0.2.3', 'protocol_port': 9000,
+                         'weight': '2'}],
         }, status=202)
         self.assertEqual(({}, 'batch_update_members'),
                          self.rpc.cast.call_args.args)
+        self.assertEqual(2, self.get(self.batch_path).json['members'][0][
+            'weight'])
         self.assertNotIn('udp_packet_drop', self._pool())
 
     def test_worker_applies_committed_graph_and_retries_failure(self):
         self._enroll()
+        self._enroll_extended_weights()
         amphora_id = uuidutils.generate_uuid()
         with db_api.session().begin() as session:
             self.amphora_repo.create(
@@ -157,13 +258,14 @@ class TestUDPPacketDrop(base.BaseAPITest):
             listener = next(item for item in graph.listeners
                             if item.id == listener_id)
             pool = listener.default_pool
-            desired = {m.ip_address for m in pool.members
+            desired = {m.ip_address: m.weight for m in pool.members
                        if m.provisioning_status not in (
                            constants.PENDING_DELETE, constants.DELETED)}
             observed.append((pool.udp_packet_drop, desired))
             return ((amphora_id, constants.ROLE_STANDALONE),)
 
         with (self._amphora_support(side_effect=apply) as driver,
+              self._extended_weight_amphora_support(),
               mock.patch.object(network_noop.NoopNetworkDriver,
                                 'get_plugged_networks', return_value=[nic]),
               mock.patch.object(network_noop.NoopNetworkDriver,
@@ -194,7 +296,7 @@ class TestUDPPacketDrop(base.BaseAPITest):
             worker.apply_udp_member_batch({}, **latest)
             worker.apply_udp_member_batch({}, **latest)
             self.assertEqual([({'numerator': 1, 'denominator': 4},
-                               {'192.0.2.3'})], observed)
+                               {'192.0.2.3': 1})], observed)
             self.assertEqual(1, len(self._pool()['members']))
             self.assertEqual(constants.ACTIVE,
                              self._pool()['provisioning_status'])
@@ -223,7 +325,7 @@ class TestUDPPacketDrop(base.BaseAPITest):
             retry = self._batch(1, 1)
             self.assertNotEqual(failed, retry)
             worker.apply_udp_member_batch({}, **retry)
-            self.assertEqual(({'numerator': 1, 'denominator': 1}, set()),
+            self.assertEqual(({'numerator': 1, 'denominator': 1}, {}),
                              observed[-1])
             self.assertEqual([], self._pool()['members'])
 
@@ -235,9 +337,10 @@ class TestUDPPacketDrop(base.BaseAPITest):
             self.assertEqual(constants.ERROR,
                              self._pool()['provisioning_status'])
             driver.side_effect = apply
-            worker.apply_udp_member_batch({}, **self._batch(0, 1, [member]))
+            worker.apply_udp_member_batch(
+                {}, **self._batch(0, 1, [dict(member, weight=1000)]))
             self.assertEqual(({'numerator': 0, 'denominator': 1},
-                              {'192.0.2.3'}), observed[-1])
+                              {'192.0.2.3': 1000}), observed[-1])
             self.assertEqual({'numerator': 0, 'denominator': 1},
                              self._pool()['udp_packet_drop'])
             self.assertEqual(constants.ACTIVE,
@@ -245,6 +348,7 @@ class TestUDPPacketDrop(base.BaseAPITest):
 
     def test_delete_replaces_pending_batch_after_opt_out(self):
         self._enroll()
+        self._enroll_extended_weights()
         amphora_id = uuidutils.generate_uuid()
         with db_api.session().begin() as session:
             self.amphora_repo.create(
@@ -264,10 +368,13 @@ class TestUDPPacketDrop(base.BaseAPITest):
         self.create_member(other_pool_id, '192.0.2.5', 9000)
         self.set_lb_status(self.lb_id)
         other_pool_path = self.POOL_PATH.format(pool_id=other_pool_id)
-        member = {'address': '192.0.2.3', 'protocol_port': 9000}
+        member = {'address': '192.0.2.3', 'protocol_port': 9000,
+                  'weight': 1000}
 
-        with self._amphora_support() as apply:
+        with (self._amphora_support() as apply,
+              self._extended_weight_amphora_support()):
             abandoned = self._batch(1, 4, [member])
+            self._enroll_extended_weights(False)
             self._enroll(False)
             self.delete(other_pool_path, status=409)
             with db_api.listener_render_lock(self.lb_id) as acquired:

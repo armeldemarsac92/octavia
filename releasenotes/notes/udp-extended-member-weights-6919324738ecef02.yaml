@@ -1,0 +1,22 @@
+---
+features:
+  - |
+    The Amphora provider can opt into ``udp_extended_member_weights_v1``.
+    Full managed IPv4 round-robin UDP member batches with ``udp_packet_drop``
+    can specify JSON integer weights from 0 through 1,000,000. Weights above
+    256 require both the UDP packet drop and extended weight capabilities.
+upgrade:
+  - |
+    Upgrade the regional API and workers and install compatible Amphora
+    agents and UDP guard helpers on every peer before adding the provider to
+    ``[api_settings] enabled_udp_extended_member_weights_providers``. Keep
+    the provider enabled in ``enabled_udp_packet_drop_providers`` and verify
+    that Keepalived and IPVS support the full weight range. If a peer refuses
+    the extended capability, the controller attempts to close the affected
+    listener on each peer and reports a provisioning failure.
+  - |
+    To withdraw the capability, remove the provider from
+    ``enabled_udp_extended_member_weights_providers``. Complete or replace
+    previously accepted batches and use full managed batches with weights
+    from 0 through 256, or delete the affected pools. Wait for successful
+    provisioning and verified withdrawal before rolling back Amphora images.

@@ -104,8 +104,20 @@ class MemberRootPUT(types.BaseType):
     member = wtypes.wsattr(MemberPUT)
 
 
+class _MemberBatchWeight(wtypes.UserType):
+    # Keep the JSON type until the batch controller knows which weight
+    # contract applies. IntegerType would coerce floats, strings and booleans.
+    basetype = object
+    name = 'member_batch_weight'
+
+
+class MemberBatchPUT(MemberPOST):
+    weight = wtypes.wsattr(_MemberBatchWeight(),
+                           default=constants.DEFAULT_WEIGHT)
+
+
 class MembersRootPUT(types.BaseType):
-    members = wtypes.wsattr([MemberPOST])
+    members = wtypes.wsattr([MemberBatchPUT])
     tcp_connection_rejection = wtypes.wsattr(types.TCPConnectionRejection())
     udp_packet_drop = wtypes.wsattr(types.UDPPacketDrop())
 

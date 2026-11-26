@@ -324,6 +324,12 @@ def gateway_capabilities(driver):
     if (driver.name in api_settings.enabled_udp_packet_drop_providers and
             driver_factory.supports_udp_packet_drop(driver)):
         capabilities.append(constants.GATEWAY_CAPABILITY_UDP_PACKET_DROP)
+        if (driver.name in
+                api_settings.enabled_udp_extended_member_weights_providers and
+                driver_factory.supports_udp_packet_drop(
+                    driver, extended_weights=True)):
+            capabilities.append(
+                constants.GATEWAY_CAPABILITY_UDP_EXTENDED_MEMBER_WEIGHTS)
     if http_long_hostname_available(driver):
         capabilities.append(constants.GATEWAY_CAPABILITY_HTTP_LONG_HOSTNAME)
     if http_literal_path_available(driver):

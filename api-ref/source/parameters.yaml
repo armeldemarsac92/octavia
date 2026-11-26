@@ -2256,8 +2256,10 @@ weight:
     services compared to the other members of the pool. For example, a member
     with a weight of 10 receives five times as many requests as a member with a
     weight of 2. A value of 0 means the member does not receive new connections
-    but continues to service existing connections. A valid value is
-    from ``0`` to ``256``. Default is ``1``.
+    but continues to service existing connections. The standard range is
+    ``0`` to ``256``. A managed UDP member can have a weight up to
+    ``1000000`` if it was set in a full batch with the regional
+    ``udp_extended_member_weights_v1`` capability. Default is ``1``.
   in: body
   required: true
   type: integer
@@ -2269,6 +2271,15 @@ weight-optional:
     weight of 2. A value of 0 means the member does not receive new connections
     but continues to service existing connections. A valid value is
     from ``0`` to ``256``. Default is ``1``.
+  in: body
+  required: false
+  type: integer
+weight-batch-optional:
+  description: |
+    Relative member weight. Default is ``1``. The standard range is
+    ``0`` to ``256``. A full batch with ``udp_packet_drop`` can set
+    weights from ``0`` to ``1000000`` when the regional provider advertises
+    ``udp_extended_member_weights_v1``.
   in: body
   required: false
   type: integer
